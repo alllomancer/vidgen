@@ -263,10 +263,12 @@ assert vidgen.local_out("video", "j1", "m1").endswith("/m1.mp4") and vidgen.loca
 assert vidgen.permanent_download_error(IsADirectoryError(21, "Is a directory"))
 assert not vidgen.permanent_download_error(TimeoutError("The read operation timed out"))
 jobs_store = {"t" * 32: {"type": "video", "out": "/dl/test", "status": "running", "submitted_at": 0}}
-real = (vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked)
+real = (vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked,
+        vidgen.maybe_sync_avatar_media)
 vidgen.load_jobs = lambda: jobs_store
 vidgen.save_jobs = lambda j: None
 vidgen.maybe_sync_loras = lambda: None
+vidgen.maybe_sync_avatar_media = lambda: None
 vidgen.locked = __import__("contextlib").nullcontext
 vidgen.api = lambda m, p, b=None: {"status": "done", "downloads": {"video": "https://x/v.mp4"}}
 vidgen.fetch_results = lambda local, remote: (_ for _ in ()).throw(IsADirectoryError(21, "Is a directory"))
@@ -279,7 +281,8 @@ vidgen.fetch_results = lambda local, remote: (_ for _ in ()).throw(TimeoutError(
 for _ in range(5):
     vidgen.check_once()
 assert jobs_store["u" * 32]["status"] == "running", "network errors keep retrying"
-(vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked) = real
+(vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked,
+ vidgen.maybe_sync_avatar_media) = real
 
 # parallel transfers: multipart uploads (parts in parallel, completed in order; aborted on failure) and
 # ranged parallel downloads (pieces reassembled exactly; servers without ranges get one stream)
@@ -636,6 +639,69 @@ gets.clear()
 assert vidgen.lora_sync() == 0 and gets == [], gets
 fcntl.flock(held, fcntl.LOCK_UN)
 held.close()
+# avatar media: ready media is copied to <download dir>/avatars/<name>/, changed files only, bad names refused
+media_files = {"photo_01.png": b"P" * 7, "clip_1.mp4": b"V" * 9}
+AV = {"default": "mira", "avatars": [{"name": "mira", "media": {"state": "ready", "updated_at": 5}},
+                                     {"name": "bob", "media": {"state": "clips"}},
+                                     {"name": "Bad/../x", "media": {"state": "ready", "updated_at": 1}}]}
+mgets, mfetched = [], []
+
+
+def media_api(m, p, b=None):
+    mgets.append(p)
+    if p == "/avatars":
+        return AV
+    assert p == "/avatars/mira/media", p
+    return {"state": "ready", "files": [{"name": n, "size": len(d), "url": f"https://m/{n}"} for n, d in media_files.items()]
+            + [{"name": "media.json", "size": None, "url": "https://m/media.json"},
+               {"name": "../evil.sh", "size": 1, "url": "https://m/evil"}]}
+
+
+def media_download(url, path):
+    mfetched.append(url)
+    name = url.rsplit("/", 1)[1]
+    with open(path + ".part", "wb") as f:
+        f.write(media_files.get(name, b"{}"))
+    os.replace(path + ".part", path)
+
+
+vidgen.api, vidgen.download = media_api, media_download
+assert vidgen.avatar_media_sync() == 1
+md = os.path.join(dl_root, "avatars", "mira")
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"V" * 9 and os.path.exists(os.path.join(md, "media.json"))
+assert "https://m/evil" not in mfetched and not os.path.exists(os.path.join(dl_root, "avatars", "evil.sh"))
+assert not os.path.exists(os.path.join(dl_root, "avatars", "bob")), "media not ready: nothing copied"
+mgets.clear(), mfetched.clear()
+assert vidgen.avatar_media_sync() == 0 and mgets == ["/avatars"] and not mfetched, "complete copy: no links asked"
+AV["avatars"][0]["media"]["updated_at"] = 6  # new media: fetched in full
+media_files["clip_1.mp4"] = b"W" * 11
+assert vidgen.avatar_media_sync() == 1 and "https://m/clip_1.mp4" in mfetched and "https://m/photo_01.png" in mfetched
+os.remove(os.path.join(md, "clip_1.mp4"))  # same media, a file deleted here: only that file is fetched again
+mfetched.clear()
+assert vidgen.avatar_media_sync() == 1 and mfetched == ["https://m/clip_1.mp4"], mfetched
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"W" * 11
+AV["avatars"][0]["media"]["updated_at"] = 7  # a remake: same sizes are fetched again, removed files go
+media_files.pop("photo_01.png")
+media_files["clip_1.mp4"] = b"X" * 11
+mfetched.clear()
+vidgen.avatar_media_sync()
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"X" * 11, "same size, new media: fetched again"
+assert not os.path.exists(os.path.join(md, "photo_01.png")), "a file the server no longer lists is removed"
+real_ams = vidgen.avatar_media_sync
+calls_ams = []
+vidgen.avatar_media_sync = lambda: calls_ams.append(1) or 0
+vidgen.maybe_sync_avatar_media()
+vidgen.maybe_sync_avatar_media()
+assert calls_ams == [1], "at most every LORA_SYNC_EVERY seconds"
+vidgen.avatar_media_sync = lambda: (_ for _ in ()).throw(vidgen.ApiError("network error: down"))
+os.remove(os.path.join(vidgen.STATE_DIR, "avatar_media_sync.json"))
+vidgen.maybe_sync_avatar_media()  # logged, never breaks the watcher
+vidgen.avatar_media_sync = real_ams
+vidgen.download = real_dl
+posted_m = []
+vidgen.api = lambda m, p, b=None: posted_m.append((m, p)) or {"name": "mira", "media": {"state": "queued"}}
+vidgen.avatar_command(NS(action="media", args=[], name="Mira"))
+assert posted_m == [("POST", "/avatars/mira/media")]
 vidgen.download_dir, vidgen.STATE_DIR = real_download_dir, real_state
 # avatars: --no-krea-lora, krea-train, and the Krea LoRA state in avatar list
 sent = []
@@ -738,6 +804,11 @@ assert posted[-1][2]["krea_lora"] is False, "the choice made when generating"
 ui.avatar_krea_lora("mira")
 assert posted[-1][:2] == ("POST", "/avatars/mira/krea-lora")
 _stubs.expect_error(ui.avatar_krea_lora, "Bad Name", contains="avatar name")
+ui.avatar_media("mira", "POST")
+assert posted[-1][:2] == ("POST", "/avatars/mira/media")
+ui.avatar_media("Mira", "GET")
+assert posted[-1][:2] == ("GET", "/avatars/mira/media")
+_stubs.expect_error(ui.avatar_media, "../x", "GET", contains="avatar name")
 # the LoRA list marks versions copied to this computer
 vidgen.api = lambda m, p, b=None: {"loras": [{"name": "moody", "current": 1, "versions": [{"version": 1}, {"version": 2}]}]}
 vidgen.local_lora_versions = lambda: {("moody", 1): 40}

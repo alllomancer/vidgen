@@ -406,6 +406,14 @@ def avatar_krea_lora(name):
     return vidgen.api("POST", f"/avatars/{name}/krea-lora")
 
 
+def avatar_media(name, method):
+    """GET: the avatar's media state and file links; POST: make (new) photos + 2 s clips for it."""
+    name = str(name or "").strip().lower()
+    if not THEME_NAME.match(name):
+        raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    return vidgen.api(method, f"/avatars/{name}/media", {} if method == "POST" else None)
+
+
 def list_loras():
     """GET /loras, with `local: true` on versions copied to this computer (<download dir>/loras/)."""
     r = vidgen.api("GET", "/loras")
@@ -526,6 +534,9 @@ def make_handler(port, token):
                 m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})/krea-lora", path)
                 if method == "POST" and m:
                     return self._send(202, avatar_krea_lora(m.group(1)))
+                m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})/media", path)
+                if m and method in ("GET", "POST"):
+                    return self._send(202 if method == "POST" else 200, avatar_media(m.group(1), method))
                 m = re.fullmatch(r"/api/loras/([a-z0-9][a-z0-9_-]{0,31})/(current|preview)", path)
                 if m and method == "PUT" and m.group(2) == "current":
                     return self._send(200, use_lora(m.group(1), self._body()))

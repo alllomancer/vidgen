@@ -768,16 +768,191 @@ def _update_build(client, name, job_id, created_at, **fields):
     return True
 
 
+def _current_media(client, name, job_id, created_at):
+    """(avatar, media) while this job is still the one making the avatar's media, else None."""
+    avatar = _s3_json(f"avatars/{client}/{name}/avatar.json")
+    media = (avatar or {}).get("media") or {}
+    if not avatar or media.get("job_id") != job_id:
+        return None
+    if created_at is not None and avatar.get("created_at") != created_at:
+        return None
+    return avatar, media
+
+
+def _update_media(client, name, job_id, created_at, **fields):
+    """Update the avatar's media record from a fresh read, only while this job owns it."""
+    cur = _current_media(client, name, job_id, created_at)
+    if not cur:
+        return False
+    avatar, media = cur
+    avatar["media"] = dict(media, **fields)
+    s3.put_object(Bucket=BUCKET, Key=f"avatars/{client}/{name}/avatar.json", Body=json.dumps(avatar).encode(),
+                  ContentType="application/json")
+    return True
+
+
+def _one_person(kept, job_id):
+    """Keep the photos that show exactly one person (the VLM counts); returns (kept, dropped)."""
+    progress(job_id, "checking each photo shows one person")
+    ok = [(p, scene) for p, scene in kept if models.count_people(p) == 1]
+    return ok, len(kept) - len(ok)
+
+
+def _make_photo_set(job_id, params, workdir, avatar, trigger, purpose):
+    """The avatar's photo set: one Qwen photo per KREA_DATASET_PROMPTS entry at 1024x1024, content-filtered.
+    Returns [(path, scene)] of the kept photos and the number made; too few kept raises FilteredOut."""
+    keys = [i["key"] for i in avatar.get("images") or []] or [avatar["reference_key"]]
+    refs = load_references(keys[:3], workdir, "avatar")
+    base = int.from_bytes(os.urandom(4), "big")
+    prompts = photos.KREA_DATASET_PROMPTS[:int(params.get("count") or len(photos.KREA_DATASET_PROMPTS))]
+    paths = []
+    for i, scene in enumerate(prompts, 1):
+        progress(job_id, f"photo {i}/{len(prompts)} {purpose}")
+        image = models.make_photo(refs, photos.photo_prompt(scene, len(refs), keep_outfit=False), photos.NEGATIVE,
+                                  1024, 1024, base + i)
+        path = os.path.join(workdir, f"{trigger}_{i:02d}.png")
+        image.save(path)
+        paths.append(path)
+    progress(job_id, "content filter on the photo set")
+    scores = krea.score_images(paths, lambda m: progress(job_id, m))
+    kept = [(p, scene) for p, scene, sc in zip(paths, prompts, scores) if not krea.flagged(sc)]
+    if len(kept) < AVATAR_DATASET_MIN:
+        raise krea.FilteredOut(f"the photo set was flagged by the content filter ({len(paths) - len(kept)} of "
+                               f"{len(paths)} photos)")
+    kept, people_dropped = _one_person(kept, job_id)
+    if len(kept) < AVATAR_DATASET_MIN:
+        raise krea.FilteredOut(f"only {len(kept)} of {len(paths)} photos show exactly one person; use reference "
+                               "images of just this person")
+    return kept, len(paths), people_dropped
+
+
+AVATAR_CLIPS = 4
+
+
+class MediaFailed(Exception):
+    pass
+
+
+def _avatar_media(client, name, job_id, created, kept, workdir, trigger):
+    """The avatar's media: the kept photos stored first, then four 2 s clips from kept photos (positions 0,
+    n/4, n/2, 3n/4), content-filtered together after rendering (each filter call unloads Wan), stored with
+    media.json under avatars/<client>/<name>/media/, and the media record set ready. Raises MediaFailed
+    (after marking the media failed) when no clip is left; the photos stay stored."""
+    stale = {"media": "skipped: the avatar was replaced or newer media was requested"}
+    if not _update_media(client, name, job_id, created, state="clips"):
+        return stale
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = {"created_at": int(time.time()), "job_id": job_id, "photos": [], "clips": []}
+    for i, (path, scene) in enumerate(kept, 1):
+        fname = f"photo_{i:02d}.png"
+        s3.upload_file(path, BUCKET, prefix + fname, ExtraArgs={"ContentType": "image/png"})
+        doc["photos"].append({"file": fname, "scene": scene, "size": os.path.getsize(path)})
+    n = len(kept)
+    picks = [kept[i * n // AVATAR_CLIPS][0] for i in range(AVATAR_CLIPS)]
+    base = int.from_bytes(os.urandom(4), "big")
+    rendered = []
+    for i, (photo, motion) in enumerate(zip(picks, photos.AVATAR_CLIP_MOTIONS), 1):
+        if not _current_media(client, name, job_id, created):  # replaced meanwhile: stop using the GPU
+            return stale
+        progress(job_id, f"clip {i}/{AVATAR_CLIPS} of the avatar")
+        prompt = f"{trigger} {motion}, natural light, static camera"
+        out = os.path.join(workdir, f"clip_{i}.mp4")
+        stills = models.render_clip(photo, prompt, out, base + i)
+        rendered.append(({"path": out, "prompt": prompt, "motion": motion, "seed": base + i,
+                          "photo": os.path.basename(photo)}, stills))
+    progress(job_id, "content filter on the clips")
+    scores = krea.score_images([p for _, stills in rendered for p in stills])
+    clips, dropped = [], 0
+    for k, (clip, stills) in enumerate(rendered):
+        if any(krea.flagged(sc) for sc in scores[k * 3:k * 3 + len(stills)]) or \
+                models.count_people(stills[len(stills) // 2]) != 1:  # flagged, or not just this one person
+            dropped += 1
+        else:
+            clips.append(clip)
+    if not clips:
+        _update_media(client, name, job_id, created, state="failed", photos=n, clips=0,
+                      error=f"all {AVATAR_CLIPS} clips were flagged by the content filter")
+        raise MediaFailed(f"all {AVATAR_CLIPS} clips were flagged by the content filter")
+    if not _current_media(client, name, job_id, created):
+        return stale
+    for i, c in enumerate(clips, 1):
+        fname = f"clip_{i}.mp4"
+        s3.upload_file(c["path"], BUCKET, prefix + fname, ExtraArgs={"ContentType": "video/mp4"})
+        doc["clips"].append({"file": fname, "size": os.path.getsize(c["path"]),
+                             **{k: c[k] for k in ("prompt", "motion", "seed", "photo")}})
+    s3.put_object(Bucket=BUCKET, Key=prefix + "media.json", Body=json.dumps(doc).encode(),
+                  ContentType="application/json")
+    _update_media(client, name, job_id, created, state="ready", photos=n, clips=len(clips),
+                  preview="clip_1.mp4", updated_at=doc["created_at"], error=None)
+    return {"clips": len(clips), "clips_filtered": dropped, "_clips": [(c["path"], c["motion"]) for c in clips]}
+
+
+def _dataset_photos(client, lora, version, workdir, trigger):
+    """The kept photos of an avatar's Krea dataset (datasets/<client>/<lora>/v<N>/), downloaded:
+    [(path, scene)] in dataset order, or None when the dataset isn't there."""
+    prefix = f"datasets/{client}/{lora}/v{int(version)}/"
+    manifest = _s3_json(prefix + "manifest.json")
+    if not manifest or not manifest.get("files"):
+        return None
+    items = (_s3_json(prefix + "captions.json") or {}).get("items") or {}
+    kept = []
+    for i, f in enumerate(manifest["files"], 1):
+        path = os.path.join(workdir, f"ds_{i:02d}_{os.path.basename(f['path'])}")
+        s3.download_file(BUCKET, prefix + "raw/" + f["path"], path)
+        caption = items.get(f"p{i:04d}.png") or ""
+        kept.append((path, caption[len(trigger) + 2:] if caption.startswith(f"{trigger}, ") else caption))
+    return kept
+
+
+def _media_photoset(job, params, workdir):
+    """An avatar_photoset job without a Krea LoRA build: the photo set for the avatar's media only."""
+    client, job_id = job["client"], job["job_id"]
+    name, trigger, created = params["avatar"], params.get("trigger") or params["avatar"], params.get("avatar_created_at")
+    cur = _current_media(client, name, job_id, created)
+    if not cur:
+        return {"skipped": "the avatar was replaced or newer media was requested"}
+    try:
+        _update_media(client, name, job_id, created, state="photos")
+        kl = cur[0].get("krea_lora") or {}
+        # Reuse the photos of a Krea LoRA that is ready for this avatar (not one kept from a replaced avatar).
+        ready = (kl.get("ready") or {}) if params.get("media_only") and kl.get("state") == "ready" else {}
+        kept = None
+        if ready.get("lora") and ready.get("version"):
+            try:
+                kept = _dataset_photos(client, ready["lora"], ready["version"], workdir, trigger)
+            except (ClientError, OSError, KeyError, ValueError) as e:  # unreadable dataset: make new photos
+                log(event="media_dataset_unreadable", job_id=job_id, error=str(e)[:200])
+        made, people_dropped = len(kept or []), 0
+        if kept:  # the reused photos get the one-person check too (sets made before it existed)
+            kept, people_dropped = _one_person(kept, job_id)
+            if len(kept) < AVATAR_DATASET_MIN:
+                kept = None
+        if not kept:  # no usable Krea dataset to reuse: make the photo set
+            kept, made, people_dropped = _make_photo_set(job_id, params, workdir, cur[0], trigger, "of the avatar")
+        if not _current_media(client, name, job_id, created):
+            return {"skipped": "the avatar was replaced or newer media was requested"}
+        result = {"kept": len(kept), "filtered": made - len(kept) - people_dropped, "people_dropped": people_dropped,
+                  **_avatar_media(client, name, job_id, created, kept, workdir, trigger)}
+        clips = result.pop("_clips", [])
+        return dict(result, **_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+    except Exception as e:
+        _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+        raise
+
+
 def run_avatar_photoset(job, params, workdir):
     """Qwen photos of the avatar for its Krea 2 LoRA: one per KREA_DATASET_PROMPTS entry at 1024x1024, each
     checked by the Krea content filter (flagged ones dropped; fewer than AVATAR_DATASET_MIN -> fail), written
     as the dataset datasets/<client>/<lora>/v<N>/ (manifest, raw/, captions.json starting with the trigger =
     the avatar name), then a krea2 train job is queued for the trainer. Every avatar write checks that this
     job is still the avatar's current build. docs/specs/2026-11-24-krea-avatar-lora.md"""
+    if params.get("krea_lora") is False:  # media only (no Krea LoRA for this avatar, or media for an existing one)
+        return _media_photoset(job, params, workdir)
     client, job_id = job["client"], job["job_id"]
     name, lora, trigger, version = params["avatar"], params["lora"], params["trigger"], int(params["version"])
     created = params.get("avatar_created_at")
     if not TRAIN_QUEUE_URL:
+        _update_media(client, name, job_id, created, state="failed", error="the trainer is not deployed")
         raise RuntimeError("the trainer is not deployed (training_enabled in Terraform); can't train the Krea LoRA")
     cur = _current_build(client, name, job_id, created)
     if not cur:
@@ -790,12 +965,133 @@ def run_avatar_photoset(job, params, workdir):
                       job_ids=[j for j in kl.get("job_ids") or [] if j != train_id] + [train_id])
         if existing.get("status") == "queued":  # a duplicate message is harmless: the trainer skips finished jobs
             sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
-        return {"skipped": "the train job is already queued", "train_job_id": train_id}
+        result = {"skipped": "the train job is already queued", "train_job_id": train_id}
+        media = (_current_media(client, name, job_id, created) or (None, {}))[1]
+        if media and media.get("state") != "ready":  # the media wasn't finished: make it from this build's photos
+            try:
+                kept = _dataset_photos(client, lora, version, workdir, trigger)
+                if kept:
+                    kept, _ = _one_person(kept, job_id)
+                if kept:
+                    result.update(_avatar_media(client, name, job_id, created, kept, workdir, trigger))
+                    clips = result.pop("_clips", [])
+                    result.update(_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+            except models.JobCancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - as in _photoset: media never fails the Krea build
+                _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+                result["media_error"] = str(e)[:500]
+        return result
     try:
         return _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger, version, created)
-    except Exception as e:
+    except Exception as e:  # the photo set failed: the Krea build and the media it was for
         _update_build(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
         raise
+
+
+AVATAR_WAN_STEPS = 1000  # per expert; spike 2026-11-24: likeness held through 50 s, ~54 min for both experts
+
+
+def _current_wan(client, name, job_id, created_at):
+    """(avatar, wan_lora) while this job is still the avatar's current Wan LoRA build, else None."""
+    avatar = _s3_json(f"avatars/{client}/{name}/avatar.json")
+    wl = (avatar or {}).get("wan_lora") or {}
+    if not avatar or job_id not in (wl.get("job_ids") or []):
+        return None
+    if created_at is not None and avatar.get("created_at") != created_at:
+        return None
+    return avatar, wl
+
+
+def _update_wan(client, name, job_id, created_at, **fields):
+    cur = _current_wan(client, name, job_id, created_at)
+    if not cur:
+        return False
+    avatar, wl = cur
+    avatar["wan_lora"] = dict(wl, **fields)
+    s3.put_object(Bucket=BUCKET, Key=f"avatars/{client}/{name}/avatar.json", Body=json.dumps(avatar).encode(),
+                  ContentType="application/json")
+    return True
+
+
+def _wan_train_job_id(photoset_job_id):
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"vidgen-wan-train:{photoset_job_id}").hex
+
+
+def _wan_step(client, name, job_id, created, params, kept, clips, trigger):
+    """The avatar's Wan LoRA build: kept photos + clips as datasets/<client>/<wan lora>/v<N>/ (captions keyed as
+    the trainer names items: photo i -> p{i:04d}.png, clip at manifest index i -> s{i:04d}_00.mp4), then one
+    t2v train job (id derived from this job), linked on the avatar before it is sent."""
+    lora, version = params["wan_lora_name"], int(params["wan_version"])
+    cur = _current_wan(client, name, job_id, created)
+    if not cur:
+        return {"wan": "skipped: the avatar was replaced or a newer Wan LoRA build started"}
+    train_id = _wan_train_job_id(job_id)
+    existing = jobs.get_item(Key={"job_id": train_id}).get("Item")
+    if existing:  # redelivered after the train job was written: link and (if still queued) re-send only
+        _update_wan(client, name, job_id, created, state="training",
+                    job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
+        if existing.get("status") == "queued":
+            sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
+        return {"wan_train_job_id": train_id}
+    if not TRAIN_QUEUE_URL:
+        raise RuntimeError("the trainer is not deployed; can't train the Wan LoRA")
+    progress(job_id, "writing the Wan LoRA dataset")
+    dataset = f"{lora}/v{version}"
+    prefix = f"datasets/{client}/{dataset}/"
+    files, items = [], {}
+    for i, (path, scene) in enumerate(kept, 1):
+        fname = f"p_{i:02d}.png"
+        s3.upload_file(path, BUCKET, prefix + "raw/" + fname, ExtraArgs={"ContentType": "image/png"})
+        files.append({"path": fname, "size": os.path.getsize(path)})
+        items[f"p{i:04d}.png"] = f"{trigger}, {scene}"
+    for k, (path, motion) in enumerate(clips, 1):
+        fname = f"c_{k}.mp4"
+        s3.upload_file(path, BUCKET, prefix + "raw/" + fname, ExtraArgs={"ContentType": "video/mp4"})
+        files.append({"path": fname, "size": os.path.getsize(path)})
+        items[f"s{len(kept) + k:04d}_00.mp4"] = f"{trigger}, {motion}, natural light"
+    fingerprint = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
+    now = int(time.time())
+    manifest = {"kind": "character", "trigger": trigger, "files": files, "file_count": len(files),
+                "total_bytes": sum(f["size"] for f in files), "updated_at": now, "source": "avatar", "avatar": name}
+    captions = {"trigger": trigger, "fingerprint": fingerprint, "edited_at": now, "source": "avatar", "items": items}
+    for key, doc in (("manifest.json", manifest), ("captions.json", captions)):
+        s3.put_object(Bucket=BUCKET, Key=prefix + key, Body=json.dumps(doc).encode(), ContentType="application/json")
+    if not _current_wan(client, name, job_id, created):
+        return {"wan": "skipped: the avatar was replaced or a newer Wan LoRA build started"}
+    tparams = {"dataset": dataset, "model": "t2v", "lora": lora, "version": version, "trigger": trigger,
+               "avatar": name, "avatar_created_at": created, "steps": AVATAR_WAN_STEPS, "kind": "character",
+               "speed": "standard", "captions_only": False, "files": len(files), "dataset_updated_at": now,
+               "fingerprint": fingerprint}
+    try:
+        jobs.put_item(Item={"job_id": train_id, "client": client, "type": "train", "params": json.dumps(tparams),
+                            "status": "queued", "created_at": now, "expires_at": now + JOB_RETENTION_DAYS * 86400},
+                      ConditionExpression="attribute_not_exists(job_id)")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+    cur = _current_wan(client, name, job_id, created)
+    if cur:
+        _update_wan(client, name, job_id, created, state="training",
+                    job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
+    sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
+    jobs.put_item(Item={"job_id": "_control_trainer", "client": "_system", "hold": False})
+    return {"wan_train_job_id": train_id, "wan_dataset": prefix}
+
+
+def _maybe_wan(client, name, job_id, created, params, kept, clips, trigger):
+    """The Wan step when this build asks for it; a failure marks the Wan LoRA failed, never the job."""
+    if not params.get("wan_lora") or params.get("media_only"):
+        return {}
+    try:
+        return _wan_step(client, name, job_id, created, params, kept, clips, trigger)
+    except models.JobCancelled:
+        _update_wan(client, name, job_id, created, state="failed", error="cancelled")
+        raise
+    except Exception as e:  # noqa: BLE001 - the Krea build and the media are already done
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+        return {"wan_error": str(e)[:500]}
 
 
 def _train_job_id(photoset_job_id):
@@ -805,24 +1101,11 @@ def _train_job_id(photoset_job_id):
 
 def _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger, version, created):
     _update_build(client, name, job_id, created, state="photos")
-    keys = [i["key"] for i in avatar.get("images") or []] or [avatar["reference_key"]]
-    refs = load_references(keys[:3], workdir, "avatar")
-    base = int.from_bytes(os.urandom(4), "big")
-    prompts = photos.KREA_DATASET_PROMPTS[:int(params.get("count") or len(photos.KREA_DATASET_PROMPTS))]
-    paths = []
-    for i, scene in enumerate(prompts, 1):
-        progress(job_id, f"photo {i}/{len(prompts)} for the Krea LoRA")
-        image = models.make_photo(refs, photos.photo_prompt(scene, len(refs), keep_outfit=False), photos.NEGATIVE,
-                                  1024, 1024, base + i)
-        path = os.path.join(workdir, f"{trigger}_{i:02d}.png")
-        image.save(path)
-        paths.append(path)
-    progress(job_id, "content filter on the photo set")
-    scores = krea.score_images(paths, lambda m: progress(job_id, m))
-    kept = [(p, scene) for p, scene, sc in zip(paths, prompts, scores) if not krea.flagged(sc)]
-    if len(kept) < AVATAR_DATASET_MIN:
-        raise krea.FilteredOut(f"the photo set was flagged by the content filter ({len(paths) - len(kept)} of "
-                               f"{len(paths)} photos); no Krea LoRA for this avatar")
+    _update_media(client, name, job_id, created, state="photos")
+    try:
+        kept, made, people_dropped = _make_photo_set(job_id, params, workdir, avatar, trigger, "for the Krea LoRA")
+    except krea.FilteredOut as e:
+        raise krea.FilteredOut(f"{e}; no Krea LoRA for this avatar") from e
     if not _current_build(client, name, job_id, created):
         return {"skipped": "the avatar was replaced or a newer Krea LoRA build started"}
     dataset = f"{lora}/v{version}"
@@ -861,7 +1144,21 @@ def _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger,
                       job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
     sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
     jobs.put_item(Item={"job_id": "_control_trainer", "client": "_system", "hold": False})  # as the API does
-    return {"kept": len(kept), "filtered": len(paths) - len(kept), "train_job_id": train_id, "dataset": prefix}
+    result = {"kept": len(kept), "filtered": made - len(kept) - people_dropped, "people_dropped": people_dropped,
+              "train_job_id": train_id, "dataset": prefix}
+    clips = []
+    if _current_media(client, name, job_id, created):  # the same job makes the avatar's media
+        try:
+            result.update(_avatar_media(client, name, job_id, created, kept, workdir, trigger))
+            clips = result.pop("_clips", [])
+        except models.JobCancelled:
+            _update_media(client, name, job_id, created, state="failed", error="cancelled")
+            raise
+        except Exception as e:  # noqa: BLE001 - media must not fail the Krea build; its training is queued
+            _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+            result["media_error"] = str(e)[:500]
+    result.update(_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+    return result
 
 
 RUNNERS = {"avatar_photoset": run_avatar_photoset, "lora_preview": run_lora_preview, "video": run_video, "describe": run_describe, "story": run_story, "write": run_write, "avatar": run_avatar,
@@ -876,6 +1173,13 @@ def process(job_id, receipt):
     if job.get("cancel_requested"):
         set_status(job_id, "cancelled", finished_at=int(time.time()))
         log(event="cancelled", job_id=job_id, before_start=True)
+        if job.get("type") == "avatar_photoset":  # release the avatar's build/media records this job owned
+            p = json.loads(job.get("params") or "{}")
+            if p.get("avatar"):
+                _update_build(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                              state="failed", error="cancelled")
+                _update_media(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                              state="failed", error="cancelled")
         return
 
     params = json.loads(job["params"])

@@ -69,6 +69,13 @@ data "aws_iam_policy_document" "worker" {
     ]
   }
 
+  # Avatar media for an existing avatar reuses the photos of its Krea LoRA dataset.
+  statement {
+    sid       = "ReadAvatarDatasets"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.data.arn}/datasets/*/avatar-*"]
+  }
+
   statement {
     sid       = "WriteOutputs"
     actions   = ["s3:PutObject"]
@@ -83,6 +90,8 @@ data "aws_iam_policy_document" "worker" {
     resources = [
       "${aws_s3_bucket.data.arn}/datasets/*/avatar-*",
       "${aws_s3_bucket.data.arn}/avatars/*/avatar.json",
+      # Avatar media: photos, 2 s clips and media.json (docs/specs/2026-11-24-avatar-media.md).
+      "${aws_s3_bucket.data.arn}/avatars/*/media/*",
     ]
   }
 

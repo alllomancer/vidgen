@@ -83,6 +83,8 @@ resource "aws_apigatewayv2_route" "routes" {
     "GET /avatars/{name}/history",
     "POST /avatars/{name}/restore",
     "POST /avatars/{name}/krea-lora",
+    "POST /avatars/{name}/media",
+    "GET /avatars/{name}/media",
     "GET /datasets",
     "GET /datasets/{name}",
     "POST /datasets/{name}/uploads",

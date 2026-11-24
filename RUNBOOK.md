@@ -163,6 +163,12 @@ Every `video` and `story` stars your **default avatar**, so the same character a
 - **Using it**: `vidgen photos --model krea2 --avatar N --prompt "N on a ferry at dusk"` (dashboard: Photos, the avatar, "Krea 2 with this avatar's Krea LoRA"); videos/stories with `--image-model krea2` and that avatar get a Krea first frame with its LoRA (videos: exactly one avatar; stories: shots with just that avatar). An avatar without a ready LoRA is refused for Krea with its state.
 - **Content filter**: as for every Krea image; avatars whose photo sets are flagged get no Krea LoRA. Use it only for people who agreed: a likeness LoRA can put them in any image.
 - **Needs** `training_enabled = true` and access to `krea/Krea-2-Raw` (accept its license on huggingface.co with the account of the SSM token).
+
+**Avatar media (photos + 2 s clips), for every avatar:** creating or replacing an avatar also makes its media, with or without a Krea LoRA.
+- **What**: the photo set above (16-24 photos that pass the content filter) and four 2 s clips (33 frames at 16 fps, 832x832, no sound): Wan animates four of the photos with a gentle motion (a slow head turn and smile, a step towards the camera, a look around, a soft laugh). Each clip's first, middle and last frame go through the content filter; flagged clips are dropped (photos are kept even when every clip is). The first clip is the preview. About 6-8 min on the render box on top of the photo set. They are also training material for the planned avatar Wan LoRA.
+- **Where**: stored as `avatars/<client>/<name>/media/` (`photo_NN.png`, `clip_N.mp4`, `media.json` with the prompts, motions and seeds) and copied by the watcher to `<download dir>/avatars/<name>/` (every 10 min, changed files only).
+- **State**: `vidgen avatar list` and the dashboard show `queued`, `photos`, `clips`, `ready` (photo and clip counts) or `failed` (with the reason). A media failure never affects the Krea LoRA.
+- **Existing avatars**: `vidgen avatar media --name N` (dashboard: "Make media" / "Remake media"; "Play clip" plays the preview). With a ready Krea LoRA its photo set is reused (clips only, ~6-8 min); otherwise the photos are made first (~25 min). One media job at a time per avatar.
 - **Local copies of every LoRA**: Wan and Krea, trained, uploaded or avatar LoRAs are copied to `<download dir>/loras/<name>/v<N>/` by the watcher (final files and `lora.json`; `vidgen lora pull [NAME] [--checkpoints]` on demand). `vidgen lora list` marks them `[on this Mac]` and shows the total size.
 
 **First run:** if no avatar exists, `vidgen video …` / `vidgen story …` asks before submitting:
@@ -655,6 +661,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 |---|---|
 | `vidgen avatar list` | your avatars, image counts, the default (*), Krea LoRA state |
 | `vidgen avatar krea-train --name N` | build (a new version of) the avatar's Krea 2 LoRA (~1.5 h GPU) |
+| `vidgen avatar media --name N` | photos + four 2 s clips of the avatar (made for every new avatar; this is for existing ones), copied to `<download dir>/avatars/N/` |
 | `  --no-krea-lora` (refresh, pick) | don't build the avatar's Krea 2 LoRA |
 | `vidgen avatar refresh --name N --image a.jpg [--image b.jpg ...] --describe "..."` | create or replace an avatar from 1-12 images (becomes the default) |
 | `vidgen avatar refresh --name N --describe "..." [--candidates 4]` | generate candidates from a description, then `pick` |

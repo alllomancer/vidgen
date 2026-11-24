@@ -478,11 +478,32 @@ assert av["krea_lora"]["state"] == "queued" and av["krea_lora"]["trigger"] == "a
 pj = [q for q in queued if q.get("type") == "avatar_photoset"]
 assert len(pj) == 1 and av["krea_lora"]["job_ids"] == [pj[0]["job_id"]]
 pp = json.loads(pj[0]["params"])
-assert {k: v for k, v in pp.items() if k != "avatar_created_at"} == {"avatar": "ava", "lora": "avatar-ava", "version": 1, "trigger": "ava", "count": 24}, pp
+assert {k: v for k, v in pp.items() if k != "avatar_created_at"} == {"avatar": "ava", "lora": "avatar-ava", "version": 1, "trigger": "ava", "count": 24, "krea_lora": True,
+                                                                     "wan_lora": True, "wan_lora_name": "avatar-ava-wan", "wan_version": 1}, pp
+assert av["wan_lora"] == {"state": "queued", "lora": "avatar-ava-wan", "version": 1, "trigger": "ava", "job_ids": [pj[0]["job_id"]]}, av.get("wan_lora")
+assert body(r)["wan_lora"]["state"] == "queued"
 assert pp["avatar_created_at"] == av["created_at"]
+assert av["media"] == {"state": "queued", "job_id": pj[0]["job_id"], "created_at": av["created_at"]}, av.get("media")
+assert body(r)["media"]["state"] == "queued"
 queued.clear()
 r = h.create_avatar("m", {"name": "nolora", "upload_keys": uploads("n1.png"), "krea_lora": False})
-assert body(r)["krea_lora"]["state"] == "skipped" and not [q for q in queued if q.get("type")]
+nj = [q for q in queued if q.get("type") == "avatar_photoset"]
+assert body(r)["krea_lora"]["state"] == "skipped" and len(nj) == 1, "no Krea LoRA, but media for every avatar"
+npp = json.loads(nj[0]["params"])
+assert npp["krea_lora"] is False and npp["avatar"] == "nolora" and npp["trigger"] == "nolora" and "lora" not in npp
+assert npp["wan_lora"] is True and npp["wan_lora_name"] == "avatar-nolora-wan", "a Wan LoRA without a Krea one"
+assert h._get_avatar("m", "nolora")["wan_lora"]["job_ids"] == [nj[0]["job_id"]]
+queued.clear()
+h.create_avatar("m", {"name": "nowan", "upload_keys": uploads("nw1.png"), "wan_lora": False})
+nwp = json.loads([q for q in queued if q.get("type") == "avatar_photoset"][0]["params"])
+assert nwp["wan_lora"] is False and "wan_lora_name" not in nwp and h._get_avatar("m", "nowan")["wan_lora"]["state"] == "skipped"
+assert h.create_avatar("m", {"name": "x2", "upload_keys": uploads("x2.png"), "wan_lora": "yes"})["statusCode"] == 400
+wl = h._avatar_wan_lora_name("b" * 32)
+assert len(wl) <= 32 and wl.endswith("-wan") and h.DATASET_NAME.match(wl) and wl == h._avatar_wan_lora_name("b" * 32)
+assert h._avatar_wan_lora_name("b" * 32) != h._avatar_wan_lora_name("b" * 31 + "c")
+nav = h._get_avatar("m", "nolora")
+assert nav["media"]["state"] == "queued" and nav["media"]["job_id"] == nj[0]["job_id"]
+assert "job_ids" not in nav["krea_lora"]
 assert h.create_avatar("m", {"name": "x1", "upload_keys": uploads("x1.png"), "krea_lora": "yes"})["statusCode"] == 400
 # on demand: a new version
 queued.clear()
@@ -490,6 +511,52 @@ r = h.avatar_krea_lora("m", "nolora", {})
 assert r["statusCode"] == 202 and json.loads([q for q in queued if q.get("type")][0]["params"])["version"] == 1 and \
        h._get_avatar("m", "nolora")["krea_lora"]["state"] == "queued"
 assert h.avatar_krea_lora("m", "ghost", {})["statusCode"] == 404
+# avatar media: queue for an existing avatar (409 while one runs), list files with presigned URLs
+queued.clear()
+h._set_media("m", "nolora", {"state": "ready", "job_id": "old", "created_at": 1})
+r = h.avatar_media_create("m", "nolora", {})
+mj = [q for q in queued if q.get("type") == "avatar_photoset"]
+assert r["statusCode"] == 202 and len(mj) == 1, r
+mpp = json.loads(mj[0]["params"])
+assert mpp["media_only"] is True and mpp["krea_lora"] is False and mpp["avatar"] == "nolora"
+assert h._get_avatar("m", "nolora")["media"]["job_id"] == mj[0]["job_id"]
+h.jobs.get_item = lambda Key: {"Item": {"job_id": Key["job_id"], "status": "queued"}}
+assert h.avatar_media_create("m", "nolora", {})["statusCode"] == 409, "one media job at a time"
+assert h.avatar_media_create("m", "ghost", {})["statusCode"] == 404
+assert h.avatar_media_get("m", "ghost")["statusCode"] == 404
+h._set_media("m", "nolora", {"state": "ready", "job_id": "x", "created_at": 1, "photos": 1, "clips": 1})
+s3.put_json("avatars/m/nolora/media/media.json", {"photos": [{"file": "photo_01.png", "size": 10}],
+                                                  "clips": [{"file": "clip_1.mp4", "size": 20}]})
+g = body(h.avatar_media_get("m", "nolora"))
+assert g["state"] == "ready" and [f["name"] for f in g["files"]] == ["photo_01.png", "clip_1.mp4", "media.json"], g
+assert g["files"][1] == {"name": "clip_1.mp4", "size": 20, "url": "https://signed/avatars/m/nolora/media/clip_1.mp4"}
+h._set_media("m", "nolora", {"state": "clips", "job_id": "y", "created_at": 1})
+assert body(h.avatar_media_get("m", "nolora")) == {"state": "clips", "files": []}, "files only when ready"
+lst = {a["name"]: a for a in body(h.list_avatars("m"))["avatars"]}
+assert lst["nolora"]["media"]["state"] == "clips" and lst["old"]["media"] == {"state": "none"}
+assert lst["old"]["wan_lora"] == {"state": "none"} and lst["nolora"]["wan_lora"]["state"] == "queued"
+assert json.loads([q for q in queued if q.get("type") == "avatar_photoset"][-1]["params"])["wan_lora"] is False, \
+    "media-only jobs never build a Wan LoRA"
+# queueing failures leave no media stuck in "queued"
+real_qj = h._queue_job
+h._queue_job = lambda *a, **k: (_ for _ in ()).throw(ValueError("sqs down"))
+h.create_avatar("m", {"name": "qfail", "upload_keys": uploads("q1.png"), "krea_lora": False})
+assert h._get_avatar("m", "qfail")["media"]["state"] == "failed"
+h.create_avatar("m", {"name": "qfail2", "upload_keys": uploads("q2.png")})
+assert h._get_avatar("m", "qfail2")["media"]["state"] == "failed"
+h._set_media("m", "qfail", {"state": "failed"})
+r = h.avatar_media_create("m", "qfail", {})
+assert r["statusCode"] == 502 and h._get_avatar("m", "qfail")["media"]["state"] == "failed", "POST /media: no stuck queued"
+h._queue_job = real_qj
+# busy media whose job has ended (or vanished) does not block a new request
+h.jobs = mock.MagicMock(put_item=lambda Item: queued.append(Item),
+                        get_item=lambda Key: {"Item": {"job_id": Key["job_id"], "status": "failed"}})
+h._set_media("m", "qfail", {"state": "clips", "job_id": "dead", "created_at": 1})
+assert h.avatar_media_create("m", "qfail", {})["statusCode"] == 202, "the owning job ended: not busy"
+h.jobs = mock.MagicMock(put_item=lambda Item: queued.append(Item),
+                        get_item=lambda Key: {"Item": {"job_id": Key["job_id"], "status": "running"}})
+assert h.avatar_media_create("m", "qfail", {})["statusCode"] == 409
+h.jobs = mock.MagicMock(put_item=lambda Item: queued.append(Item))
 # long names: the LoRA name stays within the 32-character limit, and is stable
 long = "a" * 30 + "zz"
 h.create_avatar("m", {"name": long, "upload_keys": uploads("l1.png")})
@@ -510,6 +577,8 @@ h._set_krea_lora("m", "ava", {"state": "ready", "lora": "avatar-ava", "version":
 tick()
 h.add_avatar_images("m", "ava", {"upload_keys": uploads("ava2.png")})
 assert h._get_avatar("m", "ava")["krea_lora"]["state"] == "ready", "add keeps the link"
+assert h._get_avatar("m", "ava")["media"]["state"] == "queued", "image edits keep the media record"
+assert h._get_avatar("m", "ava")["wan_lora"]["lora"] == "avatar-ava-wan", "and the Wan LoRA record"
 tick()
 h.remove_avatar_image("m", "ava", "2")
 assert h._get_avatar("m", "ava")["krea_lora"]["ready"]["version"] == 1, "remove keeps the link"
@@ -529,12 +598,14 @@ assert kl["state"] == "skipped" and kl["ready"] == {"lora": "avatar-ava", "versi
 # names starting with avatar- are reserved for avatar LoRAs
 r = h.lora_uploads("m", "avatar-mine", {"model": "krea2"})
 assert r["statusCode"] == 400 and "reserved" in body(r)["error"], body(r)
-# a name that already holds a Wan LoRA: the build is marked failed, nothing queued
+# a name that already holds a Wan LoRA: the Krea build is marked failed; the avatar still gets media only
 s3.put_json("loras/m/avatar-wanclash/v1/lora.json", {"version": 1, "models": ["t2v"], "files": []})
 queued.clear()
 h.create_avatar("m", {"name": "wanclash", "upload_keys": uploads("w1.png")})
 kl = h._get_avatar("m", "wanclash")["krea_lora"]
-assert kl["state"] == "failed" and "Wan" in kl["error"] and not [q for q in queued if q.get("type")], kl
+qd = [q for q in queued if q.get("type")]
+assert kl["state"] == "failed" and "Wan" in kl["error"], kl
+assert len(qd) == 1 and json.loads(qd[0]["params"])["krea_lora"] is False, "no Krea LoRA, but media"
 # queueing fails: the avatar is still saved (and made default if asked), the build marked failed
 h.jobs = mock.MagicMock(put_item=mock.MagicMock(side_effect=h.ClientError("throttled")))
 r = h.create_avatar("m", {"name": "qfail", "upload_keys": uploads("q1.png"), "make_default": True})

@@ -761,7 +761,9 @@ def list_avatars(client):
         a = _s3_json(p["Prefix"] + "avatar.json")
         if a:
             avatars.append(dict({k: a[k] for k in ("name", "description", "created_at")},
-                                images=len(_image_keys(a)), krea_lora=a.get("krea_lora") or {"state": "none"}))
+                                images=len(_image_keys(a)), krea_lora=a.get("krea_lora") or {"state": "none"},
+                                media=a.get("media") or {"state": "none"},
+                                wan_lora=a.get("wan_lora") or {"state": "none"}))
     return _resp(200, {"default": _default_avatar_name(client), "avatars": avatars})
 
 
@@ -795,24 +797,36 @@ def create_avatar(client, body):
     krea_lora = body.get("krea_lora", True)
     if not isinstance(krea_lora, bool):
         return _resp(400, {"error": "krea_lora must be true or false"})
+    wan_lora = body.get("wan_lora", True)
+    if not isinstance(wan_lora, bool):
+        return _resp(400, {"error": "wan_lora must be true or false"})
 
     _archive_avatar(client, name)
     _write_avatar(client, name, sources, description)
+    if not wan_lora:
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="skipped"))
     if krea_lora:
         try:
-            kl = _queue_krea_lora(client, name)
+            kl = _queue_krea_lora(client, name, wan=wan_lora)
         except (ClientError, ValueError) as e:  # the avatar is saved either way
             kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
                                                    error=f"could not queue the Krea LoRA build: {e}"))
+            _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
     else:
         kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="skipped"))
+        try:  # no Krea LoRA, but every avatar gets its photos and clips (and, by default, a Wan LoRA)
+            _queue_avatar_media(client, name, wan=wan_lora)
+        except (ClientError, ValueError) as e:
+            _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
 
     # make_default: true/false as asked; omitted = only if there is no default yet.
     make_default = body.get("make_default")
     is_default = bool(make_default) if make_default is not None else not _default_avatar_name(client)
     if is_default:
         _put_json(f"avatars/{client}/_default.json", {"name": name})
-    return _resp(200, {"name": name, "default": is_default, "images": len(sources), "krea_lora": kl})
+    saved = _get_avatar(client, name) or {}
+    return _resp(200, {"name": name, "default": is_default, "images": len(sources), "krea_lora": kl,
+                       "media": saved.get("media"), "wan_lora": saved.get("wan_lora")})
 
 
 # ---------------------------------------------------------------- Krea 2 LoRA per avatar
@@ -847,7 +861,49 @@ def _set_krea_lora(client, name, krea_lora):
     return krea_lora
 
 
-def _queue_krea_lora(client, name):
+# ---------------------------------------------------------------- Wan LoRA per avatar
+# The avatar_photoset job also writes a Wan dataset (photos + clips) and queues a Wan train job; the trainer
+# registers it as avatar-<name>-wan and marks wan_lora ready. docs/specs/2026-11-24-avatar-wan-lora.md
+
+WAN_LORA_BUSY = ("queued", "photos", "training")
+
+
+def _avatar_wan_lora_name(name):
+    """avatar-<name>-wan, shortened with a hash when it would pass 32 characters."""
+    full = f"avatar-{name}-wan"
+    return full if len(full) <= 32 else f"avatar-{name[:12]}-{hashlib.sha1(name.encode()).hexdigest()[:6]}-wan"
+
+
+def _wan_lora_of(client, name):
+    """The avatar's wan_lora record without the per-build fields (keeps the last ready link)."""
+    wl = (_get_avatar(client, name) or {}).get("wan_lora") or {}
+    return {k: wl[k] for k in ("ready", "lora", "trigger") if k in wl}
+
+
+def _set_wan_lora(client, name, wan_lora):
+    avatar = _get_avatar(client, name)
+    avatar["wan_lora"] = wan_lora
+    _put_json(f"avatars/{client}/{name}/avatar.json", avatar)
+    return wan_lora
+
+
+def _wan_build(client, name, job_id):
+    """Photoset-job params for a Wan LoRA build by job_id, with the avatar's wan_lora marked queued; {} (and
+    wan_lora failed) when the name already holds a Krea LoRA."""
+    lora = _avatar_wan_lora_name(name)
+    kind = _lora_name_model(client, lora)
+    if kind and kind != "t2v":
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                         error=f"LoRA name '{lora}' already holds a {kind} LoRA"))
+        return {}
+    prev = (_get_avatar(client, name) or {}).get("wan_lora") or {}
+    version = max(_lora_versions(client, lora) + [int(prev.get("version") or 0)] + [0]) + 1
+    _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="queued", lora=lora, version=version,
+                                     trigger=name, job_ids=[job_id]))
+    return {"wan_lora": True, "wan_lora_name": lora, "wan_version": version}
+
+
+def _queue_krea_lora(client, name, wan=False):
     """Queue a photo set + training for (a new version of) the avatar's Krea LoRA. The version counts the
     registered versions and the avatar's last build, so builds started before training finishes don't
     collide; the last ready LoRA stays linked (`ready`) until the new one is ready."""
@@ -856,17 +912,95 @@ def _queue_krea_lora(client, name):
     lora = _avatar_lora_name(name)
     kind = _lora_name_model(client, lora)
     if kind and kind != "krea2":
-        return _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
-                                                 error=f"LoRA name '{lora}' already holds a Wan LoRA"))
+        kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
+                                               error=f"LoRA name '{lora}' already holds a Wan LoRA"))
+        _queue_avatar_media(client, name, wan=wan)  # no Krea LoRA, but the avatar still gets its media
+        return kl
     version = max(_lora_versions(client, lora) + [int(prev.get("version") or 0)] + [0]) + 1
     params = {"avatar": name, "lora": lora, "version": version, "trigger": name, "count": AVATAR_DATASET_PHOTOS,
-              "avatar_created_at": avatar["created_at"]}
+              "avatar_created_at": avatar["created_at"], "krea_lora": True}
     # The job id is on the avatar before the job is sent: a warm worker reads it as soon as the message lands.
+    # The same job also makes the avatar's media (photos + clips), so the media record names it too.
     job_id = uuid.uuid4().hex
+    params.update(_wan_build(client, name, job_id) if wan else {"wan_lora": False})
     kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="queued", lora=lora,
                                            version=version, trigger=name, job_ids=[job_id]))
+    _set_media(client, name, {"state": "queued", "job_id": job_id, "created_at": avatar["created_at"]})
     _queue_job(client, "avatar_photoset", params, job_id=job_id)
     return kl
+
+
+# ---------------------------------------------------------------- avatar media (photos + 2 s clips)
+# docs/specs/2026-11-24-avatar-media.md
+
+MEDIA_BUSY = ("queued", "photos", "clips")
+
+
+def _set_media(client, name, media):
+    avatar = _get_avatar(client, name)
+    avatar["media"] = media
+    _put_json(f"avatars/{client}/{name}/avatar.json", avatar)
+    return media
+
+
+def _queue_avatar_media(client, name, media_only=False, wan=False):
+    """Queue the avatar's photo set + clips without a Krea LoRA build (krea_lora false, or media for an
+    existing avatar). The job id is on the avatar's media record before the job is sent."""
+    avatar = _get_avatar(client, name)
+    params = {"avatar": name, "trigger": name, "count": AVATAR_DATASET_PHOTOS,
+              "avatar_created_at": avatar["created_at"], "krea_lora": False, "media_only": media_only}
+    job_id = uuid.uuid4().hex
+    params.update(_wan_build(client, name, job_id) if wan and not media_only else {"wan_lora": False})
+    media = _set_media(client, name, {"state": "queued", "job_id": job_id, "created_at": avatar["created_at"]})
+    _queue_job(client, "avatar_photoset", params, job_id=job_id)
+    return media
+
+
+def avatar_media_create(client, name, body):
+    """POST /avatars/{name}/media: make (new) photos + clips for an existing avatar. Reuses the photos of its
+    ready Krea LoRA dataset when there is one, so only the clips are rendered."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    media = avatar.get("media") or {}
+    if media.get("state") in MEDIA_BUSY and _job_live(media.get("job_id")):
+        return _resp(409, {"error": f"avatar '{name}' already has media being made ({media['state']}); wait for it"})
+    try:
+        return _resp(202, {"name": name, "media": _queue_avatar_media(client, name, media_only=True)})
+    except (ClientError, ValueError) as e:
+        _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+        return _resp(502, {"error": f"could not queue the avatar media: {e}"})
+
+
+def _job_live(job_id):
+    """Whether the job is still queued or running (a busy record whose job ended or vanished is stale)."""
+    if not job_id:
+        return False
+    job = jobs.get_item(Key={"job_id": job_id}).get("Item")
+    return bool(job) and job.get("status") in ("queued", "running")
+
+
+MEDIA_FILE = re.compile(r"(photo_\d{2}\.png|clip_\d\.mp4|media\.json)")
+
+
+def avatar_media_get(client, name):
+    """GET /avatars/{name}/media: {state, files: [{name, size, url}]}; files only once the media is ready."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar or not avatar.get("media"):
+        return _resp(404, {"error": f"avatar '{name}' has no media"})
+    media = avatar["media"]
+    if media.get("state") != "ready":
+        return _resp(200, {"state": media.get("state"), "files": []})
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = _s3_json(prefix + "media.json") or {}
+    entries = [(e.get("file"), e.get("size")) for e in (doc.get("photos") or []) + (doc.get("clips") or [])]
+    entries.append(("media.json", None))
+    files = [{"name": f, "size": size, "url": s3.generate_presigned_url(
+                "get_object", Params={"Bucket": BUCKET, "Key": prefix + f}, ExpiresIn=URL_TTL)}
+             for f, size in entries if isinstance(f, str) and MEDIA_FILE.fullmatch(f)]
+    return _resp(200, {"state": "ready", "files": files})
 
 
 def avatar_krea_lora(client, name, body):
@@ -877,7 +1011,13 @@ def avatar_krea_lora(client, name, body):
     state = (_get_avatar(client, name).get("krea_lora") or {}).get("state")
     if state in KREA_LORA_BUSY:
         return _resp(409, {"error": f"avatar '{name}' already has a Krea LoRA build {state}; wait for it to finish"})
-    return _resp(202, {"name": name, "krea_lora": _queue_krea_lora(client, name)})
+    try:
+        return _resp(202, {"name": name, "krea_lora": _queue_krea_lora(client, name)})
+    except (ClientError, ValueError) as e:
+        _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
+                                          error=f"could not queue the Krea LoRA build: {e}"))
+        _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+        return _resp(502, {"error": f"could not queue the Krea LoRA build: {e}"})
 
 
 def _write_avatar(client, name, source_keys, description, created_at=None):
@@ -896,6 +1036,10 @@ def _write_avatar(client, name, source_keys, description, created_at=None):
     prev = _get_avatar(client, name) or {}
     if prev.get("krea_lora"):  # image edits and restore keep the Krea LoRA link (create_avatar sets it anew)
         doc["krea_lora"] = prev["krea_lora"]
+    if prev.get("media"):  # and the media record
+        doc["media"] = prev["media"]
+    if prev.get("wan_lora"):  # and the Wan LoRA link
+        doc["wan_lora"] = prev["wan_lora"]
     _put_json(f"avatars/{client}/{name}/avatar.json", doc)
     return images
 
@@ -2058,6 +2202,10 @@ def handler(event, context):
         return avatar_history(client, params["name"].lower())
     if route == "POST /avatars/{name}/krea-lora":
         return avatar_krea_lora(client, params["name"], body)
+    if route == "POST /avatars/{name}/media":
+        return avatar_media_create(client, params["name"], body)
+    if route == "GET /avatars/{name}/media":
+        return avatar_media_get(client, params["name"])
     if route == "POST /avatars/{name}/restore":
         return restore_avatar(client, params["name"].lower(), body)
     if route == "GET /datasets":

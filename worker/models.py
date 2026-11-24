@@ -693,6 +693,25 @@ def make_keyframe(cast, scene, width=1280, height=704, seed=None, best=False):
     return fit(image, width, height)
 
 
+CLIP_FRAMES = 33  # 2 s at 16 fps (4k + 1 for Wan); also the trainer's clip length
+
+
+def render_clip(image, prompt, out_path, seed=None, width=832, height=832):
+    """A 2 s Wan I2V clip from `image` (a path or PIL image): 16 fps, no smoothing/upscale/sound/grain.
+    Writes `out_path` and three stills (first, middle, last frame) for the content filter; returns their paths."""
+    if isinstance(image, str):
+        image = Image.open(image).convert("RGB")
+    text, negative = natural_prompts(with_triggers(prompt))
+    frames = _render_segment(text, negative, CLIP_FRAMES, width, height, seed, fit(image, width, height))
+    write_video(frames, out_path, fps=VIDEO_FPS)
+    stills = []
+    for k, i in enumerate((0, len(frames) // 2, len(frames) - 1)):
+        path = f"{out_path}.{k}.png"
+        Image.fromarray(frames[i]).save(path)
+        stills.append(path)
+    return stills
+
+
 def reanchor(frame, references, width, height, seed=None):
     """A long take's conditioning frame with the avatar's face and hair restored from `references`
     (its images), everything else kept: composition, pose, clothes, background, light."""
@@ -882,6 +901,33 @@ def _extract_json(text):
     if not match:
         raise ValueError(f"model did not return JSON: {text[:300]}")
     return json.loads(match.group(0))
+
+
+COUNT_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+               "nine": 9, "ten": 10}
+
+
+def _parse_count(answer):
+    """The number of people in a VLM answer: the first integer, else a number word; "none"/"no one" -> 0;
+    -1 when it can't be read."""
+    text = (answer or "").strip().lower()
+    m = re.search(r"\d+", text)
+    if m:
+        return int(m.group(0))
+    if re.search(r"\b(none|nobody|no one|no people|zero)\b", text):
+        return 0
+    m = re.search(r"\b(" + "|".join(COUNT_WORDS) + r")\b", text)
+    return COUNT_WORDS[m.group(1)] if m else -1
+
+
+def count_people(image_path):
+    """How many people the VLM sees in a photo (partial people included); -1 when its answer can't be read.
+    Avatar photo sets keep only photos with exactly one person."""
+    messages = [{"role": "user", "content": [
+        {"type": "image", "image": f"file://{image_path}"},
+        {"type": "text", "text": "How many people are visible in this photo? Count partial people and people "
+                                 "in the background too. Answer with a number only."}]}]
+    return _parse_count(_chat(messages, max_new_tokens=8))
 
 
 def describe_video(video_path, instructions=""):

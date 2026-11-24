@@ -923,6 +923,20 @@ fs3 = worker.s3 = FakeS3W({"avatars/m/ava/avatar.json": _json.dumps(avatar_doc).
 made, refs_used, put_jobs, sent_msgs = [], [], [], []
 worker.load_references = lambda keys, workdir, prefix: refs_used.append(list(keys)) or [Out("r1"), Out("r2"), Out("r3")]
 models.make_photo = lambda references, prompt, neg, w, h, seed, best=False: made.append((prompt, w, h, seed, len(references))) or Out(f"p{seed}")
+# one-person check: the VLM's answer parsed to a count
+real_chat_cp = models._chat
+for answer, want in [("1", 1), ("There are 2 people.", 2), ("One.", 1), ("two", 2), ("none", 0), ("no one", 0),
+                     ("I can't tell", -1)]:
+    models._chat = lambda messages, max_new_tokens=1024, a=answer, **k: a
+    assert models.count_people("/x.png") == want, (answer, models.count_people("/x.png"))
+asked_cp = []
+models._chat = lambda messages, max_new_tokens=1024, **k: asked_cp.append(messages) or "1"
+models.count_people("/p/x.png")
+assert asked_cp[0][0]["content"][0] == {"type": "image", "image": "file:///p/x.png"}
+assert "how many people" in asked_cp[0][0]["content"][1]["text"].lower()
+models._chat = real_chat_cp
+people = {}  # photo basename -> people count (default 1)
+models.count_people = lambda path: people.get(os.path.basename(path), 1)
 class FakeClientError(Exception):  # botocore is stubbed in tests; the worker catches ClientError by .response
     def __init__(self, response, op):
         super().__init__(op)
@@ -1034,6 +1048,240 @@ try:
 except RuntimeError as e:
     assert "trainer" in str(e)
 assert "avatar_photoset" in worker.RUNNERS
+clip_calls = []
+
+
+def fake_clip(image, prompt, out_path, seed=None, width=832, height=832):
+    clip_calls.append((os.path.basename(image), prompt, seed, width, height,
+                       len([j for j in put_jobs if j.get("type") == "train"])))
+    open(out_path, "w").write("mp4")
+    stills = [f"{out_path}.{k}.png" for k in range(3)]
+    for sp in stills:
+        open(sp, "w").write("png")
+    return stills
+
+
+models.render_clip = fake_clip
+# krea_lora false: the photo set for the avatar's media only; no Krea dataset, no train job, no trainer needed
+krea.score_images = lambda paths, progress=None: [0.01] * len(paths)
+media_doc = dict(avatar_doc, krea_lora={"state": "skipped"}, media={"state": "queued", "job_id": "pm", "created_at": 77})
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(media_doc).encode()
+n_jobs, n_msgs = len(put_jobs), len(sent_msgs)
+fs3.uploaded.clear(), made.clear()
+mparams = {"avatar": "ava", "trigger": "ava", "count": 24, "avatar_created_at": 77, "krea_lora": False, "media_only": False}
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pm"}, dict(mparams), tempfile.mkdtemp())
+assert len(made) == 24 and r["kept"] == 24, r
+assert len(put_jobs) == n_jobs and len(sent_msgs) == n_msgs and not any(k.startswith("datasets/") for k in fs3.uploaded)
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["krea_lora"] == {"state": "skipped"}
+# a stale media job (the avatar got a newer one) does nothing
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media=dict(media_doc["media"], job_id="newer"))).encode()
+made.clear()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pm"}, dict(mparams), tempfile.mkdtemp())
+assert "skipped" in r and not made, r
+# clips: four 2 s clips after the train job is queued, content-filtered, stored with the photos as media
+flag_clip = {"clip_2"}  # its middle frame is flagged
+krea.score_images = lambda paths, progress=None: [
+    0.9 if any(c in p for c in flag_clip) and p.endswith(".1.png") else 0.01 for p in paths]
+kdoc = dict(avatar_doc, krea_lora=dict(avatar_doc["krea_lora"], job_ids=["pk"]),
+            media={"state": "queued", "job_id": "pk", "created_at": 77})
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(kdoc).encode()
+fs3.uploaded.clear(), clip_calls.clear()
+worker.TRAIN_QUEUE_URL = "tq"
+n_train = len([j for j in put_jobs if j.get("type") == "train"])
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pk"}, dict(pparams, version=5), tempfile.mkdtemp())
+assert len(clip_calls) == 4 and all(c[5] == n_train + 1 for c in clip_calls), "the train job is queued before the clips"
+assert [c[0] for c in clip_calls] == ["ava_01.png", "ava_07.png", "ava_13.png", "ava_19.png"], clip_calls
+assert all(c[1].startswith("ava ") and m in c[1] for c, m in zip(clip_calls, _photos.AVATAR_CLIP_MOTIONS))
+assert len({c[2] for c in clip_calls}) == 4 and all(c[3:5] == (832, 832) for c in clip_calls)
+media_keys = sorted(k for k in fs3.uploaded if k.startswith("avatars/m/ava/media/"))
+assert media_keys == sorted([f"avatars/m/ava/media/photo_{i:02d}.png" for i in range(1, 25)] +
+                            [f"avatars/m/ava/media/clip_{i}.mp4" for i in (1, 2, 3)]), media_keys
+mj = _json.loads(fs3.objects["avatars/m/ava/media/media.json"])
+assert len(mj["clips"]) == 3 and len(mj["photos"]) == 24 and mj["clips"][0]["file"] == "clip_1.mp4"
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["media"]["state"] == "ready" and av["media"]["photos"] == 24 and av["media"]["clips"] == 3
+assert av["media"]["preview"] == "clip_1.mp4" and av["krea_lora"]["state"] == "training", av
+assert r["clips"] == 3 and r["clips_filtered"] == 1, r
+# every clip flagged: media failed, the Krea build unaffected and the job not failed
+flag_clip = {"clip_1", "clip_2", "clip_3", "clip_4"}
+clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk2"]),
+                                                            media=dict(kdoc["media"], job_id="pk2"))).encode()
+fs3.uploaded.clear()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pk2"}, dict(pparams, version=6), tempfile.mkdtemp())
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["media"]["state"] == "failed" and "content filter" in av["media"]["error"] and av["krea_lora"]["state"] == "training"
+assert len([k for k in fs3.uploaded if "/media/photo_" in k]) == 24, "photos are stored even when every clip is flagged"
+# the clips are filtered in one call after all four are rendered (each filter call unloads Wan)
+score_calls = []
+real_score = krea.score_images
+krea.score_images = lambda paths, progress=None: score_calls.append(list(paths)) or [0.01] * len(paths)
+clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk5"]),
+                                                            media=dict(kdoc["media"], job_id="pk5"))).encode()
+worker.run_avatar_photoset({"client": "m", "job_id": "pk5"}, dict(pparams, version=8), tempfile.mkdtemp())
+assert [len(c) for c in score_calls] == [24, 12], [len(c) for c in score_calls]
+krea.score_images = real_score
+# a photo-set failure on the Krea path fails the media too (it must not stay busy and block POST /media)
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk6"]),
+                                                            media=dict(kdoc["media"], job_id="pk6"))).encode()
+real_mp = models.make_photo
+models.make_photo = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("edit model crashed"))
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pk6"}, dict(pparams, version=9),
+                    tempfile.mkdtemp(), exc=RuntimeError)
+models.make_photo = real_mp
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["media"]["state"] == "failed" and av["krea_lora"]["state"] == "failed", av
+worker.TRAIN_QUEUE_URL = ""
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk7"]),
+                                                            media=dict(kdoc["media"], job_id="pk7"))).encode()
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pk7"}, dict(pparams, version=9),
+                    tempfile.mkdtemp(), exc=RuntimeError)
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["media"]["state"] == "failed", "no trainer: media failed too"
+worker.TRAIN_QUEUE_URL = "tq"
+# a cancelled job is cancelled, not "done with media failed"
+def cancel_clip(*a, **k):
+    raise models.JobCancelled("cancelled")
+models.render_clip = cancel_clip
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk8"]),
+                                                            media=dict(kdoc["media"], job_id="pk8"))).encode()
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pk8"}, dict(pparams, version=10),
+                    tempfile.mkdtemp(), exc=models.JobCancelled)
+models.render_clip = fake_clip
+# media only (krea_lora false) also gets its clips
+flag_clip = set()
+clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media=dict(media_doc["media"], job_id="pm2"))).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pm2"}, dict(mparams), tempfile.mkdtemp())
+assert len(clip_calls) == 4 and _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["media"]["state"] == "ready"
+# Wan LoRA: after the media, the kept photos + clips become a Wan dataset and one Wan train job is queued
+wparams = dict(pparams, version=30, wan_lora=True, wan_lora_name="avatar-ava-wan", wan_version=1)
+wdoc = dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pw1"]), media=dict(kdoc["media"], job_id="pw1"),
+            wan_lora={"state": "queued", "lora": "avatar-ava-wan", "version": 1, "trigger": "ava", "job_ids": ["pw1"]})
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(wdoc).encode()
+fs3.uploaded.clear(), clip_calls.clear()
+n_put = len(put_jobs)
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pw1"}, dict(wparams), tempfile.mkdtemp())
+wm = _json.loads(fs3.objects["datasets/m/avatar-ava-wan/v1/manifest.json"])
+assert wm["file_count"] == 28 and wm["kind"] == "character" and wm["source"] == "avatar" and wm["trigger"] == "ava", wm
+assert [f["path"] for f in wm["files"]][:2] == ["p_01.png", "p_02.png"] and wm["files"][24]["path"] == "c_1.mp4"
+assert "datasets/m/avatar-ava-wan/v1/raw/c_4.mp4" in fs3.uploaded and "datasets/m/avatar-ava-wan/v1/raw/p_24.png" in fs3.uploaded
+wc = _json.loads(fs3.objects["datasets/m/avatar-ava-wan/v1/captions.json"])
+assert wc["items"]["p0001.png"].startswith("ava, ") and wc["items"]["s0025_00.mp4"].startswith("ava, ")
+assert _photos.AVATAR_CLIP_MOTIONS[0] in wc["items"]["s0025_00.mp4"] and len(wc["items"]) == 28
+new = put_jobs[n_put:]
+assert [j.get("type") for j in new if j.get("type") == "train"] == ["train", "train"], "Krea train, then Wan train"
+wj = [j for j in new if j.get("type") == "train"][-1]
+wp = _json.loads(wj["params"])
+assert wp["model"] == "t2v" and wp["lora"] == "avatar-ava-wan" and wp["version"] == 1 and wp["steps"] == 1000
+assert wp["dataset"] == "avatar-ava-wan/v1" and wp["avatar"] == "ava" and wp["trigger"] == "ava" and wp["kind"] == "character"
+assert wp["fingerprint"] == wc["fingerprint"] and wp["files"] == 28 and wp["speed"] == "standard"
+assert sent_msgs[-1] == ("tq", _json.dumps({"job_id": wj["job_id"]})) and r["wan_train_job_id"] == wj["job_id"]
+wl = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["wan_lora"]
+assert wl["state"] == "training" and wj["job_id"] in wl["job_ids"], wl
+# redelivered (both train jobs exist): no second Wan train job; re-sent while still queued
+n_train_all = len([j for j in put_jobs if j.get("type") == "train"])
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(wdoc).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pw1"}, dict(wparams), tempfile.mkdtemp())
+assert len([j for j in put_jobs if j.get("type") == "train"]) == n_train_all, "no duplicate train jobs"
+assert sent_msgs[-1] == ("tq", _json.dumps({"job_id": wj["job_id"]}))
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "training"
+# wan_lora false: no Wan dataset or train job
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(wdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pw2"]),
+                                                            media=dict(kdoc["media"], job_id="pw2"))).encode()
+n_train_all = len([j for j in put_jobs if j.get("type") == "train"])
+worker.run_avatar_photoset({"client": "m", "job_id": "pw2"}, dict(pparams, version=31, wan_lora=False), tempfile.mkdtemp())
+assert len([j for j in put_jobs if j.get("type") == "train"]) == n_train_all + 1, "only the Krea train job"
+# a Wan dataset failure marks the Wan LoRA failed, the Krea build and media unaffected, the job not failed
+real_up = fs3.upload_file
+fs3.upload_file = lambda path, B, K, ExtraArgs=None: (_ for _ in ()).throw(OSError("disk")) if "-wan/" in K else real_up(path, B, K, ExtraArgs)
+wdoc3 = dict(wdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pw3"]), media=dict(kdoc["media"], job_id="pw3"),
+             wan_lora=dict(wdoc["wan_lora"], job_ids=["pw3"], version=2))
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(wdoc3).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pw3"}, dict(wparams, version=32, wan_version=2), tempfile.mkdtemp())
+fs3.upload_file = real_up
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["wan_lora"]["state"] == "failed" and av["media"]["state"] == "ready" and av["krea_lora"]["state"] == "training", av
+assert "wan_error" in r
+# no Krea LoRA (krea_lora false) but a Wan one: the media-only path builds it too
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media=dict(media_doc["media"], job_id="pw4"),
+    wan_lora={"state": "queued", "lora": "avatar-ava-wan", "version": 3, "trigger": "ava", "job_ids": ["pw4"]})).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pw4"}, dict(mparams, wan_lora=True, wan_lora_name="avatar-ava-wan",
+                                                                       wan_version=3), tempfile.mkdtemp())
+assert "datasets/m/avatar-ava-wan/v3/manifest.json" in fs3.objects and r.get("wan_train_job_id"), r
+# one-person check: photos that don't show exactly one person are dropped before any dataset or media
+people.update({f"ava_{i:02d}.png": 2 for i in range(1, 7)})  # 6 photos with two people
+clip_calls.clear(), fs3.uploaded.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pp1"]),
+                                                            media=dict(kdoc["media"], job_id="pp1"))).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pp1"}, dict(pparams, version=20), tempfile.mkdtemp())
+assert r["kept"] == 18 and r["people_dropped"] == 6, r
+ds = _json.loads(fs3.objects["datasets/m/avatar-ava/v20/manifest.json"])
+assert ds["file_count"] == 18 and "ava_01.png" not in [f["path"] for f in ds["files"]]
+assert len([k for k in fs3.uploaded if "/media/photo_" in k]) == 18
+people.update({f"ava_{i:02d}.png": 2 for i in range(1, 13)})  # 12 of 24: too few left
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pp2"]),
+                                                            media=dict(kdoc["media"], job_id="pp2"))).encode()
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pp2"}, dict(pparams, version=21),
+                    tempfile.mkdtemp(), contains="exactly one person", exc=krea.FilteredOut)
+assert "datasets/m/avatar-ava/v21/manifest.json" not in fs3.objects
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["krea_lora"]["state"] == "failed" and av["media"]["state"] == "failed"
+people.clear()
+# a clip whose middle frame shows two people is dropped
+people["clip_2.mp4.1.png"] = 2
+clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pp3"]),
+                                                            media=dict(kdoc["media"], job_id="pp3"))).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pp3"}, dict(pparams, version=22), tempfile.mkdtemp())
+assert r["clips"] == 3 and r["clips_filtered"] == 1, r
+people.clear()
+# media for an existing avatar with a ready Krea LoRA: its dataset photos are reused, no new photos
+made.clear(), clip_calls.clear(), fs3.uploaded.clear()
+n_train_before = len([j for j in put_jobs if j.get("type") == "train"])
+ready_doc = dict(media_doc, krea_lora={"state": "ready", "ready": {"lora": "avatar-ava", "version": 1}},
+                 media={"state": "queued", "job_id": "pm3", "created_at": 77})
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(ready_doc).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pm3"}, dict(mparams, media_only=True), tempfile.mkdtemp())
+n_ds = len(_json.loads(fs3.objects["datasets/m/avatar-ava/v1/manifest.json"])["files"])
+assert not made and r["kept"] == n_ds and len(clip_calls) == 4, r
+mj = _json.loads(fs3.objects["avatars/m/ava/media/media.json"])
+assert len(mj["photos"]) == n_ds and mj["photos"][0]["scene"] and not mj["photos"][0]["scene"].startswith("ava, ")
+# reused dataset photos go through the one-person check too
+people["ds_01_ava_01.png"] = 3
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(ready_doc, media=dict(ready_doc["media"], job_id="pm3b"))).encode()
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pm3b"}, dict(mparams, media_only=True), tempfile.mkdtemp())
+assert r["kept"] == n_ds - 1 and r["people_dropped"] == 1, r
+people.clear()
+assert len([j for j in put_jobs if j.get("type") == "train"]) == n_train_before, "media only: no train job"
+# a replaced avatar (Krea state skipped, old ready link kept) does not reuse the old person's photos
+made.clear(), clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(ready_doc, krea_lora=dict(ready_doc["krea_lora"], state="skipped"),
+                                                            media=dict(ready_doc["media"], job_id="pm5"))).encode()
+worker.run_avatar_photoset({"client": "m", "job_id": "pm5"}, dict(mparams, media_only=True), tempfile.mkdtemp())
+assert len(made) == 24, "photos made for the current avatar"
+# an unreadable dataset falls back to new photos
+made.clear()
+real_dl_w = fs3.download_file
+fs3.download_file = lambda b, k, p: (_ for _ in ()).throw(FakeClientError({"Error": {"Code": "404"}}, "GetObject"))
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(ready_doc, media=dict(ready_doc["media"], job_id="pm6"))).encode()
+worker.run_avatar_photoset({"client": "m", "job_id": "pm6"}, dict(mparams, media_only=True), tempfile.mkdtemp())
+fs3.download_file = real_dl_w
+assert len(made) == 24
+# media for an avatar without a Krea dataset: photos are made
+clip_calls.clear(), made.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(ready_doc, krea_lora={"state": "skipped"},
+                                                            media=dict(ready_doc["media"], job_id="pm4"))).encode()
+worker.run_avatar_photoset({"client": "m", "job_id": "pm4"}, dict(mparams, media_only=True), tempfile.mkdtemp())
+assert len(made) == 24 and len(clip_calls) == 4
+# a redelivered Krea build whose train job exists still makes the media, from its own dataset's photos
+made.clear(), clip_calls.clear()
+redo = dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pk"]), media=dict(kdoc["media"], job_id="pk", state="clips"))
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(redo).encode()
+n_jobs = len(put_jobs)
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pk"}, dict(pparams, version=5), tempfile.mkdtemp())
+assert not made and len(clip_calls) == 4 and len(put_jobs) == n_jobs, r
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["media"]["state"] == "ready"
 # the train queue URL also comes from settings.json next to the code (Terraform; boxes keep old user data)
 sd = tempfile.mkdtemp()
 open(os.path.join(sd, "settings.json"), "w").write(_json.dumps({"train_queue_url": "https://sqs/train"}))
@@ -1064,6 +1312,17 @@ for outcome in ("done", "failed", "cancelled"):
 assert {"done", "failed", "cancelled"} <= set(statuses), statuses
 worker.RUNNERS.update(real_runners)
 assert worker.take_work_dir("abc") == os.path.join(worker.WORK_ROOT, "abc")
+# a photo-set job cancelled before it (re)starts releases the avatar's Krea build and media (no stuck "photos")
+worker.s3 = fs3
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(
+    avatar_doc, krea_lora=dict(avatar_doc["krea_lora"], state="photos", job_ids=["pc"]),
+    media={"state": "photos", "job_id": "pc", "created_at": 77})).encode()
+job_items["pc"] = {"job_id": "pc", "status": "running", "type": "avatar_photoset", "client": "m",
+                   "cancel_requested": True, "params": _json.dumps(dict(pparams))}
+worker.process("pc", "r")
+av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
+assert av["krea_lora"]["state"] == "failed" and av["krea_lora"]["error"] == "cancelled", av["krea_lora"]
+assert av["media"]["state"] == "failed" and av["media"]["error"] == "cancelled"
 import time as _time  # noqa: E402
 os.makedirs(worker.take_work_dir("old")), os.makedirs(worker.take_work_dir("new"))
 os.utime(worker.take_work_dir("old"), (_time.time() - 4 * 86400,) * 2)

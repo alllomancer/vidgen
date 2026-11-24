@@ -1,0 +1,29 @@
+# Avatar media — decision log
+
+## D1 — [2026-11-24] — Task 1: Every new avatar queues the photo-set job, with media state
+
+**Status**: Accepted
+**Decision**: Media is made by the existing `avatar_photoset` job (same job id as the Krea build when there is one); with `krea_lora` false, or when the avatar's LoRA name already holds a Wan LoRA, a media-only job is queued instead.
+**Reason**: The photo set is already made for the Krea LoRA; making it twice would cost ~18 min of render time per avatar.
+**Alternatives considered**: A separate `avatar_media` job type — duplicate photo generation or a cross-job dependency.
+
+## D2 — [2026-11-24] — Task 2: Clips and stored media on the render box
+
+**Status**: Accepted
+**Decision**: Photos are stored before the clips render; all four clips render first and their 12 stills are filtered in one `score_images` call; staleness is checked before each clip.
+**Reason**: Review: the spec keeps photos when every clip is flagged; each filter call unloads the GPU models, so per-clip filtering reloaded Wan I2V four times; a replaced job should stop using the GPU.
+**Alternatives considered**: Filtering per clip (simpler, ~4 extra Wan loads per avatar).
+
+## D3 — [2026-11-24] — Task 3: Media API and media for existing avatars
+
+**Status**: Accepted
+**Decision**: A redelivered Krea build whose train job already exists makes its unfinished media from its own dataset's photos; any photo-set failure on the Krea path also fails the media; a cancel is re-raised, never swallowed as a media error.
+**Reason**: Review: media could stay in a busy state forever (redelivery after a spot stop, photo-set errors, no trainer), which would also make `POST /avatars/{name}/media` answer 409 forever.
+**Alternatives considered**: Marking interrupted media failed and asking the user to retry — the photos are in the dataset, so finishing is cheap.
+
+## D4 — [2026-11-24] — Task 6: Docs, deploy and live check
+
+**Status**: Accepted
+**Decision**: A photo-set job cancelled before it (re)starts marks the avatar's Krea build and media records it owns as failed ("cancelled").
+**Reason**: Live: inbal's Krea build was cancelled while its message waited for redelivery (the worker restart for the deploy had killed it); the worker's before-start cancel only set the job status, which would have left `krea_lora.state` at "photos" and blocked any rebuild with 409.
+**Alternatives considered**: An API-side reset route — the worker already owns these records and their staleness rules.

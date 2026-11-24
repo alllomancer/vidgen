@@ -876,12 +876,42 @@ function renderAvatarKrea() {
     const k = a.krea_lora || {state: "none"}, busy = ["queued", "photos", "training"].includes(k.state);
     const ready = k.ready ? ` · ready: <code>${esc(k.ready.lora)}</code> v${esc(String(k.ready.version))}` : "";
     const err = k.state === "failed" && k.error ? ` <span class="sub">${esc(k.error)}</span>` : "";
+    const m = a.media || {state: "none"}, mBusy = ["queued", "photos", "clips"].includes(m.state);
+    const mErr = m.state === "failed" && m.error ? ` <span class="sub">${esc(m.error)}</span>` : "";
+    const mInfo = m.state === "ready" ? ` · ${esc(String(m.photos || 0))} photos, ${esc(String(m.clips || 0))} clips` : "";
     return `<li><b>${esc(a.name)}</b> <span class="chip">Krea LoRA: ${esc(k.state)}</span>${ready}${err}` +
-      (busy ? "" : ` <button class="small" data-krea-train="${esc(a.name)}">${k.ready ? "Retrain" : "Train"} Krea LoRA</button>`) + `</li>`;
+      (busy ? "" : ` <button class="small" data-krea-train="${esc(a.name)}">${k.ready ? "Retrain" : "Train"} Krea LoRA</button>`) +
+      ` <span class="chip">Media: ${esc(m.state)}</span>${mInfo}${mErr}` +
+      (m.state === "ready" ? ` <button class="small" data-media-play="${esc(a.name)}" aria-label="Play ${esc(a.name)}'s preview clip">Play clip</button>` : "") +
+      (mBusy ? "" : ` <button class="small" data-media-make="${esc(a.name)}" aria-label="${m.state === "ready" ? "Remake" : "Make"} media for ${esc(a.name)}">${m.state === "ready" ? "Remake" : "Make"} media</button>`) +
+      `<div class="media-preview" data-media-for="${esc(a.name)}"></div></li>`;
   });
-  el.innerHTML = `<h3 style="font-size:13px;margin:12px 0 4px">Avatars and their Krea 2 LoRAs</h3><ul class="plain">${rows.join("")}</ul>`;
+  el.innerHTML = `<h3 style="font-size:13px;margin:12px 0 4px">Avatars: Krea 2 LoRAs and media (photos + 2 s clips, copied to your download folder)</h3><ul class="plain">${rows.join("")}</ul>`;
 }
 $("avatar-krea").onclick = async e => {
+  const play = e.target.closest("button[data-media-play]"), make = e.target.closest("button[data-media-make]");
+  if (play) {
+    const name = play.dataset.mediaPlay, box = document.querySelector(`[data-media-for="${CSS.escape(name)}"]`);
+    try {
+      const r = await api("GET", `/api/avatars/${encodeURIComponent(name)}/media`);
+      const clip = (r.files || []).find(f => /^clip_\d\.mp4$/.test(f.name));
+      if (!clip) { toast("No clip yet"); return; }
+      box.innerHTML = "";
+      const v = document.createElement("video");
+      Object.assign(v, {src: clip.url, muted: true, loop: true, autoplay: true, controls: true, playsInline: true});
+      v.setAttribute("aria-label", `${name}: 2 second preview clip`);
+      v.style.maxWidth = "240px";
+      box.appendChild(v);
+    } catch (err) { toast(err.message); }
+    return;
+  }
+  if (make) {
+    const name = make.dataset.mediaMake;
+    if (!confirm(`Make photos and four 2 s clips of ${name}? About 6-8 min of GPU time (more without a Krea photo set).`)) return;
+    try { await api("POST", `/api/avatars/${encodeURIComponent(name)}/media`); toast("Avatar media queued"); await loadCreateOptions(); }
+    catch (err) { toast(err.message); }
+    return;
+  }
   const b = e.target.closest("button[data-krea-train]");
   if (!b) return;
   if (!confirm(`Train a Krea 2 LoRA for ${b.dataset.kreaTrain}? About 1.5 h of GPU time.`)) return;

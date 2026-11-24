@@ -607,6 +607,7 @@ def check_once():
         save_jobs(jobs)
         pending = sum(1 for j in jobs.values() if j["status"] in PENDING)
     maybe_sync_loras()  # outside the jobs lock: a big LoRA download never blocks job bookkeeping
+    maybe_sync_avatar_media()
     return pending
 
 
@@ -830,8 +831,9 @@ def avatar_command(args):
             mark = "*" if av["name"] == r["default"] else " "
             count = av.get("images", 1)
             kl = (av.get("krea_lora") or {}).get("state", "none")
+            md = (av.get("media") or {}).get("state", "none")
             print(f"{mark} {av['name']:16} {count:2} image{'s' if count != 1 else ' '}  Krea LoRA: {kl:9} "
-                  f"{av['description']}")
+                  f"media: {md:7} {av['description']}")
     elif args.action == "refresh":
         name = args.name or api("GET", "/avatars")["default"] or DEFAULT_AVATAR_NAME
         avatar_setup(name, args.image, args.describe, args.candidates, args.model,
@@ -853,6 +855,14 @@ def avatar_command(args):
         kl = r["krea_lora"]
         print(f"Krea 2 LoRA for '{r['name']}' {kl['state']}: {kl['lora']} v{kl.get('version')} "
               f"(~1.5 h; trigger word '{r['name']}'); see vidgen.py avatar list")
+    elif args.action == "media":
+        name = args.name or (a[0] if a else None)
+        if not name:
+            raise ApiError("usage: vidgen.py avatar media --name <avatar>")
+        r = api("POST", f"/avatars/{name.lower()}/media", {})
+        print(f"media for '{r['name']}' {r['media']['state']}: photos and four 2 s clips (~6-8 min when the "
+              f"avatar has a Krea photo set, ~25 min otherwise); copied to "
+              f"{os.path.join(download_dir(), 'avatars', r['name'])} by the watcher")
     elif args.action == "use":
         if not args.name:
             raise ApiError("usage: vidgen.py avatar use --name <avatar>")
@@ -1219,6 +1229,104 @@ def maybe_sync_loras():
         log(f"LoRA sync failed, will retry: {type(e).__name__}: {e}")
 
 
+# ---------------------------------------------------------------- avatar media copies
+# Every avatar's photos and 2 s clips are copied to <download dir>/avatars/<name>/ by the watcher.
+# docs/specs/2026-11-24-avatar-media.md
+AVATAR_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+AVATAR_MEDIA_FILE = re.compile(r"(photo_\d{2}\.png|clip_\d\.mp4|media\.json)")  # same rule as the API
+
+
+def avatar_media_sync():
+    """Copy every avatar's ready media not yet here (or changed: new media, or a file of another size).
+    Returns how many avatars got new files. One sync at a time; an avatar that fails is retried next time."""
+    import fcntl
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "avatar_media_sync.lock"), "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("another avatar media sync is running; skipping")
+            return 0
+        changed = 0
+        for av in api("GET", "/avatars")["avatars"]:
+            media = av.get("media") or {}
+            if media.get("state") != "ready":
+                continue
+            if not AVATAR_NAME_RE.fullmatch(str(av.get("name"))):
+                log(f"avatar name {av.get('name')!r} from the server is not valid; skipped")
+                continue
+            try:
+                changed += _sync_avatar_media(av["name"], media.get("updated_at"))
+            except Exception as e:  # noqa: BLE001 - network, disk, server: retried next sync
+                log(f"avatar {av['name']} media: copy failed, will retry: {type(e).__name__}: {e}")
+        return changed
+
+
+def _sync_avatar_media(name, updated_at):
+    """Copy one avatar's media. New media (another updated_at, or none given) is fetched in full; the
+    same media only fills in missing or wrong-sized files. Files the server no longer lists are removed."""
+    d = os.path.join(download_dir(), "avatars", name)
+    record_path = os.path.join(d, LORA_RECORD)
+    try:
+        with open(record_path) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        record = {}
+    files = record.get("files") or {}
+    same = updated_at is not None and record.get("updated_at") == updated_at
+    if same and files and all(os.path.isfile(os.path.join(d, n)) and
+                              (s is None or os.path.getsize(os.path.join(d, n)) == s) for n, s in files.items()):
+        return 0
+    info = api("GET", f"/avatars/{name}/media")
+    os.makedirs(d, exist_ok=True)
+    got, new = {}, False
+    for f in info.get("files") or []:
+        fname, size = str(f.get("name")), f.get("size")
+        if not AVATAR_MEDIA_FILE.fullmatch(fname):
+            log(f"avatar {name} media: file name {fname!r} from the server is not allowed; skipped")
+            continue
+        path = os.path.join(d, fname)
+        if same and os.path.isfile(path) and (size is None or os.path.getsize(path) == size):
+            got[fname] = size
+            continue
+        try:
+            download(f["url"], path)
+        except BaseException:
+            if os.path.exists(path + ".part"):
+                os.remove(path + ".part")
+            raise
+        got[fname], new = size, True
+    for old in os.listdir(d):  # e.g. clip_4.mp4 after a remake that kept 3 clips
+        if AVATAR_MEDIA_FILE.fullmatch(old) and old not in got:
+            os.remove(os.path.join(d, old))
+            new = True
+    with open(record_path, "w") as f:  # only after every file is here
+        json.dump({"updated_at": updated_at, "files": got}, f)
+    if new:
+        log(f"avatar {name}: media copied to {d}")
+    return int(new)
+
+
+def maybe_sync_avatar_media():
+    """From the watcher: sync avatar media at most every LORA_SYNC_EVERY seconds; failures are logged."""
+    stamp = os.path.join(STATE_DIR, "avatar_media_sync.json")
+    try:
+        with open(stamp) as f:
+            last = json.load(f).get("at", 0)
+    except (OSError, ValueError):
+        last = 0
+    if time.time() - last < LORA_SYNC_EVERY:
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(stamp, "w") as f:
+        json.dump({"at": time.time()}, f)
+    try:
+        avatar_media_sync()
+    except Exception as e:  # noqa: BLE001 - the watcher must keep running whatever the sync hits
+        log(f"avatar media sync failed, will retry: {type(e).__name__}: {e}")
+
+
 def local_lora_versions():
     """{(name, version): bytes on disk} for the complete local LoRA copies (lora.json and .part files not
     counted)."""
@@ -1574,11 +1682,12 @@ def main():
 
     a = sub.add_parser("avatar", help="the characters who star in your videos",
                        description="list | refresh | add FILE... | images | remove <n> | main <n> | "
-                                   "pick <job_id> <n> | use --name N | history | restore <version>. "
+                                   "pick <job_id> <n> | use --name N | history | restore <version> | "
+                                   "krea-train --name N | media --name N (photos + 2 s clips). "
                                    "An avatar holds up to 12 images of the same person; photos and "
                                    "keyframes use the first 3 (best: full-length, face close-up, another angle).")
     a.add_argument("action", choices=["list", "refresh", "add", "images", "remove", "main", "pick", "use",
-                                      "history", "restore", "krea-train"])
+                                      "history", "restore", "krea-train", "media"])
     a.add_argument("--no-krea-lora", action="store_true",
                    help="refresh/pick: don't build this avatar's Krea 2 LoRA (it is built by default, ~1.5 h GPU)")
     a.add_argument("args", nargs="*", help="add: image files; remove/main: image number; "
