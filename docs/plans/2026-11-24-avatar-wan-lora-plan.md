@@ -6,13 +6,13 @@ Jira: N/A
 
 ## Progress
 
-- [x] Task 1: One-person check on photo sets and clips — in review
-- [x] Task 2: Wan LoRA state on new avatars — in review
-- [x] Task 3: Wan dataset and train job from the photo-set job — in review
-- [ ] Task 4: Trainer: avatar Wan builds
-- [ ] Task 5: Automatic avatar LoRA on video jobs
-- [ ] Task 6: On-demand Wan LoRA builds, CLI and dashboard
-- [ ] Task 7: Docs, deploy and live check
+- [x] Task 1: One-person check on photo sets and clips — reviewed; stuck-state blockers fixed
+- [x] Task 2: Wan LoRA state on new avatars — reviewed; stuck-state blockers fixed
+- [x] Task 3: Wan dataset and train job from the photo-set job — reviewed; stuck-state blockers fixed
+- [x] Task 4: Trainer: avatar Wan builds — reviewed; version-collision blocker fixed (D6)
+- [x] Task 5: Automatic avatar LoRA on video jobs — reviewed
+- [x] Task 6: On-demand Wan LoRA builds, CLI and dashboard — reviewed, browser-checked
+- [ ] Task 7: Docs, deploy and live check — docs done; deploy waiting for go-ahead
 
 ## Tasks
 

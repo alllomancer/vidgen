@@ -832,8 +832,9 @@ def avatar_command(args):
             count = av.get("images", 1)
             kl = (av.get("krea_lora") or {}).get("state", "none")
             md = (av.get("media") or {}).get("state", "none")
+            wl = (av.get("wan_lora") or {}).get("state", "none")
             print(f"{mark} {av['name']:16} {count:2} image{'s' if count != 1 else ' '}  Krea LoRA: {kl:9} "
-                  f"media: {md:7} {av['description']}")
+                  f"Wan LoRA: {wl:9} media: {md:7} {av['description']}")
     elif args.action == "refresh":
         name = args.name or api("GET", "/avatars")["default"] or DEFAULT_AVATAR_NAME
         avatar_setup(name, args.image, args.describe, args.candidates, args.model,
@@ -855,6 +856,14 @@ def avatar_command(args):
         kl = r["krea_lora"]
         print(f"Krea 2 LoRA for '{r['name']}' {kl['state']}: {kl['lora']} v{kl.get('version')} "
               f"(~1.5 h; trigger word '{r['name']}'); see vidgen.py avatar list")
+    elif args.action == "wan-train":
+        name = args.name or (a[0] if a else None)
+        if not name:
+            raise ApiError("usage: vidgen.py avatar wan-train --name <avatar>")
+        r = api("POST", f"/avatars/{name.lower()}/wan-lora", {})
+        wl = r["wan_lora"]
+        print(f"Wan LoRA for '{r['name']}' {wl['state']}: {wl.get('lora')} v{wl.get('version')} from its media "
+              f"(~1 h on the trainer; added to its videos automatically when ready); see vidgen.py avatar list")
     elif args.action == "media":
         name = args.name or (a[0] if a else None)
         if not name:
@@ -1608,6 +1617,8 @@ def main():
                                    '10: he sits down at the table" - each beat a full description, times in '
                                    "multiples of 5 (segments start every 5 s)")
     v.add_argument("--beats-file", help="the beats from a file, one 'SECONDS: text' per line")
+    v.add_argument("--no-avatar-lora", action="store_true",
+                   help="don't add the avatar's own Wan LoRA (added by default when it has a ready one)")
     v.add_argument("--anchor-every", type=int, metavar="N",
                    help="takes over 10 s with one avatar: restore the avatar's face every N segments (2-6)")
     v.add_argument("-o", "--out", help="file name inside the download folder (default <job_id>.mp4)")
@@ -1683,11 +1694,12 @@ def main():
     a = sub.add_parser("avatar", help="the characters who star in your videos",
                        description="list | refresh | add FILE... | images | remove <n> | main <n> | "
                                    "pick <job_id> <n> | use --name N | history | restore <version> | "
-                                   "krea-train --name N | media --name N (photos + 2 s clips). "
+                                   "krea-train --name N | media --name N (photos + 2 s clips) | "
+                                   "wan-train --name N (Wan LoRA from its media). "
                                    "An avatar holds up to 12 images of the same person; photos and "
                                    "keyframes use the first 3 (best: full-length, face close-up, another angle).")
     a.add_argument("action", choices=["list", "refresh", "add", "images", "remove", "main", "pick", "use",
-                                      "history", "restore", "krea-train", "media"])
+                                      "history", "restore", "krea-train", "media", "wan-train"])
     a.add_argument("--no-krea-lora", action="store_true",
                    help="refresh/pick: don't build this avatar's Krea 2 LoRA (it is built by default, ~1.5 h GPU)")
     a.add_argument("args", nargs="*", help="add: image files; remove/main: image number; "
@@ -1813,6 +1825,7 @@ def main():
                     "quality": video_quality(args), "image_model": args.image_model, **realism_body(args),
                     **({"beats": beats} if beats else {}),
                     **({"anchor_every": args.anchor_every} if args.anchor_every else {}),
+                    **({"avatar_lora": False} if args.no_avatar_lora else {}),
                 }, args.out)
         elif args.cmd == "photos":
             if args.image and args.avatar:

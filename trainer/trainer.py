@@ -389,9 +389,37 @@ cache_directory = "{cache}/image"
         run([VENV_PY, f"{MUSUBI}/convert_lora.py", "--input", src, "--output", dst, "--target", "other"],
             os.path.join(self.jd, "convert.log"))
 
+    def avatar_wan(self):
+        """An avatar's Wan LoRA build (docs/specs/2026-11-24-avatar-wan-lora.md): uploaded under its own LoRA name
+        and version, linked on the avatar, no auto previews."""
+        return self.params.get("model") == "t2v" and bool(self.params.get("avatar")) and bool(self.params.get("lora"))
+
+    def wan_current(self):
+        """Is this train job still the avatar's current Wan LoRA build?"""
+        try:
+            avatar = json.loads(s3.get_object(Bucket=BUCKET, Key=f"avatars/{self.client}/{self.params['avatar']}/"
+                                                                  "avatar.json")["Body"].read())
+        except s3.exceptions.NoSuchKey:
+            return False
+        created = self.params.get("avatar_created_at")
+        return (self.job["job_id"] in ((avatar.get("wan_lora") or {}).get("job_ids") or [])
+                and (created is None or avatar.get("created_at") in (None, created)))
+
+    def wan_link(self):
+        r = self.state["result"]
+        _update_avatar_lora(self.client, self.params["avatar"], self.job["job_id"], "wan_lora", state="ready",
+                            version=r["version"], ready={"lora": r["lora"], "version": r["version"]}, error=None)
+
     def upload(self):
         out = os.path.join(self.jd, "out")
-        base = f"loras/{self.client}/{self.name}/"
+        if self.avatar_wan() and not self.wan_current():  # replaced while training: write nothing
+            self.state["result"] = {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
+            return
+        lora_name = self.params["lora"] if self.avatar_wan() else self.name
+        base = f"loras/{self.client}/{lora_name}/"
+        if self.avatar_wan() and "version" not in self.state:  # the avatar build picked its version
+            self.state["version"] = int(self.params["version"])
+            self.save()
         if "version" not in self.state:
             keys = [o["Key"] for p in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=base)
                     for o in p.get("Contents", [])]
@@ -414,20 +442,22 @@ cache_directory = "{cache}/image"
                     s3.upload_file(conv, BUCKET, prefix + "checkpoints/" + abs_name)
                     files.append("checkpoints/" + abs_name)
         m = self.state["manifest"]
-        lora = {"name": self.name, "kind": m["kind"], "trigger": m["trigger"], "version": version,
+        lora = {"name": lora_name, "kind": m["kind"], "trigger": m["trigger"], "version": version,
                 "models": ["t2v"], "steps_per_expert": self.params["steps"], "rank": 32,
                 "speed": self.speed, "resolution": RESOLUTION[self.speed],
                 "base": {"t2v": BASE_MODEL, "dit": {e: os.path.basename(p) for e, p in DIT.items()}},
                 "dataset": {"fingerprint": self.params.get("fingerprint"), "files": m["file_count"],
                             "segments": self.state["segments"], "photos": self.state["photos"]},
                 "files": files, "job_id": self.job["job_id"], "created_at": int(time.time()),
-                "train_seconds": int(time.time() - int(self.job.get("started_at") or time.time()))}
+                "train_seconds": int(time.time() - int(self.job.get("started_at") or time.time())),
+                **({"avatar": self.params["avatar"], "source": "avatar"} if self.avatar_wan() else {})}
         s3.put_object(Bucket=BUCKET, Key=prefix + "lora.json", Body=json.dumps(lora, indent=2).encode(),
                       ContentType="application/json")
-        s3.put_object(Bucket=BUCKET, Key=base + "current.json", Body=json.dumps({"version": version}).encode(),
-                      ContentType="application/json")
+        if not self.avatar_wan() or self.wan_current():  # a replaced avatar build never becomes current
+            s3.put_object(Bucket=BUCKET, Key=base + "current.json", Body=json.dumps({"version": version}).encode(),
+                          ContentType="application/json")
         self.state["files"] = files
-        self.state["result"] = {"lora": self.name, "version": version, "prefix": prefix, "speed": self.speed,
+        self.state["result"] = {"lora": lora_name, "version": version, "prefix": prefix, "speed": self.speed,
                                 "steps_per_expert": self.params["steps"], "trigger": m["trigger"],
                                 "segments": self.state["segments"], "photos": self.state["photos"],
                                 "checkpoints": sum(f.startswith("checkpoints/") for f in files)}
@@ -622,6 +652,8 @@ num_repeats = 1
             self.phase("krea_upload", self.krea_upload)
             self.phase("krea_link", self.krea_link)
             return self.state["result"]
+        if self.avatar_wan() and not self.wan_current():
+            return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
         self.phase("prepare", self.prepare)
         self.phase("caption", self.caption)
         if self.params.get("captions_only"):
@@ -629,9 +661,16 @@ num_repeats = 1
                     "segments": self.state["segments"], "photos": self.state["photos"]}
         self.phase("cache", self.cache)
         self.phase("t2v_low", lambda: self.train("t2v_low"))
+        if self.avatar_wan() and not self.wan_current():  # replaced meanwhile: don't spend the second expert
+            return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
         self.phase("t2v_high", lambda: self.train("t2v_high"))
         self.phase("upload", self.upload)
-        self.phase("preview", self.queue_preview)
+        if self.avatar_wan():
+            if self.state.get("result", {}).get("skipped"):
+                return self.state["result"]
+            self.phase("wan_link", self.wan_link)
+        else:
+            self.phase("preview", self.queue_preview)
         return self.state["result"]
 
 
@@ -646,31 +685,36 @@ def _hf_download(repo, filename, local_dir, token):
 
 
 def _update_avatar_krea_lora(client, name, job_id, **fields):
-    """Set fields on the avatar's krea_lora, only while this job is still the avatar's current build
-    (a field set to None is removed)."""
+    return _update_avatar_lora(client, name, job_id, "krea_lora", **fields)
+
+
+def _update_avatar_lora(client, name, job_id, record, **fields):
+    """Set fields on the avatar's krea_lora / wan_lora record, only while this job is still the avatar's
+    current build (a field set to None is removed)."""
     key = f"avatars/{client}/{name}/avatar.json"
     try:
         avatar = json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
     except s3.exceptions.NoSuchKey:
         return False
-    kl = avatar.get("krea_lora") or {}
+    kl = avatar.get(record) or {}
     if job_id not in (kl.get("job_ids") or []):
         return False
     kl.update(fields)
     for k in [k for k, v in fields.items() if v is None]:
         kl.pop(k)
-    avatar["krea_lora"] = kl
+    avatar[record] = kl
     s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(avatar).encode(), ContentType="application/json")
     return True
 
 
 def krea_failed(job, error):
-    """A Krea avatar LoRA build failed: show it on the avatar (its last ready LoRA stays linked)."""
+    """An avatar LoRA build (Krea or Wan) failed: show it on the avatar (its last ready LoRA stays linked)."""
     params = json.loads(job.get("params") or "{}")
-    if params.get("model") == "krea2" and params.get("avatar"):
+    record = {"krea2": "krea_lora", "t2v": "wan_lora"}.get(params.get("model"))
+    if record and params.get("avatar") and (record == "krea_lora" or params.get("lora")):
         try:
-            _update_avatar_krea_lora(job["client"], params["avatar"], job["job_id"], state="failed",
-                                     error=str(error)[:500])
+            _update_avatar_lora(job["client"], params["avatar"], job["job_id"], record, state="failed",
+                                error=str(error)[:500])
         except Exception as e:  # never hide the job's own error
             log(event="krea_failed_update_error", error=str(e)[:200])
 

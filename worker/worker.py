@@ -947,6 +947,8 @@ def run_avatar_photoset(job, params, workdir):
     as the dataset datasets/<client>/<lora>/v<N>/ (manifest, raw/, captions.json starting with the trigger =
     the avatar name), then a krea2 train job is queued for the trainer. Every avatar write checks that this
     job is still the avatar's current build. docs/specs/2026-11-24-krea-avatar-lora.md"""
+    if params.get("wan_only"):  # an on-demand Wan LoRA build from the avatar's stored media
+        return _wan_only(job, params, workdir)
     if params.get("krea_lora") is False:  # media only (no Krea LoRA for this avatar, or media for an existing one)
         return _media_photoset(job, params, workdir)
     client, job_id = job["client"], job["job_id"]
@@ -969,6 +971,20 @@ def run_avatar_photoset(job, params, workdir):
             sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
         result = {"skipped": "the train job is already queued", "train_job_id": train_id}
         media = (_current_media(client, name, job_id, created) or (None, {}))[1]
+        if media.get("state") == "ready" and params.get("wan_lora") and \
+                not jobs.get_item(Key={"job_id": _wan_train_job_id(job_id)}).get("Item"):
+            try:  # the media is done but the Wan build never started: build it from the stored media
+                stored = _media_files(client, name, workdir)
+                kept_m = _one_person(stored[0], job_id)[0] if stored else []
+                if len(kept_m) < AVATAR_DATASET_MIN:
+                    raise RuntimeError(f"only {len(kept_m)} stored photos show exactly one person")
+                result.update(_maybe_wan(client, name, job_id, created, params, kept_m, stored[1], trigger))
+            except models.JobCancelled:
+                _update_wan(client, name, job_id, created, state="failed", error="cancelled")
+                raise
+            except Exception as e:  # noqa: BLE001 - the Krea build is queued; only the Wan build failed
+                _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+                result["wan_error"] = str(e)[:500]
         if media and media.get("state") != "ready":  # the media wasn't finished: make it from this build's photos
             try:
                 kept = _dataset_photos(client, lora, version, workdir, trigger)
@@ -1081,6 +1097,49 @@ def _wan_step(client, name, job_id, created, params, kept, clips, trigger):
     sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
     jobs.put_item(Item={"job_id": "_control_trainer", "client": "_system", "hold": False})
     return {"wan_train_job_id": train_id, "wan_dataset": prefix}
+
+
+def _media_files(client, name, workdir):
+    """The avatar's stored media, downloaded: ([(photo path, scene)], [(clip path, motion)]), or None."""
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = _s3_json(prefix + "media.json")
+    if not doc or not doc.get("photos"):
+        return None
+    out = []
+    for kind, label in (("photos", "scene"), ("clips", "motion")):
+        items = []
+        for e in doc.get(kind) or []:
+            fname = os.path.basename(str(e.get("file") or ""))
+            if not fname:
+                continue
+            path = os.path.join(workdir, f"m_{fname}")
+            s3.download_file(BUCKET, prefix + fname, path)
+            items.append((path, e.get(label) or ""))
+        out.append(items)
+    return out[0], out[1]
+
+
+def _wan_only(job, params, workdir):
+    """An on-demand Wan LoRA build (POST /avatars/{name}/wan-lora): the avatar's stored photos (one-person
+    checked) and clips become a new Wan dataset version; no new photos or clips."""
+    client, job_id = job["client"], job["job_id"]
+    name, trigger, created = params["avatar"], params.get("trigger") or params["avatar"], params.get("avatar_created_at")
+    if not _current_wan(client, name, job_id, created):
+        return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
+    try:
+        _update_wan(client, name, job_id, created, state="photos")
+        media = _media_files(client, name, workdir)
+        if not media:
+            raise RuntimeError("the avatar has no stored media to train on; make media first")
+        kept, clips = media
+        kept, people_dropped = _one_person(kept, job_id)
+        if len(kept) < AVATAR_DATASET_MIN:
+            raise krea.FilteredOut(f"only {len(kept)} of the avatar's media photos show exactly one person")
+        return dict(_wan_step(client, name, job_id, created, params, kept, clips, trigger),
+                    people_dropped=people_dropped)
+    except Exception as e:
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+        raise
 
 
 def _maybe_wan(client, name, job_id, created, params, kept, clips, trigger):

@@ -196,6 +196,83 @@ trainer.krea_failed({"job_id": "train1", "client": "m", "params": json.dumps(KP)
 kl = json.loads(store["avatars/m/ava/avatar.json"])["krea_lora"]
 assert kl["state"] == "failed" and kl["error"] == "boom" and kl["ready"]["version"] == 1, kl
 trainer.krea_failed({"job_id": "w1", "client": "m", "params": json.dumps({"dataset": "moves"})}, "x")  # Wan: no-op
+# ---------------------------------------------------------------- trainer: avatar Wan LoRAs
+WP = dict(model="t2v", dataset="avatar-ava-wan/v1", lora="avatar-ava-wan", version=1, trigger="ava", avatar="ava",
+          steps=1000, avatar_created_at=77)
+wj, wjd = make_job(**WP)
+ran = []
+for phase in ("prepare", "caption", "cache", "upload", "wan_link", "queue_preview"):
+    setattr(wj, phase, (lambda name: lambda *a: ran.append(name))(phase))
+wj.train = lambda expert: ran.append(expert)
+wj.state.update(result={"lora": "avatar-ava-wan", "version": 1})
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["pw", "train1"]}}).encode()
+wj.run_all()
+assert ran == ["prepare", "caption", "cache", "t2v_low", "t2v_high", "upload", "wan_link"], "no auto previews for avatar builds"
+ran.clear()
+wj2, _ = make_job(**WP)
+for phase in ("prepare", "caption", "cache", "upload", "wan_link"):
+    setattr(wj2, phase, (lambda name: lambda *a: ran.append(name))(phase))
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+assert "skipped" in wj2.run_all() and ran == [], "a replaced build is skipped before any GPU work"
+# upload: under the avatar's LoRA name and version (not the dataset name)
+uj, ujd = make_job(**WP)
+os.makedirs(os.path.join(ujd, "out"), exist_ok=True)
+for e in trainer.plan.EXPERTS:
+    open(os.path.join(ujd, "out", f"{e}.safetensors"), "wb").write(b"w")
+    uj.state[e] = {"final": f"{e}.safetensors", "runs": []}
+uj.state.update(manifest={"kind": "character", "trigger": "ava", "file_count": 28, "total_bytes": 1, "updated_at": 1},
+                segments=4, photos=24)
+uj.convert = lambda src, dst: open(dst, "wb").write(b"c")
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+uploaded.clear()
+uj.upload()
+assert "loras/m/avatar-ava-wan/v1/t2v_high.safetensors" in uploaded and "loras/m/avatar-ava-wan/v1/t2v_low.safetensors" in uploaded
+lj = json.loads(store["loras/m/avatar-ava-wan/v1/lora.json"])
+assert lj["name"] == "avatar-ava-wan" and lj["version"] == 1 and lj["models"] == ["t2v"] and lj["avatar"] == "ava"
+assert json.loads(store["loras/m/avatar-ava-wan/current.json"]) == {"version": 1}
+assert uj.state["result"]["lora"] == "avatar-ava-wan" and not any(k.startswith("loras/m/avatar-ava-wan/v1/v") for k in uploaded)
+# a build replaced while it trained uploads nothing (it could otherwise overwrite a newer build's files)
+sj, sjd = make_job(**WP)
+os.makedirs(os.path.join(sjd, "out"), exist_ok=True)
+sj.state.update(uj.state)
+sj.convert = uj.convert
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+uploaded.clear()
+sj.upload()
+assert not uploaded and sj.state["result"].get("skipped"), sj.state.get("result")
+ran = []
+sj3, _ = make_job(**WP)
+for phase in ("prepare", "caption", "cache", "upload", "wan_link"):
+    setattr(sj3, phase, (lambda name: lambda *a: ran.append(name))(phase))
+
+
+def low_then_replaced(expert):
+    ran.append(expert)
+    store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+
+
+sj3.train = low_then_replaced
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+assert "skipped" in sj3.run_all() and ran == ["prepare", "caption", "cache", "t2v_low"], ran
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+# link: ready with this version; a stale job never overwrites; failure marks the Wan build failed
+uj.wan_link()
+wl = json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]
+assert wl["state"] == "ready" and wl["ready"] == {"lora": "avatar-ava-wan", "version": 1} and "error" not in wl, wl
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+uj.wan_link()
+assert json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "queued"
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "training", "job_ids": ["train1"],
+                                                                            "ready": {"lora": "avatar-ava-wan", "version": 1}}}).encode()
+trainer.krea_failed({"job_id": "train1", "client": "m", "params": json.dumps(WP)}, "out of memory")
+wl = json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]
+assert wl["state"] == "failed" and wl["error"] == "out of memory" and wl["ready"]["version"] == 1, wl
 # models: a token without Krea 2 RAW access fails with the licence message
 trainer._hf_token = lambda: "t"
 trainer._hf_download = lambda repo, filename, local_dir, token: (_ for _ in ()).throw(PermissionError("403 gated"))
@@ -702,6 +779,9 @@ posted_m = []
 vidgen.api = lambda m, p, b=None: posted_m.append((m, p)) or {"name": "mira", "media": {"state": "queued"}}
 vidgen.avatar_command(NS(action="media", args=[], name="Mira"))
 assert posted_m == [("POST", "/avatars/mira/media")]
+vidgen.api = lambda m, p, b=None: posted_m.append((m, p)) or {"name": "mira", "wan_lora": {"state": "queued", "lora": "avatar-mira-wan", "version": 1}}
+vidgen.avatar_command(NS(action="wan-train", args=[], name="mira"))
+assert posted_m[-1] == ("POST", "/avatars/mira/wan-lora")
 vidgen.download_dir, vidgen.STATE_DIR = real_download_dir, real_state
 # avatars: --no-krea-lora, krea-train, and the Krea LoRA state in avatar list
 sent = []
@@ -780,7 +860,10 @@ assert vb["seconds"] == 50 and vb["anchor_every"] == 3 and vb["beats"] == [{"at"
                                                                           {"at": 10, "prompt": "sits"}], vb
 with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog"]):
     vidgen.main()
-assert "anchor_every" not in sub[-1][0] and "beats" not in sub[-1][0]
+assert "anchor_every" not in sub[-1][0] and "beats" not in sub[-1][0] and "avatar_lora" not in sub[-1][0]
+with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--no-avatar-lora"]):
+    vidgen.main()
+assert sub[-1][0]["avatar_lora"] is False
 vidgen.ensure_avatar = real_ensure
 vidgen.avatar_generate("mira", "a sailor", 4, "krea2")
 assert sub[-1][0] == {"type": "avatar", "description": "a sailor", "candidates": 4, "model": "krea2"}
@@ -809,6 +892,9 @@ assert posted[-1][:2] == ("POST", "/avatars/mira/media")
 ui.avatar_media("Mira", "GET")
 assert posted[-1][:2] == ("GET", "/avatars/mira/media")
 _stubs.expect_error(ui.avatar_media, "../x", "GET", contains="avatar name")
+ui.avatar_wan_lora("mira")
+assert posted[-1][:2] == ("POST", "/avatars/mira/wan-lora")
+_stubs.expect_error(ui.avatar_wan_lora, "Bad Name", contains="avatar name")
 # the LoRA list marks versions copied to this computer
 vidgen.api = lambda m, p, b=None: {"loras": [{"name": "moody", "current": 1, "versions": [{"version": 1}, {"version": 2}]}]}
 vidgen.local_lora_versions = lambda: {("moody", 1): 40}

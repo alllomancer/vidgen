@@ -27,3 +27,17 @@
 **Decision**: A photo-set job cancelled before it (re)starts marks the avatar's Krea build and media records it owns as failed ("cancelled").
 **Reason**: Live: inbal's Krea build was cancelled while its message waited for redelivery (the worker restart for the deploy had killed it); the worker's before-start cancel only set the job status, which would have left `krea_lora.state` at "photos" and blocked any rebuild with 409.
 **Alternatives considered**: An API-side reset route — the worker already owns these records and their staleness rules.
+
+## D5 — [2026-11-24] — Wan LoRA Task 1: One-person check on photo sets and clips
+
+**Status**: Accepted
+**Decision**: Qwen2.5-VL counts people per photo (and per clip middle frame) after the content filter; only exactly-one-person photos are used anywhere; answers are parsed from digits, number words and "single/alone"; unreadable answers count as -1 (dropped).
+**Reason**: Live: 12 of inbal's 24 photos showed two or three women (references that look very different); every LoRA trained on such a set mixes faces.
+**Alternatives considered**: A face detector (new dependency, misses people seen from behind); one reference image only (loses likeness from the other views).
+
+## D6 — [2026-11-24] — Wan LoRA Tasks 4-5: trainer avatar builds, auto-attach
+
+**Status**: Accepted
+**Decision**: Avatar Wan builds upload under `loras/<client>/avatar-<name>-wan/v<version>/` with the version picked by the API (monotonic: replacing an avatar drops only the `ready` link, never the version); the trainer re-checks it is still current after the first expert and before uploading, and a replaced build writes nothing; video jobs get the star's ready Wan LoRA pinned at 1.0, a broken link is skipped, never a 400.
+**Reason**: Review: dropping the version on replacement let a still-training build of the previous person collide with the new person's version and overwrite it; a missing LoRA file must not block a user's video.
+**Alternatives considered**: Version picked by the trainer (next free) — the avatar would not know which version to link until the upload.

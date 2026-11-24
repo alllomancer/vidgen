@@ -1209,6 +1209,39 @@ fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media=dic
 r = worker.run_avatar_photoset({"client": "m", "job_id": "pw4"}, dict(mparams, wan_lora=True, wan_lora_name="avatar-ava-wan",
                                                                        wan_version=3), tempfile.mkdtemp())
 assert "datasets/m/avatar-ava-wan/v3/manifest.json" in fs3.objects and r.get("wan_train_job_id"), r
+# on demand (wan_only): the Wan dataset comes from the avatar's stored media; no new photos or clips
+fs3.objects["avatars/m/ava/media/media.json"] = _json.dumps({
+    "photos": [{"file": f"photo_{i:02d}.png", "scene": f"scene {i}"} for i in range(1, 21)],
+    "clips": [{"file": f"clip_{i}.mp4", "motion": _photos.AVATAR_CLIP_MOTIONS[i - 1]} for i in (1, 2, 3)]}).encode()
+people["m_photo_03.png"] = 2
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media={"state": "ready", "job_id": "old"},
+    wan_lora={"state": "queued", "lora": "avatar-ava-wan", "version": 4, "trigger": "ava", "job_ids": ["po1"]})).encode()
+made.clear(), clip_calls.clear()
+oparams = {"avatar": "ava", "trigger": "ava", "avatar_created_at": 77, "krea_lora": False, "wan_only": True,
+           "wan_lora": True, "wan_lora_name": "avatar-ava-wan", "wan_version": 4}
+r = worker.run_avatar_photoset({"client": "m", "job_id": "po1"}, dict(oparams), tempfile.mkdtemp())
+om = _json.loads(fs3.objects["datasets/m/avatar-ava-wan/v4/manifest.json"])
+assert not made and not clip_calls and om["file_count"] == 19 + 3 and r.get("wan_train_job_id"), (r, om["file_count"])
+oc = _json.loads(fs3.objects["datasets/m/avatar-ava-wan/v4/captions.json"])
+assert oc["items"]["p0001.png"] == "ava, scene 1" and "s0020_00.mp4" in oc["items"]
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["media"] == {"state": "ready", "job_id": "old"}, "media untouched"
+people.clear()
+# a redelivered build whose media is done but whose Wan build never started builds it from the stored media
+made.clear(), clip_calls.clear()
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pw1"]),
+    media=dict(kdoc["media"], job_id="pw1", state="ready"),
+    wan_lora={"state": "queued", "lora": "avatar-ava-wan", "version": 6, "trigger": "ava", "job_ids": ["pw1"]})).encode()
+gone = job_items.pop(worker._wan_train_job_id("pw1"))  # the Krea train job exists, the Wan one never got written
+existing_ids.discard(gone["job_id"])
+r = worker.run_avatar_photoset({"client": "m", "job_id": "pw1"}, dict(wparams, wan_version=6), tempfile.mkdtemp())
+assert r.get("wan_train_job_id") == gone["job_id"] and not made and not clip_calls, r
+assert _json.loads(fs3.objects["datasets/m/avatar-ava-wan/v6/manifest.json"])["file_count"] == 20 + 3
+# no stored media: the Wan build fails with the reason
+del fs3.objects["avatars/m/ava/media/media.json"]
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, wan_lora={"state": "queued", "job_ids": ["po2"]})).encode()
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "po2"}, dict(oparams, wan_version=5),
+                    tempfile.mkdtemp(), contains="media", exc=RuntimeError)
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "failed"
 # one-person check: photos that don't show exactly one person are dropped before any dataset or media
 people.update({f"ava_{i:02d}.png": 2 for i in range(1, 7)})  # 6 photos with two people
 clip_calls.clear(), fs3.uploaded.clear()

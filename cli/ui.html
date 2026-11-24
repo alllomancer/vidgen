@@ -208,6 +208,7 @@ form:not(.krea) .krea-text { display: none !important; }
           <label><input type="checkbox" name="upscale"> Upscale 2x</label>
           <label title="Render at 832x480, then 32 fps + 2x upscale to 1664x960: about 2-3x faster, softer detail"><input type="checkbox" name="draft"> Draft (faster)</label>
           <label><input type="checkbox" name="sound" checked> Sound</label>
+          <label title="Videos starring an avatar with a ready Wan LoRA get it automatically (keeps the face over long takes)"><input type="checkbox" name="avatar_lora" checked> Avatar's Wan LoRA</label>
         </div>
         <fieldset class="wide realism">
           <legend>Realism</legend>
@@ -868,6 +869,14 @@ function avatarKreaReady(value) {
   const a = createOptions && createOptions.avatars.find(x => x.name === name);
   return !!(a && a.krea_lora && a.krea_lora.ready);
 }
+function wanHtml(a) {
+  const w = a.wan_lora || {state: "none"}, busy = ["queued", "photos", "training"].includes(w.state);
+  const ready = w.ready ? ` · <code>${esc(w.ready.lora)}</code> v${esc(String(w.ready.version))}` : "";
+  const err = w.state === "failed" && w.error ? ` <span class="sub">${esc(w.error)}</span>` : "";
+  const canTrain = !busy && (a.media || {}).state === "ready";
+  return ` <span class="chip">Wan LoRA: ${esc(w.state)}</span>${ready}${err}` + (canTrain ?
+    ` <button class="small" data-wan-train="${esc(a.name)}" aria-label="${w.ready ? "Retrain" : "Train"} the Wan LoRA for ${esc(a.name)}">${w.ready ? "Retrain" : "Train"} Wan LoRA</button>` : "");
+}
 function renderAvatarKrea() {
   const el = $("avatar-krea"), avs = (createOptions && createOptions.avatars) || [];
   el.hidden = !avs.length;
@@ -881,6 +890,7 @@ function renderAvatarKrea() {
     const mInfo = m.state === "ready" ? ` · ${esc(String(m.photos || 0))} photos, ${esc(String(m.clips || 0))} clips` : "";
     return `<li><b>${esc(a.name)}</b> <span class="chip">Krea LoRA: ${esc(k.state)}</span>${ready}${err}` +
       (busy ? "" : ` <button class="small" data-krea-train="${esc(a.name)}">${k.ready ? "Retrain" : "Train"} Krea LoRA</button>`) +
+      wanHtml(a) +
       ` <span class="chip">Media: ${esc(m.state)}</span>${mInfo}${mErr}` +
       (m.state === "ready" ? ` <button class="small" data-media-play="${esc(a.name)}" aria-label="Play ${esc(a.name)}'s preview clip">Play clip</button>` : "") +
       (mBusy ? "" : ` <button class="small" data-media-make="${esc(a.name)}" aria-label="${m.state === "ready" ? "Remake" : "Make"} media for ${esc(a.name)}">${m.state === "ready" ? "Remake" : "Make"} media</button>`) +
@@ -889,6 +899,14 @@ function renderAvatarKrea() {
   el.innerHTML = `<h3 style="font-size:13px;margin:12px 0 4px">Avatars: Krea 2 LoRAs and media (photos + 2 s clips, copied to your download folder)</h3><ul class="plain">${rows.join("")}</ul>`;
 }
 $("avatar-krea").onclick = async e => {
+  const wanBtn = e.target.closest("button[data-wan-train]");
+  if (wanBtn) {
+    const name = wanBtn.dataset.wanTrain;
+    if (!confirm(`Train a Wan LoRA for ${name} from its photos and clips? About 1 h on the trainer.`)) return;
+    try { await api("POST", `/api/avatars/${encodeURIComponent(name)}/wan-lora`); toast("Wan LoRA build queued"); await loadCreateOptions(); }
+    catch (err) { toast(err.message); }
+    return;
+  }
   const play = e.target.closest("button[data-media-play]"), make = e.target.closest("button[data-media-make]");
   if (play) {
     const name = play.dataset.mediaPlay, box = document.querySelector(`[data-media-for="${CSS.escape(name)}"]`);
@@ -1025,7 +1043,8 @@ function createBody(kind, f) {
       seed: num(d.seed), avatar: d.avatar || undefined, loras: lora, fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
       quality: vq, sound: on("sound"), image_model: d.image_model || "wan", ...real,
       beats: long.beats && (d.beats || "").trim() ? d.beats.trim() : undefined,
-      anchor_every: long.anchor && d.anchor_every ? num(d.anchor_every) : undefined};
+      anchor_every: long.anchor && d.anchor_every ? num(d.anchor_every) : undefined,
+      avatar_lora: on("avatar_lora") ? undefined : false};
   }
   if (kind === "story") return {type: "story", story: d.story, max_shots: num(d.shots), seconds_per_shot: num(d.seconds_per_shot),
     style: d.style, voice: d.voice, avatar: d.avatar || undefined, loras: lora, narration: on("narration"),

@@ -200,6 +200,34 @@ for bad, msg in [([{"name": "nope"}], "not found"), ([{"name": "jerk", "weight":
                  ([{"name": "style", "step": 500}], "no checkpoint")]:
     _stubs.expect_error(h._resolve_loras, "m", bad, contains=msg)
 assert h._resolve_loras("m", [{"name": "jerk", "version": 1, "step": 500}])[0]["high_key"].endswith("step000500.safetensors")
+# the star avatar's ready Wan LoRA is attached to video jobs first, at 1.0, within the 2-Wan-LoRA limit
+s3.put_json("loras/m/avatar-dana-wan/current.json", {"version": 2})
+s3.put_json("loras/m/avatar-dana-wan/v2/lora.json", {"version": 2, "models": ["t2v"], "trigger": "dana",
+                                                     "files": ["t2v_high.safetensors", "t2v_low.safetensors"]})
+saved_aw = (h._queue_job, h._resolve_avatars)
+got_params = []
+h._queue_job = lambda client, job_type, params, rerun_of=None: got_params.append(params) or {"statusCode": 202, "body": "{}"}
+dana_wan = {"name": "dana", "wan_lora": {"state": "ready", "ready": {"lora": "avatar-dana-wan", "version": 2}}}
+h._resolve_avatars = lambda client, req: [] if req == "none" else [dict(dana_wan)]
+assert h.create_job("m", {"type": "video", "prompt": "x"})["statusCode"] == 202
+pl = got_params[-1]["loras"]
+assert pl[0]["name"] == "avatar-dana-wan" and pl[0]["version"] == 2 and pl[0]["weight"] == 1.0 and pl[0]["step"] is None, pl
+assert pl[0]["high_key"] == "loras/m/avatar-dana-wan/v2/t2v_high.safetensors"
+assert h._summary("video", got_params[-1])[1]["loras"][0].startswith("avatar-dana-wan")
+h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk:0.5"})
+assert [l["name"] for l in got_params[-1]["loras"]] == ["avatar-dana-wan", "jerk"], "one user LoRA beside it"
+r = h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk, style"})
+assert r["statusCode"] == 400 and "avatar" in body(r)["error"], "two user LoRAs plus the avatar's: limit named"
+h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk", "avatar_lora": False})
+assert [l["name"] for l in got_params[-1]["loras"]] == ["jerk"], "avatar_lora false: not attached"
+h.create_job("m", {"type": "video", "prompt": "x", "loras": "avatar-dana-wan:0.7"})
+assert [(l["name"], l["weight"]) for l in got_params[-1]["loras"]] == [("avatar-dana-wan", 0.7)], "named by the user: theirs"
+h.create_job("m", {"type": "story", "story": "once upon a time"})
+assert not got_params[-1].get("loras"), "stories don't get it"
+h._resolve_avatars = lambda client, req: [dict(dana_wan, wan_lora={"state": "ready", "ready": {"lora": "avatar-dana-wan", "version": 9}})]
+assert h.create_job("m", {"type": "video", "prompt": "x"})["statusCode"] == 202 and not got_params[-1].get("loras"), \
+    "a broken link never fails the job"
+h._queue_job, h._resolve_avatars = saved_aw
 assert h.set_lora_current("m", "jerk", {"version": 1, "step": 750})["statusCode"] == 200
 assert h._resolve_loras("m", [{"name": "jerk"}])[0]["step"] == 750
 assert h._resolve_loras("m", [{"name": "jerk", "version": 1}])[0]["step"] is None, "pinned version = final"
@@ -537,6 +565,26 @@ assert lst["nolora"]["media"]["state"] == "clips" and lst["old"]["media"] == {"s
 assert lst["old"]["wan_lora"] == {"state": "none"} and lst["nolora"]["wan_lora"]["state"] == "queued"
 assert json.loads([q for q in queued if q.get("type") == "avatar_photoset"][-1]["params"])["wan_lora"] is False, \
     "media-only jobs never build a Wan LoRA"
+# on-demand Wan LoRA build from the avatar's media
+queued.clear()
+assert h.avatar_wan_lora("m", "ghost", {})["statusCode"] == 404
+h._set_media("m", "nolora", {"state": "clips", "job_id": "mm", "created_at": 1})
+h._set_wan_lora("m", "nolora", {"state": "failed"})
+r = h.avatar_wan_lora("m", "nolora", {})
+assert r["statusCode"] == 409 and "media" in body(r)["error"], ("make media first", r)
+h._set_media("m", "nolora", {"state": "ready", "job_id": "mm", "created_at": 1})
+h._set_wan_lora("m", "nolora", {"state": "failed"})
+r = h.avatar_wan_lora("m", "nolora", {})
+wj = [q for q in queued if q.get("type") == "avatar_photoset"]
+assert r["statusCode"] == 202 and len(wj) == 1, r
+wpp = json.loads(wj[0]["params"])
+assert wpp["wan_only"] is True and wpp["wan_lora"] is True and wpp["wan_lora_name"] == "avatar-nolora-wan" and wpp["krea_lora"] is False
+assert h._get_avatar("m", "nolora")["wan_lora"]["state"] == "queued" and h._get_avatar("m", "nolora")["media"]["state"] == "ready"
+h.jobs.get_item = lambda Key: {"Item": {"job_id": Key["job_id"], "status": "queued"}}
+assert h.avatar_wan_lora("m", "nolora", {})["statusCode"] == 409, "one build at a time"
+h.jobs.get_item = lambda Key: {"Item": {"job_id": Key["job_id"], "status": "failed"}}
+assert h.avatar_wan_lora("m", "nolora", {})["statusCode"] == 202, "a build whose jobs ended is not busy"
+h.jobs = mock.MagicMock(put_item=lambda Item: queued.append(Item))
 # queueing failures leave no media stuck in "queued"
 real_qj = h._queue_job
 h._queue_job = lambda *a, **k: (_ for _ in ()).throw(ValueError("sqs down"))
@@ -580,6 +628,13 @@ h.add_avatar_images("m", "ava", {"upload_keys": uploads("ava2.png")})
 assert h._get_avatar("m", "ava")["krea_lora"]["state"] == "ready", "add keeps the link"
 assert h._get_avatar("m", "ava")["media"]["state"] == "queued", "image edits keep the media record"
 assert h._get_avatar("m", "ava")["wan_lora"]["lora"] == "avatar-ava-wan", "and the Wan LoRA record"
+h.create_avatar("m", {"name": "rep", "upload_keys": uploads("rep1.png"), "krea_lora": False})
+h._set_wan_lora("m", "rep", dict(h._get_avatar("m", "rep")["wan_lora"], state="ready",
+                                 ready={"lora": "avatar-rep-wan", "version": 1}))
+h.create_avatar("m", {"name": "rep", "upload_keys": uploads("rep2.png"), "krea_lora": False})
+rw = h._get_avatar("m", "rep")["wan_lora"]
+assert "ready" not in rw and rw["state"] == "queued", "a replaced avatar drops the previous person's Wan LoRA"
+assert rw["version"] == 2, "versions keep rising: an in-flight build of the previous person can't collide"
 tick()
 h.remove_avatar_image("m", "ava", "2")
 assert h._get_avatar("m", "ava")["krea_lora"]["ready"]["version"] == 1, "remove keeps the link"

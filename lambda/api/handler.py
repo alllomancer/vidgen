@@ -803,6 +803,9 @@ def create_avatar(client, body):
 
     _archive_avatar(client, name)
     _write_avatar(client, name, sources, description)
+    av = _get_avatar(client, name)
+    if (av or {}).get("wan_lora"):  # a new or replaced avatar: never the previous person's Wan LoRA
+        _set_wan_lora(client, name, {k: v for k, v in av["wan_lora"].items() if k != "ready"})  # version stays: monotonic
     if not wan_lora:
         _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="skipped"))
     if krea_lora:
@@ -883,7 +886,7 @@ def _avatar_wan_lora_name(name):
 def _wan_lora_of(client, name):
     """The avatar's wan_lora record without the per-build fields (keeps the last ready link)."""
     wl = (_get_avatar(client, name) or {}).get("wan_lora") or {}
-    return {k: wl[k] for k in ("ready", "lora", "trigger") if k in wl}
+    return {k: wl[k] for k in ("ready", "lora", "trigger", "version") if k in wl}  # version: stays monotonic
 
 
 def _set_wan_lora(client, name, wan_lora):
@@ -907,6 +910,31 @@ def _wan_build(client, name, job_id):
     _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="queued", lora=lora, version=version,
                                      trigger=name, job_ids=[job_id]))
     return {"wan_lora": True, "wan_lora_name": lora, "wan_version": version}
+
+
+def avatar_wan_lora(client, name, body):
+    """POST /avatars/{name}/wan-lora: build (a new version of) the avatar's Wan LoRA from its current media."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    wl = avatar.get("wan_lora") or {}
+    if wl.get("state") in WAN_LORA_BUSY and any(_job_live(j) for j in wl.get("job_ids") or []):
+        return _resp(409, {"error": f"avatar '{name}' already has a Wan LoRA build {wl['state']}; wait for it"})
+    if (avatar.get("media") or {}).get("state") != "ready":
+        return _resp(409, {"error": f"avatar '{name}' has no ready media; make media first (vidgen avatar media)"})
+    job_id = uuid.uuid4().hex
+    try:
+        params = {"avatar": name, "trigger": name, "avatar_created_at": avatar["created_at"], "krea_lora": False,
+                  "wan_only": True, **_wan_build(client, name, job_id)}
+        if not params.get("wan_lora"):
+            return _resp(409, {"error": (_get_avatar(client, name).get("wan_lora") or {}).get("error")})
+        _queue_job(client, "avatar_photoset", params, job_id=job_id)
+    except (ClientError, ValueError) as e:
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                         error=f"could not queue the Wan LoRA build: {e}"))
+        return _resp(502, {"error": f"could not queue the Wan LoRA build: {e}"})
+    return _resp(202, {"name": name, "wan_lora": _get_avatar(client, name)["wan_lora"]})
 
 
 def _queue_krea_lora(client, name, wan=False):
@@ -1424,6 +1452,25 @@ def _with_avatar_lora(client, avatar_lora, krea):
     return _resolve_loras(client, [dict(avatar_lora, weight=1.0)]) + own
 
 
+def _with_avatar_wan_lora(client, params):
+    """A video starring an avatar with a ready Wan LoRA gets it first, at 1.0 (its final weights, pinned), within
+    the Wan LoRA limit; not when the user already named it. A broken link is skipped (logged), never a 400."""
+    avatars = params.get("avatars") or []
+    ready = ((avatars[0].get("wan_lora") or {}).get("ready") or {}) if avatars else {}
+    if not ready.get("lora") or any(l["name"] == ready["lora"] for l in params.get("loras") or []):
+        return
+    try:
+        lora = _resolve_loras(client, [{"name": ready["lora"], "version": ready["version"], "weight": 1.0}])
+    except ValueError as e:
+        print(json.dumps({"event": "avatar_wan_lora_skipped", "avatar": avatars[0].get("name"), "error": str(e)}))
+        return
+    loras = lora + list(params.get("loras") or [])
+    if sum(l["model"] == "t2v" for l in loras) > MAX_RENDER_LORAS:
+        raise ValueError(f"at most {MAX_RENDER_LORAS} Wan LoRAs per job, counting the avatar's own Wan LoRA "
+                         f"'{ready['lora']}' (send avatar_lora: false, or --no-avatar-lora, to leave it out)")
+    params["loras"] = loras
+
+
 def _job_loras(client, job_type, params, requested):
     """Route a job's LoRAs by kind: Wan ones to params["loras"] (video, story), Krea 2 ones to
     params["krea_loras"] (Krea photos; Krea first frames of videos and stories). Raises ValueError for
@@ -1887,6 +1934,8 @@ def create_job(client, body):
                 raise ValueError("anchor_every needs exactly one avatar in the take")
         if job_type != "lora_preview":  # a preview names its LoRA in "name"
             _job_loras(client, job_type, params, body.get("loras"))
+        if job_type == "video" and body.get("avatar_lora") is not False:
+            _with_avatar_wan_lora(client, params)
         if job_type in ("video", "story"):
             _avatar_first_frame(client, job_type, params)
     except (ValueError, TypeError) as e:
@@ -2208,6 +2257,8 @@ def handler(event, context):
         return avatar_history(client, params["name"].lower())
     if route == "POST /avatars/{name}/krea-lora":
         return avatar_krea_lora(client, params["name"], body)
+    if route == "POST /avatars/{name}/wan-lora":
+        return avatar_wan_lora(client, params["name"], body)
     if route == "POST /avatars/{name}/media":
         return avatar_media_create(client, params["name"], body)
     if route == "GET /avatars/{name}/media":
