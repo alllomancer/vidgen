@@ -1011,6 +1011,22 @@ function syncLoraOptions(f) {
                       (f.dataset.kind === "story" || f.elements.avatar.value === "none" ||
                        avatarKreaReady(f.elements.avatar.value));
     allow = kreaFrame ? ["t2v", "krea2"] : ["t2v"];
+    // Say why the Krea LoRAs are missing instead of hiding them silently.
+    const block = f.querySelector(".lora-block");
+    let hint = block && block.querySelector(".lora-hint");
+    if (block && !hint) {
+      hint = document.createElement("p");
+      hint.className = "hint lora-hint";
+      hint.setAttribute("role", "status");
+      block.appendChild(hint);
+    }
+    if (hint) {
+      const wantsKrea = f.elements.image_model && f.elements.image_model.value === "krea2";
+      const who = f.elements.avatar.value || (createOptions && createOptions.def) || "this avatar";
+      hint.hidden = !(wantsKrea && !kreaFrame);
+      hint.textContent = hint.hidden ? "" : `Krea 2 LoRAs need avatar "none", or an avatar with a ready Krea LoRA; ` +
+        `${who} has none (train one in the avatar list below, or pick another avatar).`;
+    }
   }
   for (const sel of sels) {
     for (const o of sel.options) if (o.dataset.model) o.hidden = o.disabled = !allow.includes(o.dataset.model);
