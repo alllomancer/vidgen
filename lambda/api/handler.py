@@ -812,12 +812,18 @@ def create_avatar(client, body):
             kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
                                                    error=f"could not queue the Krea LoRA build: {e}"))
             _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+            if wan_lora:
+                _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                                 error=f"could not queue the Wan LoRA build: {e}"))
     else:
         kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="skipped"))
         try:  # no Krea LoRA, but every avatar gets its photos and clips (and, by default, a Wan LoRA)
             _queue_avatar_media(client, name, wan=wan_lora)
         except (ClientError, ValueError) as e:
             _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+            if wan_lora:
+                _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                                 error=f"could not queue the Wan LoRA build: {e}"))
 
     # make_default: true/false as asked; omitted = only if there is no default yet.
     make_default = body.get("make_default")

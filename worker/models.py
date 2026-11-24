@@ -916,6 +916,8 @@ def _parse_count(answer):
         return int(m.group(0))
     if re.search(r"\b(none|nobody|no one|no people|zero)\b", text):
         return 0
+    if re.search(r"\b(a single|single|just one|only one|alone)\b", text):
+        return 1
     m = re.search(r"\b(" + "|".join(COUNT_WORDS) + r")\b", text)
     return COUNT_WORDS[m.group(1)] if m else -1
 

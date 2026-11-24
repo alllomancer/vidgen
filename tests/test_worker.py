@@ -926,7 +926,7 @@ models.make_photo = lambda references, prompt, neg, w, h, seed, best=False: made
 # one-person check: the VLM's answer parsed to a count
 real_chat_cp = models._chat
 for answer, want in [("1", 1), ("There are 2 people.", 2), ("One.", 1), ("two", 2), ("none", 0), ("no one", 0),
-                     ("I can't tell", -1)]:
+                     ("A single person.", 1), ("I can't tell", -1)]:
     models._chat = lambda messages, max_new_tokens=1024, a=answer, **k: a
     assert models.count_people("/x.png") == want, (answer, models.count_people("/x.png"))
 asked_cp = []
@@ -1221,12 +1221,20 @@ assert ds["file_count"] == 18 and "ava_01.png" not in [f["path"] for f in ds["fi
 assert len([k for k in fs3.uploaded if "/media/photo_" in k]) == 18
 people.update({f"ava_{i:02d}.png": 2 for i in range(1, 13)})  # 12 of 24: too few left
 fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(kdoc, krea_lora=dict(kdoc["krea_lora"], job_ids=["pp2"]),
-                                                            media=dict(kdoc["media"], job_id="pp2"))).encode()
+                                                            media=dict(kdoc["media"], job_id="pp2"),
+                                                            wan_lora={"state": "queued", "job_ids": ["pp2"]})).encode()
 _stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pp2"}, dict(pparams, version=21),
                     tempfile.mkdtemp(), contains="exactly one person", exc=krea.FilteredOut)
 assert "datasets/m/avatar-ava/v21/manifest.json" not in fs3.objects
 av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
 assert av["krea_lora"]["state"] == "failed" and av["media"]["state"] == "failed"
+assert av["wan_lora"]["state"] == "failed", "the Wan build is released too (not stuck queued)"
+# the same on the media-only path (no Krea LoRA)
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(media_doc, media=dict(media_doc["media"], job_id="pp2m"),
+                                                            wan_lora={"state": "queued", "job_ids": ["pp2m"]})).encode()
+_stubs.expect_error(worker.run_avatar_photoset, {"client": "m", "job_id": "pp2m"}, dict(mparams, wan_lora=True,
+                    wan_lora_name="avatar-ava-wan", wan_version=9), tempfile.mkdtemp(), exc=krea.FilteredOut)
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "failed"
 people.clear()
 # a clip whose middle frame shows two people is dropped
 people["clip_2.mp4.1.png"] = 2
@@ -1323,6 +1331,10 @@ worker.process("pc", "r")
 av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
 assert av["krea_lora"]["state"] == "failed" and av["krea_lora"]["error"] == "cancelled", av["krea_lora"]
 assert av["media"]["state"] == "failed" and av["media"]["error"] == "cancelled"
+fs3.objects["avatars/m/ava/avatar.json"] = _json.dumps(dict(avatar_doc, wan_lora={"state": "queued", "job_ids": ["pc2"]})).encode()
+job_items["pc2"] = dict(job_items["pc"], job_id="pc2")
+worker.process("pc2", "r")
+assert _json.loads(fs3.objects["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "failed", "cancel releases Wan"
 import time as _time  # noqa: E402
 os.makedirs(worker.take_work_dir("old")), os.makedirs(worker.take_work_dir("new"))
 os.utime(worker.take_work_dir("old"), (_time.time() - 4 * 86400,) * 2)

@@ -937,6 +937,7 @@ def _media_photoset(job, params, workdir):
         return dict(result, **_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
     except Exception as e:
         _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
         raise
 
 
@@ -953,6 +954,7 @@ def run_avatar_photoset(job, params, workdir):
     created = params.get("avatar_created_at")
     if not TRAIN_QUEUE_URL:
         _update_media(client, name, job_id, created, state="failed", error="the trainer is not deployed")
+        _update_wan(client, name, job_id, created, state="failed", error="the trainer is not deployed")
         raise RuntimeError("the trainer is not deployed (training_enabled in Terraform); can't train the Krea LoRA")
     cur = _current_build(client, name, job_id, created)
     if not cur:
@@ -972,7 +974,7 @@ def run_avatar_photoset(job, params, workdir):
                 kept = _dataset_photos(client, lora, version, workdir, trigger)
                 if kept:
                     kept, _ = _one_person(kept, job_id)
-                if kept:
+                if kept and len(kept) >= AVATAR_DATASET_MIN:
                     result.update(_avatar_media(client, name, job_id, created, kept, workdir, trigger))
                     clips = result.pop("_clips", [])
                     result.update(_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
@@ -984,9 +986,10 @@ def run_avatar_photoset(job, params, workdir):
         return result
     try:
         return _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger, version, created)
-    except Exception as e:  # the photo set failed: the Krea build and the media it was for
+    except Exception as e:  # the photo set failed: the Krea build and the media and Wan builds it was for
         _update_build(client, name, job_id, created, state="failed", error=str(e)[:500])
         _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
         raise
 
 
@@ -1180,6 +1183,8 @@ def process(job_id, receipt):
                               state="failed", error="cancelled")
                 _update_media(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
                               state="failed", error="cancelled")
+                _update_wan(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                            state="failed", error="cancelled")
         return
 
     params = json.loads(job["params"])

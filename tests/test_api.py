@@ -544,6 +544,7 @@ h.create_avatar("m", {"name": "qfail", "upload_keys": uploads("q1.png"), "krea_l
 assert h._get_avatar("m", "qfail")["media"]["state"] == "failed"
 h.create_avatar("m", {"name": "qfail2", "upload_keys": uploads("q2.png")})
 assert h._get_avatar("m", "qfail2")["media"]["state"] == "failed"
+assert h._get_avatar("m", "qfail2")["wan_lora"]["state"] == "failed" and h._get_avatar("m", "qfail")["wan_lora"]["state"] == "failed"
 h._set_media("m", "qfail", {"state": "failed"})
 r = h.avatar_media_create("m", "qfail", {})
 assert r["statusCode"] == 502 and h._get_avatar("m", "qfail")["media"]["state"] == "failed", "POST /media: no stuck queued"
