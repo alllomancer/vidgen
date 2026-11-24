@@ -157,7 +157,25 @@ for bad, msg in [({"model": "krea2", "avatar": "dana"}, "no Krea 2 LoRA"), ({"mo
     _stubs.expect_error(h._validate_photos, "m", bad, contains=msg)
 _, v = h._validate("m", {"type": "video", "prompt": "x", "image_model": "krea2"})
 assert v["image_model"] == "krea2" and h._summary("video", v)[1]["first_frame"] == "krea2"
-assert h._validate("m", {"type": "video", "prompt": "x"})[1]["image_model"] == "wan"
+assert h._validate("m", {"type": "video", "prompt": "x"})[1]["image_model"] == "auto", "default: Krea first frame when possible"
+# auto: a Krea first frame when it can be made (no avatar, or one avatar with a ready Krea LoRA; stories always), else Wan
+saved_auto = (h._queue_job, h._resolve_avatars, h._avatar_first_frame)
+seen_auto = []
+h._queue_job = lambda client, job_type, params, rerun_of=None: seen_auto.append(params) or {"statusCode": 202, "body": "{}"}
+h._avatar_first_frame = lambda client, job_type, params: None
+ready_av = {"name": "kr", "krea_lora": {"state": "ready", "ready": {"lora": "avatar-kr", "version": 1}}}
+avs = {"none": [], "dana": [{"name": "dana"}], "kr": [ready_av], "two": [ready_av, {"name": "dana"}]}
+h._resolve_avatars = lambda client, req: avs[req or "dana"]
+for kind_body, avatar, want in [({"type": "video", "prompt": "x"}, "none", "krea2"),
+                                ({"type": "video", "prompt": "x"}, "kr", "krea2"),
+                                ({"type": "video", "prompt": "x"}, "dana", "wan"),
+                                ({"type": "video", "prompt": "x"}, None, "wan"),
+                                ({"type": "video", "prompt": "x"}, "two", "wan"),
+                                ({"type": "story", "story": "once"}, "dana", "krea2"),
+                                ({"type": "video", "prompt": "x", "image_model": "wan"}, "none", "wan")]:
+    r = h.create_job("m", dict(kind_body, **({"avatar": avatar} if avatar else {})))
+    assert r["statusCode"] == 202 and seen_auto[-1]["image_model"] == want, (kind_body, avatar, seen_auto[-1].get("image_model"), r)
+h._queue_job, h._resolve_avatars, h._avatar_first_frame = saved_auto
 _stubs.expect_error(h._validate, "m", {"type": "story", "story": "x", "image_model": "flux"}, contains="image_model")
 saved = (h._queue_job, h._resolve_loras, h._resolve_avatars)
 h._queue_job = lambda client, job_type, params, rerun_of=None: {"statusCode": 202, "body": "{}"}
@@ -758,7 +776,9 @@ r = h.create_job("m", {"type": "photos", "model": "krea2", "avatar": "none", "sc
                        "count": 1, "loras": "moody:0.8"})
 assert r["statusCode"] == 202 and body(r)["loras"] == [{"name": "moody", "version": 1, "step": None, "weight": 0.8,
                                                          "trigger": "mdy", "model": "krea2"}], body(r)
-assert h.create_job("m", {"type": "video", "prompt": "x", "avatar": "none", "loras": "moody"})["statusCode"] == 400
+assert h.create_job("m", {"type": "video", "prompt": "x", "avatar": "none", "loras": "moody", "image_model": "wan"})["statusCode"] == 400
+assert h.create_job("m", {"type": "video", "prompt": "x", "avatar": "none", "loras": "moody"})["statusCode"] == 202, \
+    "default (auto) with no avatar is a Krea first frame, so a Krea LoRA fits"
 assert "moody:0.8 (krea2)" in h._summary("photos", pp)[1]["loras"]
 _stubs.expect_error(h._validate, "m", {"type": "lora_preview", "name": "moody"}, contains="Krea 2 LoRA")
 # raw: Krea photos get the prompt exactly as typed (no look / realism / trigger additions)

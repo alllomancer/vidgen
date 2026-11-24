@@ -217,7 +217,7 @@ form:not(.krea) .krea-text { display: none !important; }
             <option value="candid">Candid 35mm documentary</option><option value="portrait">Portrait 85mm, soft background</option>
             <option value="film">35mm film colours</option></select></label>
           <label class="first-frame" title="Krea 2 needs no avatar, or one avatar with a ready Krea 2 LoRA">First frame<select name="image_model">
-            <option value="wan">Wan (as rendered, default)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
+            <option value="auto" selected>Auto (default): Krea 2 when it can be made, else Wan</option><option value="wan">Wan (as rendered)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
           <div class="checks">
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
@@ -297,7 +297,7 @@ form:not(.krea) .krea-text { display: none !important; }
             <option value="candid">Candid 35mm documentary</option><option value="portrait">Portrait 85mm, soft background</option>
             <option value="film">35mm film colours</option></select></label>
           <label class="first-frame" title="Krea 2 needs no avatar, or one avatar with a ready Krea 2 LoRA">First frame<select name="image_model">
-            <option value="wan">Wan (as rendered, default)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
+            <option value="auto" selected>Auto (default): Krea 2 when it can be made, else Wan</option><option value="wan">Wan (as rendered)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
           <div class="checks">
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
@@ -1007,7 +1007,8 @@ function syncLoraOptions(f) {
     allow = krea ? ["krea2"] : [];
   } else {
     // A video's Krea first frame needs avatar "none"; a story's goes to its shots without avatars.
-    const kreaFrame = f.elements.image_model && f.elements.image_model.value === "krea2" &&
+    const imgModel = f.elements.image_model && f.elements.image_model.value;
+    const kreaFrame = (imgModel === "krea2" || imgModel === "auto") &&
                       (f.dataset.kind === "story" || f.elements.avatar.value === "none" ||
                        avatarKreaReady(f.elements.avatar.value));
     allow = kreaFrame ? ["t2v", "krea2"] : ["t2v"];
@@ -1043,7 +1044,7 @@ function syncLoraOptions(f) {
       auto.textContent = ((parts.length ? `Added automatically: ${parts.join(" + ")}.` : "") + note).trim();
     }
     if (hint) {
-      const wantsKrea = f.elements.image_model && f.elements.image_model.value === "krea2";
+      const wantsKrea = imgModel === "krea2";  // auto falls back to Wan quietly; only an explicit Krea needs the hint
       const who = f.elements.avatar.value || (createOptions && createOptions.def) || "this avatar";
       hint.hidden = !(wantsKrea && !kreaFrame);
       hint.textContent = hint.hidden ? "" : `Krea 2 LoRAs need avatar "none", or an avatar with a ready Krea LoRA; ` +
@@ -1079,7 +1080,7 @@ function createBody(kind, f) {
     const secs = num(d.seconds) || 5, long = videoLong(f);
     return {type: "video", prompt: d.prompt, seconds: num(d.seconds), variations: secs > 5 ? 1 : num(d.variations),
       seed: num(d.seed), avatar: d.avatar || undefined, loras: lora, fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
-      quality: vq, sound: on("sound"), image_model: d.image_model || "wan", ...real,
+      quality: vq, sound: on("sound"), image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real,
       beats: long.beats && (d.beats || "").trim() ? d.beats.trim() : undefined,
       anchor_every: long.anchor && d.anchor_every ? num(d.anchor_every) : undefined,
       avatar_lora: on("avatar_lora") ? undefined : false};
@@ -1087,7 +1088,7 @@ function createBody(kind, f) {
   if (kind === "story") return {type: "story", story: d.story, max_shots: num(d.shots), seconds_per_shot: num(d.seconds_per_shot),
     style: d.style, voice: d.voice, avatar: d.avatar || undefined, loras: lora, narration: on("narration"),
     subtitles: on("subtitles"), sound: on("sound"), fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
-    quality: vq, image_model: d.image_model || "wan", ...real};
+    quality: vq, image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real};
   const photoOpts = {count: num(d.count), aspect: d.aspect, seed: num(d.seed), avatar: d.avatar || undefined,
                      quality: on("best") ? "best" : "standard", ...real};
   if (d.avatar === "none") Object.assign(photoOpts, {model: "krea2", quality: "standard"});

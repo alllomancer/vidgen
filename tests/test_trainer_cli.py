@@ -864,6 +864,10 @@ assert "anchor_every" not in sub[-1][0] and "beats" not in sub[-1][0] and "avata
 with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--no-avatar-lora"]):
     vidgen.main()
 assert sub[-1][0]["avatar_lora"] is False
+assert sub[-1][0]["image_model"] is None, "auto (default) leaves the choice to the API: Krea when possible, else Wan"
+with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--image-model", "wan"]):
+    vidgen.main()
+assert sub[-1][0]["image_model"] == "wan"
 vidgen.ensure_avatar = real_ensure
 vidgen.avatar_generate("mira", "a sailor", 4, "krea2")
 assert sub[-1][0] == {"type": "avatar", "description": "a sailor", "candidates": 4, "model": "krea2"}

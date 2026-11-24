@@ -1425,9 +1425,10 @@ def avatar_flags(parser, what):
     parser.add_argument("--fps", type=int, choices=[16, 32], default=32,
                         help="32 (default) doubles the frames with RIFE for smoother motion; 16 = as rendered")
     parser.add_argument("--upscale", action="store_true", help="2x Real-ESRGAN upscale (2560x1408, slower, ~3x bigger files)")
-    parser.add_argument("--image-model", choices=["wan", "krea2"], default="wan",
-                        help=f"krea2: Krea 2 Turbo makes the first frame of {what} shots without an avatar, then Wan "
-                             "animates it (sharper scenes, ~1-2 min more); its content filter can refuse a frame")
+    parser.add_argument("--image-model", choices=["auto", "wan", "krea2"], default="auto",
+                        help=f"first frame of {what} shots: auto (default) = Krea 2 Turbo when it can be made (no avatar, "
+                             "or the avatar's ready Krea LoRA), else Wan; krea2 = always Krea (sharper scenes, ~1-2 min "
+                             "more; its content filter can refuse a frame); wan = as rendered")
     parser.add_argument("--draft", action="store_true",
                         help="faster draft: render at 832x480, then 32 fps + 2x upscale to 1664x960 (softer detail)")
     parser.add_argument("--lora", action="append", default=[], metavar="NAME[@[vN][-]STEP][:WEIGHT]",
@@ -1822,7 +1823,7 @@ def main():
                     "variations": args.variations,
                     "avatar": "none" if args.no_avatar else args.avatar, "sound": not args.no_sound,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,
-                    "quality": video_quality(args), "image_model": args.image_model, **realism_body(args),
+                    "quality": video_quality(args), "image_model": None if args.image_model == "auto" else args.image_model, **realism_body(args),
                     **({"beats": beats} if beats else {}),
                     **({"anchor_every": args.anchor_every} if args.anchor_every else {}),
                     **({"avatar_lora": False} if args.no_avatar_lora else {}),
@@ -1861,7 +1862,7 @@ def main():
                     "subtitles": not args.no_subtitles, "narration": not args.no_narration,
                     "sound": not args.no_sound, "voice": args.voice, "avatar": "none" if args.no_avatar else args.avatar,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,
-                    "quality": video_quality(args), "image_model": args.image_model, **realism_body(args),
+                    "quality": video_quality(args), "image_model": None if args.image_model == "auto" else args.image_model, **realism_body(args),
                 }, args.out)
     except ApiError as e:
         sys.exit(str(e))

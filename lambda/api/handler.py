@@ -307,7 +307,7 @@ REALISM_LOOKS = ("pro", "phone", "candid", "portrait", "film")
 # Krea 2 Turbo (text-to-image, own venv on the render box, content filter on every image).
 AVATAR_MODELS = ("wan", "krea2")      # avatar candidates
 PHOTO_MODELS = ("qwen", "krea2")      # qwen = Qwen-Image-Edit with the person; krea2 = no person
-IMAGE_MODELS = ("wan", "krea2")       # first frame of no-avatar video / story shots
+IMAGE_MODELS = ("auto", "wan", "krea2")  # first frame; auto = krea2 when it can be made, else wan
 
 
 def _realism_params(body):
@@ -328,7 +328,7 @@ def _enhance_params(body):
     quality = body.get("quality") or "standard"
     if quality not in ("standard", "draft", "best"):
         raise ValueError("quality must be standard, draft or best")
-    image_model = body.get("image_model") or "wan"
+    image_model = body.get("image_model") or "auto"
     if image_model not in IMAGE_MODELS:
         raise ValueError(f"image_model must be one of: {', '.join(IMAGE_MODELS)}")
     out = {"fps": fps, "upscale": bool(body.get("upscale", False)), "quality": quality, "image_model": image_model,
@@ -1420,6 +1420,15 @@ def _resolve_loras(client, requested):
     return out
 
 
+def _auto_first_frame(job_type, avatars):
+    """The default first frame: Krea 2 whenever it can be made, else Wan. Videos: no avatar, or exactly one
+    avatar with a ready Krea LoRA. Stories: always (shots whose avatars have no Krea LoRA keep the Qwen keyframe)."""
+    if job_type == "story" or not avatars:
+        return "krea2"
+    ready = len(avatars) == 1 and ((avatars[0].get("krea_lora") or {}).get("ready"))
+    return "krea2" if ready else "wan"
+
+
 def _avatar_first_frame(client, job_type, params):
     """With image_model krea2 and avatars: a Krea first frame for an avatar that has a ready Krea LoRA (its
     LoRA added, its name as trigger). Video: exactly one avatar, and it needs the LoRA. Story: the first
@@ -1930,6 +1939,8 @@ def create_job(client, body):
         job_type, params = _validate(client, body)
         if job_type in ("video", "story"):
             params["avatars"] = _resolve_avatars(client, body.get("avatar"))
+            if params.get("image_model") == "auto":
+                params["image_model"] = _auto_first_frame(job_type, params["avatars"])
             if params.get("anchor_every") and len(params["avatars"]) != 1:
                 raise ValueError("anchor_every needs exactly one avatar in the take")
         if job_type != "lora_preview":  # a preview names its LoRA in "name"
