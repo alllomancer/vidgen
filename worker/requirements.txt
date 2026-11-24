@@ -1,0 +1,21 @@
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+# MMAudio (video-to-audio). Its own deps are pinned here to versions that keep torch at 2.5.1.
+torchcodec==0.1.1
+tensordict==0.6.2
+mmaudio @ git+https://github.com/hkchengrex/MMAudio.git@974010a026c731054592d8f777218bd9d85a6c24
+diffusers==0.37.1  # >= 0.37 for Qwen-Image-Edit-2511 (zero_cond_t)
+transformers==4.55.4
+accelerate==1.6.0
+peft==0.17.1  # LoRA loading (Wan2.2-Lightning)
+qwen-vl-utils[decord]==0.0.11
+huggingface_hub[cli,hf_transfer]==0.34.4
+imageio[ffmpeg]==2.37.0
+ftfy==6.3.1
+sentencepiece==0.2.0
+boto3==1.35.99
+pillow==11.1.0
+kokoro==0.9.4
+soundfile==0.13.1
+spandrel==0.4.1  # Real-ESRGAN upscale (--upscale) without basicsr

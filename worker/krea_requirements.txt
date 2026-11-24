@@ -1,0 +1,19 @@
+# Krea 2 Turbo venv (/opt/krea-venv), separate from the Wan/Qwen venv: Krea2Pipeline needs
+# diffusers >= 0.39 and Qwen3VLModel (transformers >= 4.57). The box runs Python 3.10, so these are
+# the newest that install there (diffusers 0.42+ and transformers 5.21+ need 3.11). Installed and
+# imported on the render box (L40S, driver 595) 2026-11-23; pip freeze of that venv.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.14.1+cu126
+diffusers==0.41.0
+transformers==5.20.2
+accelerate==1.15.0
+safetensors==0.8.0
+# LoRA loading (Krea2LoraLoaderMixin needs the PEFT backend; diffusers 0.41 wants peft>=0.17.0).
+# Not the Wan venv's 0.17.1: that imports HybridCache, which transformers 5.x removed, and breaks every
+# Krea import (seen live 2026-11-23). 0.21.3 imports with diffusers 0.41 / transformers 5.20.2 (checked on
+# the box). Changing this file reinstalls the venv on the next Krea job.
+peft==0.21.3
+huggingface_hub==1.33.0
+tokenizers==0.23.3
+numpy==2.2.6
+pillow==12.3.0

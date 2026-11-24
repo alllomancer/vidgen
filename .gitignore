@@ -1,0 +1,12 @@
+terraform/.terraform/
+terraform/.build/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+__pycache__/
+*.mp4
+
+terraform/*.auto.tfvars
+.DS_Store
+terraform/tfplan
