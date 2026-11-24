@@ -1020,6 +1020,28 @@ function syncLoraOptions(f) {
       hint.setAttribute("role", "status");
       block.appendChild(hint);
     }
+    // Which of the avatar's own LoRAs the job will get automatically (the API adds them; not in the dropdowns).
+    let auto = block && block.querySelector(".avatar-loras");
+    if (block && !auto) {
+      auto = document.createElement("p");
+      auto.className = "hint avatar-loras";
+      auto.setAttribute("role", "status");
+      block.appendChild(auto);
+    }
+    if (auto) {
+      const name = f.elements.avatar.value === "none" ? null : (f.elements.avatar.value || (createOptions && createOptions.def));
+      const a = name && createOptions && (createOptions.avatars || []).find(x => x.name === name);
+      const parts = [];
+      if (a && kreaFrame && avatarKreaReady(f.elements.avatar.value) && (a.krea_lora || {}).ready)
+        parts.push(`${a.krea_lora.ready.lora} for the Krea first frame`);
+      const wan = (a && a.wan_lora) || {};
+      const wanOn = f.dataset.kind === "video" && (!f.elements.avatar_lora || f.elements.avatar_lora.checked);
+      if (wanOn && wan.ready) parts.push(`${wan.ready.lora} v${wan.ready.version} while Wan animates (weight 1)`);
+      const note = wanOn && !wan.ready && ["queued", "photos", "training"].includes(wan.state)
+        ? ` ${name}'s Wan LoRA is still ${wan.state === "training" ? "training" : "being prepared"}, so this job won't use it.` : "";
+      auto.hidden = !parts.length && !note;
+      auto.textContent = ((parts.length ? `Added automatically: ${parts.join(" + ")}.` : "") + note).trim();
+    }
     if (hint) {
       const wantsKrea = f.elements.image_model && f.elements.image_model.value === "krea2";
       const who = f.elements.avatar.value || (createOptions && createOptions.def) || "this avatar";
