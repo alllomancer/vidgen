@@ -613,6 +613,25 @@ aws ec2 get-spot-placement-scores --instance-types g6e.4xlarge g6e.16xlarge --ta
 - **eu-west-1** is blocked for this account by an organisation SCP; stay in us-east-1.
 - Changing `instance_type` or `availability_zone` replaces the instance and its disk; first boot takes ~25 min.
 
+### Moving the render box to a g7e
+
+A g7e has a 96 GB GPU (RTX PRO 6000) against the L40S's 48 GB: both Wan experts stay on it, and a 5 s segment
+took 104 s in the benchmark against ~240 s on the g6e that evening ([benchmark](docs/specs/2026-11-25-g7e-benchmark.md),
+[design](docs/specs/2026-11-25-render-on-g7e.md)).
+
+```bash
+make g7e ARGS=--dry-run     # only report what could be launched right now
+make g7e                    # find capacity and move the render box there
+```
+
+- **What it does**: checks first (AWS credentials; the worker's torch can run on that GPU; no job queued or running; the [model mirror](#model-mirror) holds the weights), then looks for capacity by launching a probe instance and terminating it at once: spot `g7e.8xlarge` in each zone, then spot `g7e.4xlarge`, then on-demand `g7e.4xlarge`. The first that starts wins. It writes `instance_type`, `on_demand` and `availability_zone` to `terraform/terraform.tfvars` and runs build, plan and apply.
+- **It replaces the render box and its disk without asking again.** Jobs sent while the new box boots wait in the queue; first boot restores the weights from the mirror. Everything in your working tree is deployed with it, as with `make apply`.
+- **If the apply fails** (the capacity went in between) it tries the next option. If none works it puts `terraform.tfvars` back; the old box may already be gone then: `make plan && make apply` brings it back.
+- **`--force`** skips the checks other than credentials (first boot then downloads from Hugging Face, ~45 min).
+- **Cost**: a probe is a few cents. On-demand `g7e.4xlarge` is about $4.00/h (spot ~$1.40-2.20 when there is any); the box still stops itself when idle.
+- **On the box**: with 80 GB or more of GPU memory the worker keeps one big model wholly on the GPU (`GPU_HOLD`; `GPU_HOLD=0` in `/etc/ai-video.env` goes back to moving parts on and off). Only one big model is loaded at a time then, so switching models reloads from disk.
+- **Back to g6e**: set `instance_type`, `on_demand` and `availability_zone` in `terraform.tfvars` and `make plan && make apply`.
+
 ### Cost model
 
 - **Idle (machine off):** about $40/month for the 500 GB disk. Everything else costs cents.
