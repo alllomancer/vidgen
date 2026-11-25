@@ -35,7 +35,7 @@ extra `aws_s3_object`), so there is one source file. It only needs `boto3`.
 
 A **unit** is one folder of weights, stored under `s3://<bucket>/models/<unit>/`:
 
-- `manifest.json` — `{"files": {relative path: size}, "links": {relative path: symlink target}}`. Written
+- `.mirror-manifest.json` — `{"files": {relative path: size}, "links": {relative path: symlink target}}`. Written
   **last**, so a unit without a manifest (an interrupted upload) is never used.
 - the files, at their relative paths.
 
@@ -109,7 +109,8 @@ The fp32 Wan downloads (`VIDEO_MODEL`, `I2V_MODEL` in the HF cache) are never mi
 
 - Render box role: `s3:GetObject` + `s3:PutObject` on `models/hub/*`, `models/bf16/*`, `models/mmaudio/*`,
   `models/krea-2-turbo/*`, `models/nsfw-filter/*`; `s3:ListBucket` for prefix `models/*`.
-- Trainer role: the same two actions on `models/trainer/*` and `models/hub/*`; `s3:ListBucket` for `models/*`.
+- Trainer role: the same two actions on `models/trainer/*` and the caption model's folder under `models/hub/`
+  (narrowed during implementation, ADR D4); `s3:ListBucket` for `models/*`.
 - The render box cannot write the trainer's units (they include a pickled `.pth`), and the reverse. The HF
   cache folder of the caption/planner model is the one unit both write.
 - No access for the API Lambda or clients. No lifecycle rule on `models/` (kept until deleted).
