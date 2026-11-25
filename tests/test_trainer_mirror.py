@@ -26,6 +26,17 @@ assert [(r, f) for r, f, _ in trainer.KREA_FILES] == [
     ("Comfy-Org/Qwen-Image", "split_files/vae/qwen_image_vae.safetensors"),
     ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_bf16.safetensors")]
 assert all(len(rev) == 40 and set(rev) <= set("0123456789abcdef") for _, _, rev in trainer.KREA_FILES)
+# the mirror folders are named by the pins, so a bumped pin never restores (or overwrites) the old weights
+import hashlib  # noqa: E402
+
+assert trainer.KREA_UNIT == "trainer/krea2/" + hashlib.sha256(
+    "\n".join(rev for _, _, rev in trainer.KREA_FILES).encode()).hexdigest()[:12]
+assert trainer.WAN_UNIT == "trainer/wan/" + hashlib.sha256(
+    "\n".join(rev for _, rev in trainer.WAN_REPOS).encode()).hexdigest()[:12]
+# ... and first boot (user data) restores that same folder and downloads those same commits
+tpl = open(os.path.join(_stubs.ROOT, "terraform", "templates", "trainer_user_data.sh.tpl")).read()
+assert f"pull {trainer.WAN_UNIT} /opt/trainer/models" in tpl
+assert all(f"{repo} --revision {rev}" in tpl for repo, rev in trainer.WAN_REPOS), "template and trainer.py pins differ"
 assert trainer.KREA_RAW.endswith("/raw.safetensors") and trainer.KREA_TE.endswith("text_encoders/qwen3vl_4b_bf16.safetensors")
 
 pulls, pushes, hf = [], [], []
@@ -52,13 +63,17 @@ def pull(unit, local_dir, progress=None):
     return {"unit": unit, "source": "mirror", "bytes": 10 * len(in_mirror), "seconds": 1.0, "mb_per_s": 900}
 
 
+overlap = {"barrier": None}  # set: every download waits here until all of them are running
+
+
 def hf_download(repo, filename, local_dir, token, revision):
     with lock:
         hf_live["now"] += 1
         hf_live["max"] = max(hf_live["max"], hf_live["now"])
     try:
         assert hf_gate.wait(10)
-        time.sleep(0.05)  # long enough for the other files' downloads to overlap this one
+        if overlap["barrier"]:
+            overlap["barrier"].wait()
         hf.append((repo, filename, token, revision))
         assert local_dir == trainer.KREA_DIR
         put(filename)
@@ -90,7 +105,7 @@ def make_job():
 reset(mirrored=ALL)
 job = make_job()
 job.krea_models()
-assert pulls == [("trainer/krea2", trainer.KREA_DIR)] and hf == [] and pushes == [], (pulls, hf, pushes)
+assert pulls == [(trainer.KREA_UNIT, trainer.KREA_DIR)] and hf == [] and pushes == [], (pulls, hf, pushes)
 assert job.state["krea_download"] == {"source": "mirror", "bytes": 40, "seconds": job.state["krea_download"]["seconds"]}
 # everything on disk: nothing is fetched and nothing recorded
 pulls.clear()
@@ -101,10 +116,12 @@ assert pulls == [] and hf == [] and "krea_download" not in job2.state
 # ---- not mirrored: all four from Hugging Face at once, each at its pin, then queued for the mirror (15)
 reset()
 job = make_job()
+overlap["barrier"] = threading.Barrier(4, timeout=10)  # passes only if all four run at the same time
 job.krea_models()
+overlap["barrier"] = None
 assert sorted(hf) == sorted((r, f, "tok", rev) for r, f, rev in trainer.KREA_FILES), hf
 assert hf_live["max"] == 4, f"downloads overlapped {hf_live['max']} at a time"
-assert pushes == [("trainer/krea2", trainer.KREA_DIR, ALL)], pushes
+assert pushes == [(trainer.KREA_UNIT, trainer.KREA_DIR, ALL)], pushes
 assert job.state["krea_download"]["source"] == "huggingface" and job.state["krea_download"]["bytes"] == 40
 
 # ---- the mirror restored some files: only the others come from Hugging Face
@@ -115,7 +132,27 @@ assert sorted(f for _, f, _, _ in hf) == sorted(ALL[2:]) and pushes, (hf, pushes
 assert job.state["krea_download"] == {"source": "mirror+huggingface", "bytes": 40,
                                       "seconds": job.state["krea_download"]["seconds"]}
 
-# ---- no access to Krea 2 RAW: the license message, whatever else failed; nothing queued for the mirror
+# ---- no access to Krea 2 RAW: the license message at once, not after the other files finished
+reset()
+slow_others = threading.Event()
+
+
+def raw_denied(repo, filename, local_dir, token, revision):
+    if repo == "krea/Krea-2-Raw":
+        raise PermissionError("403 gated")
+    slow_others.wait(10)
+
+
+trainer._hf_download = raw_denied
+t0 = time.time()
+try:
+    make_job().krea_models()
+    raise AssertionError("no RAW access must fail")
+except RuntimeError as e:
+    assert "Krea-2-Raw" in str(e) and time.time() - t0 < 5, (e, time.time() - t0)
+slow_others.set()
+
+# ---- no access at all: the license message, whatever else failed; nothing queued for the mirror
 reset()
 
 
@@ -139,6 +176,7 @@ trainer.os.path.exists = lambda p: True if p.endswith("krea2_train_network.py") 
 hf_gate.clear()  # downloads hang until released
 job = make_job()
 order = []
+mirror.busy = lambda: False
 
 
 def fetching():
@@ -200,6 +238,39 @@ except RuntimeError as e:
     assert "Krea-2-Raw" in str(e)
 trainer._hf_download = hf_download
 
+# a fetch nobody waited for (its job failed before krea_models) is not reported by the next job
+reset()
+first = make_job()
+trainer.os.path.exists = lambda p: True if p.endswith("krea2_train_network.py") else real_exists(p)
+first.krea_prefetch()
+trainer.os.path.exists = real_exists
+trainer._KREA_FETCH["thread"].join(10)
+other = trainer.Job({"job_id": "train2", "client": "m", "params": json.dumps({"model": "krea2", "dataset": "d"})},
+                    tempfile.mkdtemp())
+other.krea_models()
+assert "krea_download" not in other.state, "another job's download is not this job's"
+# ... but the job that started it does report it, also when the fetch ended before its krea_models phase
+reset()
+trainer.os.path.exists = lambda p: True if p.endswith("krea2_train_network.py") else real_exists(p)
+first = make_job()
+first.krea_prefetch()
+trainer.os.path.exists = real_exists
+trainer._KREA_FETCH["thread"].join(10)
+first.krea_models()
+assert first.state["krea_download"]["source"] == "huggingface"
+# the trainer doesn't stop itself while a fetch or a mirror upload is running
+reset()
+assert trainer.busy() is False
+hf_gate.clear()
+trainer.krea_fetch_start()
+assert trainer.busy() is True
+hf_gate.set()
+trainer._KREA_FETCH["thread"].join(10)
+assert trainer.busy() is False
+mirror.busy = lambda: True
+assert trainer.busy() is True
+mirror.busy = lambda: False
+
 # a cancel while waiting for the fetch stops the job (the download itself goes on for the next job)
 reset()
 hf_gate.clear()
@@ -260,8 +331,8 @@ hub = os.path.join(root, "hf", "hub", "models--q")
 os.makedirs(os.path.join(hub, "blobs"))
 open(os.path.join(hub, "blobs", "aa"), "w").write("w")
 trainer.mirror_backfill(hf_home=os.path.join(root, "hf"))
-assert pushes == [("trainer/wan", root, trainer.WAN_FILES), ("trainer/krea2", trainer.KREA_DIR, ALL),
-                  ("hub/models--q", hub, None)], pushes
+assert pushes == [(trainer.WAN_UNIT, root, trainer.WAN_FILES), (trainer.KREA_UNIT, trainer.KREA_DIR, ALL),
+                  ("trainer/hub/models--q", hub, None)], pushes  # the trainer's own copy, not the render box's
 assert trainer.WAN_FILES == ["split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors",
                              "split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors",
                              "split_files/vae/wan_2.1_vae.safetensors", "models_t5_umt5-xxl-enc-bf16.pth"]
@@ -269,7 +340,7 @@ assert trainer.WAN_FILES == ["split_files/diffusion_models/wan2.2_t2v_low_noise_
 open(os.path.join(hub, "blobs", "bb.incomplete"), "w").write("w")
 pushes.clear()
 trainer.mirror_backfill(hf_home=os.path.join(root, "hf"))
-assert [u for u, _, _ in pushes] == ["trainer/wan", "trainer/krea2"], pushes
+assert [u for u, _, _ in pushes] == [trainer.WAN_UNIT, trainer.KREA_UNIT], pushes
 
 
 def broken(*a, **k):

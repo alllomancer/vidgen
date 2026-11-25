@@ -164,4 +164,10 @@ mirror.push_async = broken
 models.BF16_DIR = os.path.join(root, "bf16")
 worker.mirror_backfill(hf_home=root)  # a mirror problem never stops the worker
 
+# the box doesn't stop itself while uploads to the mirror are running
+mirror.busy = lambda: True
+assert worker.mirror_busy() is True
+mirror.busy = lambda: False
+assert worker.mirror_busy() is False
+
 print("worker mirror tests passed")

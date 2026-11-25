@@ -49,7 +49,8 @@ aws s3 sync "s3://${bucket}/code/trainer/" /opt/trainer/code/ --delete --region 
 export BUCKET=${bucket} AWS_REGION=${region} HF_XET_HIGH_PERFORMANCE=1
 HF=/opt/trainer/venv/bin/hf
 MIRROR="/opt/trainer/venv/bin/python /opt/trainer/code/mirror.py"
-if ! $MIRROR pull trainer/wan /opt/trainer/models; then
+# The mirror folder is named by the two pinned commits below (trainer.py WAN_UNIT; a test keeps them in step).
+if ! $MIRROR pull trainer/wan/0af2b850aa70 /opt/trainer/models; then
   $HF download Comfy-Org/Wan_2.2_ComfyUI_Repackaged --revision 5df3a4a3ed0628002308022198249dbbbd045d09 \
     split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
     split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
@@ -57,8 +58,8 @@ if ! $MIRROR pull trainer/wan /opt/trainer/models; then
   $HF download Wan-AI/Wan2.1-T2V-14B --revision a064a6c71f5be440641209c07bf2a5ce7a2ff5e4 \
     models_t5_umt5-xxl-enc-bf16.pth --local-dir /opt/trainer/models
 fi
-VLM_UNIT="hub/models--$(echo "${vlm_model}" | sed 's#/#--#g')"
-$MIRROR pull "$VLM_UNIT" "/opt/models/$VLM_UNIT" || HF_HOME=/opt/models $HF download "${vlm_model}"
+VLM_DIR="hub/models--$(echo "${vlm_model}" | sed 's#/#--#g')"
+$MIRROR pull "trainer/$VLM_DIR" "/opt/models/$VLM_DIR" || HF_HOME=/opt/models $HF download "${vlm_model}"
 
 cat > /etc/systemd/system/ai-video-trainer.service <<'EOF'
 [Unit]

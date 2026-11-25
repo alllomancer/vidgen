@@ -14,8 +14,8 @@ os.environ.pop("MODEL_MIRROR", None)
 import mirror  # noqa: E402
 
 
-class NoSuchKey(Exception):
-    response = {"Error": {"Code": "NoSuchKey"}}  # the shape of botocore's ClientError
+class AccessDenied(Exception):
+    response = {"Error": {"Code": "AccessDenied"}}  # the shape of botocore's ClientError
 
 
 class S3:
@@ -32,7 +32,9 @@ class S3:
         if self.throttle and self.throttle in Key:
             raise TimeoutError("SlowDown")
         if Key not in self.objects:
-            raise NoSuchKey(Key)
+            # What S3 answers these machines: their ListBucket grant is scoped by prefix, which a GET
+            # can't satisfy, so a missing key is "access denied", not "no such key".
+            raise AccessDenied(Key)
         data = self.objects[Key]
         if Range:
             a, b = (int(x) for x in Range.split("=")[1].split("-"))
@@ -309,6 +311,18 @@ mirror.push_async("hub/models--a--b", src)
 mirror.push_async("trainer/krea2", tr, files=["raw.safetensors"])
 mirror.wait_pushes()
 assert {"models/hub/models--a--b/.mirror-manifest.json", "models/trainer/krea2/.mirror-manifest.json"} <= set(s3.objects)
+
+# ---- busy(): pushes queued or running (the machines don't stop themselves meanwhile)
+assert mirror.busy() is False
+hold = threading.Event()
+real_push = mirror.push
+mirror.push = lambda *a, **k: hold.wait(5)
+mirror.push_async("hub/models--a--b", src)
+assert mirror.busy() is True
+hold.set()
+mirror.wait_pushes()
+mirror.push = real_push
+assert mirror.busy() is False
 
 # ---- pull_all restores every unit with a manifest into <root>/<unit>, except skipped prefixes
 root = tempfile.mkdtemp()

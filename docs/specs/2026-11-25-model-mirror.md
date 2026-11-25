@@ -65,9 +65,14 @@ Functions:
 | `nsfw-filter/<rev12>` | `/opt/models/nsfw-filter/<rev12>` | render box |
 | `bf16/<name>` | `/opt/models/bf16/<name>` (the converted Wan pipelines) | render box |
 | `mmaudio` | `/opt/models/mmaudio` | render box |
-| `hub/models--<org>--<name>` | `/opt/models/hub/models--…` (HF cache: blobs, snapshots as symlinks, refs) | render box, trainer |
-| `trainer/wan` | `/opt/trainer/models` (the 4 Wan training files, listed explicitly) | trainer |
-| `trainer/krea2` | `/opt/trainer/models/krea2` (`KREA_FILES`, listed explicitly) | trainer |
+| `hub/models--<org>--<name>` | `/opt/models/hub/models--…` (HF cache: blobs, snapshots as symlinks, refs) | render box |
+| `trainer/wan/<pins>` | `/opt/trainer/models` (the 4 Wan training files, listed explicitly) | trainer |
+| `trainer/krea2/<pins>` | `/opt/trainer/models/krea2` (`KREA_FILES`, listed explicitly) | trainer |
+| `trainer/hub/models--<org>--<name>` | the trainer's `/opt/models/hub/models--…` (caption model) | trainer |
+
+`<pins>` is a 12-character hash of the pinned commits, so a bumped pin starts a new folder (review finding;
+ADR D8). The trainer keeps its own copy of the caption model so that neither machine restores what the
+other wrote (security review; ADR D9, which replaces the shared folder described below and in D4).
 
 Render-box units are named by their path under `/opt/models`, so first boot restores with one `pull-all`.
 The fp32 Wan downloads (`VIDEO_MODEL`, `I2V_MODEL` in the HF cache) are never mirrored: the bf16 copy is.

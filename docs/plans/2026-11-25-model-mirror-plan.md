@@ -6,14 +6,14 @@ Jira: N/A
 
 ## Progress
 
-- [ ] Task 1: Mirror module (pull, push, listing, CLI)
-- [ ] Task 2: Ship the module to the trainer and grant both roles `models/` access
-- [ ] Task 3: Render box Krea weights through the mirror, with timing
-- [ ] Task 4: Render box backfill at worker start
-- [ ] Task 5: Trainer Krea files: mirror, parallel pinned Hugging Face fallback, timing in the result
-- [ ] Task 6: Trainer early background fetch and backfill at start
-- [ ] Task 7: First-boot restore in user data, pins
-- [ ] Task 8: Docs (RUNBOOK, README, decision log)
+- [x] Task 1: Mirror module (pull, push, listing, CLI) — `5bd7fa0`, review fixes `4230df9`
+- [x] Task 2: Ship the module to the trainer and grant both roles `models/` access — in the working tree (`terraform/iam.tf`, `terraform/training.tf` also carry earlier uncommitted work)
+- [x] Task 3: Render box Krea weights through the mirror, with timing — `d690f08` (`worker/worker.py` part in the working tree)
+- [x] Task 4: Render box backfill at worker start — in the working tree (`worker/worker.py`); test in `d690f08`
+- [x] Task 5: Trainer Krea files: mirror, parallel pinned Hugging Face fallback, timing in the result — `01d77b3`
+- [x] Task 6: Trainer early background fetch and backfill at start — `01d77b3` (two lines of `tests/test_trainer_cli.py` in the working tree)
+- [x] Task 7: First-boot restore in user data, pins — `b989c0e`
+- [x] Task 8: Docs (RUNBOOK, README, decision log) — `a8faedf` (`RUNBOOK.md`, `README.md` in the working tree)
 
 ## Tasks
 

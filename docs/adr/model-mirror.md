@@ -25,7 +25,7 @@ Spec: docs/specs/2026-11-25-model-mirror.md
 
 ## D4 — [2026-11-25] — Task 2: Ship the module to the trainer and grant both roles `models/` access
 
-**Status**: Accepted
+**Status**: Superseded by D9
 **Decision**: The trainer role may write `models/trainer/*` and only the caption model's folder under `models/hub/`, not all of `models/hub/*` as the spec said.
 **Reason**: The render box restores every `hub/` folder at first boot; a narrower write scope limits what a compromised trainer could plant there.
 **Alternatives considered**: Separate copies of the caption model per machine.
@@ -50,3 +50,24 @@ Spec: docs/specs/2026-11-25-model-mirror.md
 **Decision**: Models loaded from the Hugging Face cache by repo id (`video_model`, `i2v_model`, `vlm_model`, `edit_model`) stay unpinned; only the trainer's `--local-dir` downloads and `KREA_FILES` are pinned.
 **Reason**: A download at a revision doesn't write `refs/main`, which the worker's offline lookup needs; the mirror holds their exact bytes instead.
 **Alternatives considered**: Revision variables plus `revision=` in every loader (touches all model loading).
+
+## D8 — [2026-11-25] — Task 5: Trainer Krea files: mirror, parallel pinned Hugging Face fallback, timing in the result
+
+**Status**: Accepted
+**Decision**: The trainer's mirror folders are named by a hash of their pinned commits (`trainer/krea2/<hash>`, `trainer/wan/<hash>`), and the running trainer's files are uploaded under those names.
+**Reason**: Restores and uploads compare sizes only, so an unversioned folder would keep serving the old weights after a pin is bumped (code review finding); the pinned commits are what the trainer has (the files last changed on Hugging Face in July 2025, the Krea repos in July-September 2026, all before it was built).
+**Alternatives considered**: Checksums per file (hashing ~150 GB at every start).
+
+## D9 — [2026-11-25] — Task 2: Ship the module to the trainer and grant both roles `models/` access
+
+**Status**: Accepted (supersedes D4)
+**Decision**: The trainer keeps its own copy of the caption model (`trainer/hub/…`) and its role reaches `models/trainer/*` only; no folder is written by both machines.
+**Reason**: A shared folder lets a compromised machine change weights the other restores as root (security review); the second copy costs ~17 GB.
+**Alternatives considered**: Trainer read-only on the render box's folder (still restores what the render box wrote).
+
+## D10 — [2026-11-25] — Task 1: Mirror module (pull, push, listing, CLI)
+
+**Status**: Accepted
+**Decision**: A unit's manifest is looked up with a listing before it is read, and a machine doesn't stop itself while uploads (or the trainer's Krea fetch) run.
+**Reason**: With `s3:ListBucket` scoped by prefix, a GET of a missing key answers "access denied", which would have stopped every first upload (code review finding, not verified against the live roles); an interrupted multipart upload starts again from zero.
+**Alternatives considered**: An unconditioned `s3:ListBucket` (lets the machines list the whole bucket).

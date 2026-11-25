@@ -8,6 +8,7 @@ skips what is done and resumes training from the last saved state (every 250 ste
 See docs/specs/2026-11-09-lora-training.md, "Trainer: step 2".
 """
 
+import hashlib
 import json
 import os
 
@@ -23,7 +24,8 @@ import time
 import traceback
 import urllib.request
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 
 import boto3
 
@@ -48,8 +50,20 @@ DIT = {"t2v_low": f"{MODELS}/split_files/diffusion_models/wan2.2_t2v_low_noise_1
        "t2v_high": f"{MODELS}/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors"}
 VAE = f"{MODELS}/split_files/vae/wan_2.1_vae.safetensors"
 T5 = f"{MODELS}/models_t5_umt5-xxl-enc-bf16.pth"
-# The Wan training files, relative to MODELS: their unit in the model mirror (mirror.py).
+# The Wan training files, relative to MODELS, and the commits first boot downloads them at (the same pins
+# are in terraform/templates/trainer_user_data.sh.tpl; a test keeps the two in step).
 WAN_FILES = [os.path.relpath(p, MODELS) for p in (DIT["t2v_low"], DIT["t2v_high"], VAE, T5)]
+WAN_REPOS = [("Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "5df3a4a3ed0628002308022198249dbbbd045d09"),
+             ("Wan-AI/Wan2.1-T2V-14B", "a064a6c71f5be440641209c07bf2a5ce7a2ff5e4")]
+
+
+def _pinned_unit(name, revisions):
+    """A folder in the model mirror (mirror.py) named by the pinned commits of what it holds: after a pin
+    is bumped the old copy is neither restored nor overwritten."""
+    return f"trainer/{name}/" + hashlib.sha256("\n".join(revisions).encode()).hexdigest()[:12]
+
+
+WAN_UNIT = _pinned_unit("wan", [rev for _, rev in WAN_REPOS])
 BASE_MODEL = "Wan-AI/Wan2.2-T2V-A14B (ComfyUI fp16 repackage)"
 VISIBILITY_SECONDS = 1800
 WATCH_SECONDS = 15
@@ -77,7 +91,7 @@ KREA_FILES = [("krea/Krea-2-Raw", "raw.safetensors", "6b0ece7fffb640c5e3bcbe0a7f
                "1f12b17be14c89b026c51a91d67c32f84bb047bc"),
               ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_bf16.safetensors",
                "02f0d3eefb59528799653d16735818801177ef1f")]
-KREA_UNIT = "trainer/krea2"  # their copy in the model mirror
+KREA_UNIT = _pinned_unit("krea2", [rev for _, _, rev in KREA_FILES])  # their copy in the model mirror
 FETCH_POLL = 5  # seconds between looks at a running fetch (and at a cancel)
 # musubi-tuner's Krea 2 scripts need torch >= 2.6 (the Wan venv keeps 2.5.1): own venv, built on first use.
 KREA_VENV = f"{ROOT}/krea-venv"
@@ -544,13 +558,13 @@ cache_directory = "{cache}/image"
         and the venv build instead of following them. Only on a trainer whose musubi-tuner has Krea support
         (krea_env reports the other case) and while this job still needs them."""
         if "krea_models" not in self.state["done"] and os.path.exists(f"{MUSUBI}/krea2_train_network.py"):
-            krea_fetch_start()
+            krea_fetch_start(self.job["job_id"])
 
     def krea_models(self):
         if not _krea_missing() and _KREA_FETCH["thread"] is None:
             return
         self.progress("getting the Krea 2 models (first Krea job, ~66 GB)", force=True)
-        stats = krea_fetch_wait(self.progress)
+        stats = krea_fetch_wait(self.progress, self.job["job_id"])
         if stats:
             self.state["krea_download"] = {k: stats[k] for k in ("source", "bytes", "seconds")}
 
@@ -717,9 +731,14 @@ def krea_fetch():
     missing = _krea_missing()
     if missing:
         token = _hf_token()
-        with ThreadPoolExecutor(len(missing)) as pool:
-            jobs_ = [(repo, pool.submit(_hf_download, repo, f, KREA_DIR, token, rev)) for repo, f, rev in missing]
-        failed = [(repo, fut.exception()) for repo, fut in jobs_ if fut.exception() is not None]
+        pool = ThreadPoolExecutor(len(missing))
+        jobs_ = [(repo, pool.submit(_hf_download, repo, f, KREA_DIR, token, rev)) for repo, f, rev in missing]
+        try:  # the first failure ends the wait: a token without access is reported at once
+            futures_wait([fut for _, fut in jobs_], return_when=FIRST_EXCEPTION)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        failed = [(repo, fut.exception()) for repo, fut in jobs_ if fut.done() and not fut.cancelled()
+                  and fut.exception() is not None]
         for repo, e in failed:
             if repo == "krea/Krea-2-Raw":
                 raise RuntimeError("no access to krea/Krea-2-Raw: accept its license on huggingface.co with the "
@@ -738,12 +757,13 @@ def krea_fetch():
 
 # One fetch at a time in this process: a Krea job starts it early (Job.krea_prefetch), its krea_models
 # phase waits for it, and a job that arrives while one runs joins it.
-_KREA_FETCH = {"thread": None, "result": None, "error": None}
+_KREA_FETCH = {"thread": None, "result": None, "error": None, "owner": None}
 _FETCH_LOCK = threading.Lock()
 
 
-def krea_fetch_start():
-    """Start the fetch in the background unless one is running or nothing is missing. Returns its thread."""
+def krea_fetch_start(owner=None):
+    """Start the fetch in the background unless one is running or nothing is missing. Returns its thread.
+    owner: the job that starts it (the one whose result reports the download)."""
     with _FETCH_LOCK:
         t = _KREA_FETCH["thread"]
         if t is not None and t.is_alive():
@@ -757,26 +777,35 @@ def krea_fetch_start():
             except BaseException as e:  # raised to the job that waits for it
                 _KREA_FETCH["error"] = e
 
-        _KREA_FETCH.update(result=None, error=None)
+        _KREA_FETCH.update(result=None, error=None, owner=owner)
         t = _KREA_FETCH["thread"] = threading.Thread(target=work, daemon=True, name="krea-fetch")
         t.start()
         return t
 
 
-def krea_fetch_wait(progress):
-    """Wait for the fetch (starting it if needed) and return its stats, or raise its error. `progress` is
+def krea_fetch_wait(progress, owner=None):
+    """Wait for the fetch (starting it if needed) and raise its error. Returns its stats to the job that
+    started it or had to wait for it, None to a job that found the files already there. `progress` is
     called while waiting, so a cancel stops the job; the download itself goes on for the next job."""
-    krea_fetch_start()  # an earlier attempt that failed is tried again; a running or finished one is kept
+    krea_fetch_start(owner)  # an earlier attempt that failed is tried again; a running or finished one is kept
     t = _KREA_FETCH["thread"]
+    waited = False
     while t is not None and t.is_alive():
+        waited = True
         t.join(FETCH_POLL)
         progress("getting the Krea 2 models (first Krea job, ~66 GB)")
     with _FETCH_LOCK:
-        result, error = _KREA_FETCH["result"], _KREA_FETCH["error"]
-        _KREA_FETCH.update(thread=None, result=None, error=None)
+        result, error, started_by = _KREA_FETCH["result"], _KREA_FETCH["error"], _KREA_FETCH["owner"]
+        _KREA_FETCH.update(thread=None, result=None, error=None, owner=None)
     if error is not None:
         raise error
-    return result
+    return result if waited or started_by == owner else None
+
+
+def busy():
+    """Is a model fetch or an upload to the mirror running? (The trainer doesn't stop itself meanwhile.)"""
+    t = _KREA_FETCH["thread"]
+    return bool(t is not None and t.is_alive()) or mirror.busy()
 
 
 def mirror_backfill(hf_home=None):
@@ -784,12 +813,13 @@ def mirror_backfill(hf_home=None):
     the bucket lacks, in the background): the Wan and Krea training files and the caption model. This is how
     a running trainer seeds the mirror for the next new disk. Never stops the trainer."""
     try:
-        mirror.push_async("trainer/wan", MODELS, files=WAN_FILES)  # skipped while a file is missing
+        mirror.push_async(WAN_UNIT, MODELS, files=WAN_FILES)  # skipped while a file is missing
         mirror.push_async(KREA_UNIT, KREA_DIR, files=[f for _, f, _ in KREA_FILES])
         name = "models--" + VLM_MODEL.replace("/", "--")
         folder = os.path.join(hf_home or os.environ.get("HF_HOME", "/opt/models"), "hub", name)
         if os.path.isdir(folder) and not any(f.endswith(".incomplete") for _, _, fs in os.walk(folder) for f in fs):
-            mirror.push_async(f"hub/{name}", folder)
+            # Its own copy (not the render box's hub/ folder): neither machine restores what the other wrote.
+            mirror.push_async(f"trainer/hub/{name}", folder)
     except Exception as e:
         log(event="mirror_backfill", error=f"{type(e).__name__}: {e}")
 
@@ -893,7 +923,7 @@ def main():
         msgs = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=20,
                                    VisibilityTimeout=VISIBILITY_SECONDS).get("Messages", [])
         if not msgs:
-            if time.time() - last_work > IDLE_SECONDS and _queue_empty():
+            if time.time() - last_work > IDLE_SECONDS and _queue_empty() and not busy():
                 log(event="idle_stop")
                 ec2.stop_instances(InstanceIds=[_instance_id()])
                 time.sleep(300)

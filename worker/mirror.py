@@ -159,10 +159,16 @@ def _missing(e):
 def _read_manifest(unit):
     """The unit's manifest as stored. Raises _NoManifest when there is none, ValueError when it is not one
     we would restore, and the S3 error for anything else (throttling, no access)."""
+    key = f"{PREFIX}{unit}/{MANIFEST}"
+    # Listed first: the machines may list models/ but a GET of a key that isn't there answers "access
+    # denied" (a prefix-scoped ListBucket grant doesn't apply to GetObject), which says nothing.
+    listed = client().list_objects_v2(Bucket=_bucket(), Prefix=key).get("Contents") or []
+    if not any(o["Key"] == key for o in listed):
+        raise _NoManifest(unit)
     try:
-        body = client().get_object(Bucket=_bucket(), Key=f"{PREFIX}{unit}/{MANIFEST}")["Body"].read()
+        body = client().get_object(Bucket=_bucket(), Key=key)["Body"].read()
     except Exception as e:
-        if _missing(e):
+        if _missing(e):  # deleted since it was listed
             raise _NoManifest(unit) from None
         raise
     try:
@@ -465,6 +471,11 @@ def push_async(unit, local_dir, files=None):
             _pusher = threading.Thread(target=_push_loop, daemon=True, name="mirror-push")
             _pusher.start()
     _pushes.put((unit, local_dir, files, listed))
+
+
+def busy():
+    """Are pushes queued or running? (The machines don't stop themselves in the middle of an upload.)"""
+    return _pushes.unfinished_tasks > 0
 
 
 def wait_pushes():
