@@ -903,6 +903,15 @@ assert open(bf_p).read() == "0: she walks\n5: she stops\n" and os.path.exists(os
 printed = out_buf.getvalue()
 assert "--seed 4" in printed and f"--beats-file {bf_p}" in printed and "--seconds 50" in printed and "0: she walks" in printed
 assert plan_jobs["p" * 32]["status"] == "downloaded"
+# the printed command is safe to paste: shell-quoted values, the options that shape the first frame, a real seed
+pa = NS(prompt='café $HOME `id` "x"', seconds=50, no_avatar=False, avatar="mirabel", image_model="krea2", negative="",
+        width=1280, height=704, best=False, draft=True, upscale=False, fps=32)
+cmd = vidgen.plan_render_command(pa, 7, "/dl/my plans/pier.beats.txt")
+import shlex  # noqa: E402
+toks = shlex.split(cmd)
+assert toks[:3] == ["vidgen", "video", 'café $HOME `id` "x"'], toks
+assert toks[toks.index("--beats-file") + 1] == "/dl/my plans/pier.beats.txt" and "--draft" in toks and "--seed" in toks
+_stubs.expect_error(vidgen.plan_render_command, pa, None, "/x.txt", contains="seed", exc=vidgen.ApiError)
 vidgen.api, vidgen.download_dir, vidgen.download, vidgen.register_job = real_api_p, real_dd_p, real_dl_p, real_reg_p
 vidgen.submit, vidgen.time.sleep, vidgen.load_jobs, vidgen.save_jobs = real_sub_p, real_sleep_p, real_lj_p, real_sj_p
 vidgen.ensure_avatar = real_ensure

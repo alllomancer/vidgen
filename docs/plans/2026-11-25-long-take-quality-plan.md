@@ -6,12 +6,12 @@ Jira: N/A
 
 ## Progress
 
-- [ ] Task 1: Soften the frame each segment starts from
-- [ ] Task 2: First frame before planning, shown to the planner
-- [ ] Task 3: Plan-only video jobs
-- [ ] Task 4: CLI `vidgen plan` and plan files
-- [ ] Task 5: Dashboard "Plan first"
-- [ ] Task 6: Docs, deploy and live check
+- [x] Task 1: Soften the frame each segment starts from — reviewed (anchored frames excepted, D13)
+- [x] Task 2: First frame before planning, shown to the planner — reviewed
+- [x] Task 3: Plan-only video jobs — reviewed; ';' blocker fixed (D14)
+- [x] Task 4: CLI `vidgen plan` and plan files — reviewed; command quoting blocker fixed
+- [x] Task 5: Dashboard "Plan first" — reviewed, browser-checked; CSP fixed for S3 previews
+- [ ] Task 6: Docs, deploy and live check — docs done; deploy waiting for go-ahead
 
 ## Tasks
 

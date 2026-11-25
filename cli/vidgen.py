@@ -466,7 +466,11 @@ def fetch_results(local, remote):
 def plan_render_command(args, seed, beats_path):
     """The `vidgen video` command that renders a reviewed plan: same prompt, length and avatar, its seed (the same
     first frame) and the beats file."""
-    parts = ["vidgen", "video", json.dumps(args.prompt), "--seconds", str(args.seconds), "--seed", str(seed),
+    import shlex
+
+    if seed is None:
+        raise ApiError("the plan has no seed; render with --beats-file only (the first frame may differ)")
+    parts = ["vidgen", "video", args.prompt, "--seconds", str(args.seconds), "--seed", str(seed),
              "--beats-file", beats_path]
     if getattr(args, "no_avatar", False):
         parts.append("--no-avatar")
@@ -474,7 +478,19 @@ def plan_render_command(args, seed, beats_path):
         parts += ["--avatar", args.avatar]
     if getattr(args, "image_model", "auto") not in (None, "auto"):
         parts += ["--image-model", args.image_model]
-    return " ".join(parts)
+    # the options that shape the first frame or the look, when not the defaults
+    if getattr(args, "negative", ""):
+        parts += ["--negative", args.negative]
+    if (getattr(args, "width", 1280), getattr(args, "height", 704)) != (1280, 704):
+        parts += ["--width", str(args.width), "--height", str(args.height)]
+    parts += [flag for flag, on in (("--best", getattr(args, "best", False)), ("--draft", getattr(args, "draft", False)),
+                                    ("--upscale", getattr(args, "upscale", False))) if on]
+    if getattr(args, "fps", 32) != 32:
+        parts += ["--fps", str(args.fps)]
+    if os.name == "nt":
+        import subprocess
+        return subprocess.list2cmdline(parts)
+    return " ".join(shlex.quote(p) for p in parts)
 
 
 PLAN_POLL_SECONDS = 15

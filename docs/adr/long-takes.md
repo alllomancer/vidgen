@@ -83,3 +83,17 @@
 **Decision**: In colour-matched takes, a re-anchored frame is moved fully onto the LAB stats of the frame it replaced (`transfer_colours`), and each anchor uses seed + segment index.
 **Reason**: Review: the image edit shifts saturation/contrast, and the next segment's ramped matching leaves frame 0 untouched, so an unmatched anchored frame would start a colour step at each anchored seam.
 **Alternatives considered**: Matching the anchored frame to segment 1's stats — the previous frame is only 70% of the way there, so that would itself be a step.
+
+## D13 — [2026-11-25] — Long-take quality Task 1: soften segment starts
+
+**Status**: Accepted
+**Decision**: The frame each later segment starts from is blurred 0.8 px (PIL Gaussian), never the first frame, a freshly re-anchored frame or the output frames; the radius is part of the resume key.
+**Reason**: Live: a bright halo built up around the subject over 10 seams; Wan I2V reproduces and slightly strengthens the edge contrast of its start frame, so softening only that frame stops the compounding without touching what the viewer sees. Re-anchored frames come fresh from the image editor (no build-up), and blurring them would undo part of the face fix (review).
+**Alternatives considered**: Starting from an earlier frame (the halo is in every frame of the segment); sharpening control in Wan (not exposed).
+
+## D14 — [2026-11-25] — Long-take quality Tasks 2-3: plan with the first frame, plan-only jobs
+
+**Status**: Accepted
+**Decision**: Single takes make the first frame before planning and give it to the planner with a keep-to-the-frame rule; `plan_only` returns that plan as beats (";" turned into "," so the API's beat parser accepts them back), the seed and the frame, and a planner failure fails the job instead of falling back.
+**Reason**: Live: the text-only planner invented strangers on the water and glitter; users only saw the plan after an hour. A plan-only job that silently fell back to the prompt would give the user nothing to review.
+**Alternatives considered**: Planning after the first segment (too late to change the plan); a separate `plan` job type (duplicates video validation; `video` + `plan_only` reuses it).
