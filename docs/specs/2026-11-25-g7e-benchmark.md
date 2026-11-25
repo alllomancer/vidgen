@@ -61,3 +61,26 @@ beyond "the clip rendered".
 ## Testing
 
 `python3 -m py_compile` and `bash -n` locally; the run itself is the test.
+
+## Results (2026-11-25)
+
+One 5 s segment, 1280x704, 81 frames, Lightning 4 steps. g7e: T2V, Lightning LoRAs only, torch 2.9.0+cu128,
+median of 3 after a warm-up (`trainer/spike/bench_wan.py`; raw files in
+`s3://<bucket>/outputs/trial-g7e/20261125-*/`).
+
+| Run | Total | 4 steps | Rest (decode, moving back) | Per plain step | Peak GPU |
+|---|---|---|---|---|---|
+| g7e, both experts on the GPU | 104.3 s | 88.5 s | 15.9 s | 22.1 s | 74.5 GB |
+| g7e, offload (as the worker does) | 148.6 s | 117.5 s | 30.9 s | 22.2 s | 36.1 GB |
+| g6e, production worker log (not the benchmark, see below) | ~240 s | ~208 s | ~31 s | ~46 s | n/a |
+
+- Both experts, the text encoder and the fp32 VAE decode fit 96 GB at production size (criterion 1, g7e).
+- Swapping costs ~44 s of a 149 s segment on the g7e (30%): ~29 s inside the steps, ~15 s after them.
+- The g6e row is from the render box's own `pipeline_timing` lines of a 30 s video rendered the same
+  evening: I2V, with two user LoRAs besides Lightning, torch 2.5.1. It is not like-for-like (I2V and extra
+  LoRAs make its steps slower than the benchmark's T2V), so "about 2x per step, about 2.3x per segment" is
+  an indication, not a measurement. The planned g6e benchmark run was not done: the render box was
+  rendering the user's jobs and the worker was not paused (criterion 1 open for g6e; criterion 3 holds, the
+  box was only read).
+- The trial box ran 21:31-22:10 UTC (us-east-1b; us-east-1a had no on-demand capacity) and was terminated
+  (criterion 2). Hugging Face download on it: 118 GB in 874 s (135 MB/s).
