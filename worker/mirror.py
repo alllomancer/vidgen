@@ -5,8 +5,12 @@ A machine with a new disk restores its weights from here instead of downloading 
 mirror lacks is uploaded in the background. Used by the render box and the trainer (Terraform ships this
 one file to both). See docs/specs/2026-11-25-model-mirror.md.
 
-A unit is one folder. Its manifest.json ({"files": {path: size}, "links": {path: symlink target}}) is
-written last, so a half-uploaded unit is never restored. Restores are checked by size.
+A unit is one folder. Its manifest (.mirror-manifest.json: {"files": {path: size}, "links": {path: symlink
+target}}) is written last, so a half-uploaded unit is never restored. Restores are checked by size.
+
+The manifest is data from the bucket and this runs as root, so a restore never trusts it: paths must stay
+inside the unit's folder, also through symlinks (links are leaves, their targets never pass through another
+link, and every write checks where its folder really is on disk).
 
     mirror.py pull UNIT DIR             exit 0 when the folder was restored, 1 when the mirror has no such unit
     mirror.py pull-all ROOT [--skip P]  restore every unit into ROOT/<unit> (first boot)
@@ -17,20 +21,23 @@ MODEL_MIRROR=0 turns it off: pull finds nothing and push does nothing.
 import json
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 
 PREFIX = "models/"
-MANIFEST = "manifest.json"
+MANIFEST = ".mirror-manifest.json"
 PART = 64 * 1024 * 1024  # one ranged GET
 CHUNK = 4 * 1024 * 1024  # one read from its body
 THREADS = 32
 TRIES = 3  # per part
+MAX_FILES = 20000
+DISK_RESERVE = 5 * 1024 ** 3  # a restore never fills the disk to the last GB
 SKIP_DIRS = (".cache", ".locks")
 SKIP_SUFFIXES = (".incomplete", ".lock", ".part")
-SKIP_NAMES = (".complete",)
+SKIP_NAMES = (".complete", MANIFEST)
 
 _s3 = None
 _pushes = queue.Queue()
@@ -40,6 +47,14 @@ _lock = threading.Lock()
 
 class _Failed(Exception):
     """A restore that could not be finished (the caller falls back to Hugging Face)."""
+
+
+class _ProgressRaised(Exception):
+    """The caller's progress callback raised (a job cancel): the one thing pull() lets through."""
+
+
+class _NoManifest(Exception):
+    """The unit has no manifest in the bucket."""
 
 
 def log(**fields):
@@ -67,16 +82,55 @@ def _bucket():
 
 def _safe(rel):
     """A relative path that stays inside its folder (unit names and manifest paths come from S3)."""
-    return bool(rel) and not rel.startswith("/") and all(p not in ("", ".", "..") for p in rel.split("/"))
+    return (isinstance(rel, str) and bool(rel) and not rel.startswith("/") and "\x00" not in rel
+            and all(p not in ("", ".", "..") for p in rel.split("/")))
 
 
-def _link_ok(local_dir, rel, target):
-    """A symlink whose target stays inside the unit's folder."""
-    if not _safe(rel) or not isinstance(target, str) or os.path.isabs(target):
+def _under(rel, links):
+    """Does a path lie below one of the links (a link used as a folder)?"""
+    parts = rel.split("/")
+    return any("/".join(parts[:i]) in links for i in range(1, len(parts)))
+
+
+def _link_ok(rel, target, links):
+    """A symlink that is a leaf and whose target stays inside the unit without passing through, or ending
+    at, another link (so what the path says is where it really goes)."""
+    if not _safe(rel) or not isinstance(target, str) or not target or target.startswith("/") or "\x00" in target:
         return False
-    root = os.path.normpath(local_dir)
-    dest = os.path.normpath(os.path.join(root, os.path.dirname(rel), target))
-    return dest.startswith(root + os.sep)
+    at = rel.split("/")[:-1]
+    for comp in target.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            if not at:
+                return False  # above the unit's folder
+            at.pop()
+        else:
+            at.append(comp)
+            if "/".join(at) in links:
+                return False
+    return bool(at)
+
+
+def _valid(man):
+    """Is this a manifest we would restore? (Shape, sizes, and paths that stay inside the folder.)"""
+    if not isinstance(man, dict):
+        return False
+    files, links = man.get("files"), man.get("links", {})
+    if not isinstance(files, dict) or not isinstance(links, dict) or len(files) + len(links) > MAX_FILES:
+        return False
+    if not all(_safe(r) and type(s) is int and s >= 0 and r not in links and not _under(r, links)
+               for r, s in files.items()):
+        return False
+    return all(not _under(r, links) and _link_ok(r, t, links) for r, t in links.items())
+
+
+def _inside(local_dir, path):
+    """Is the folder a path would be written into really inside local_dir on this disk (whatever symlinks
+    are already there)?"""
+    root = os.path.realpath(local_dir)
+    parent = os.path.realpath(os.path.dirname(path))
+    return parent == root or parent.startswith(root + os.sep)
 
 
 def local_files(local_dir):
@@ -96,18 +150,28 @@ def local_files(local_dir):
     return files, links
 
 
-def _manifest(unit):
-    """The unit's manifest, or None when there is none (or it can't be read)."""
+def _missing(e):
+    """Is this S3 error "no such object"?"""
+    code = str(((getattr(e, "response", None) or {}).get("Error") or {}).get("Code"))
+    return code in ("NoSuchKey", "404")
+
+
+def _read_manifest(unit):
+    """The unit's manifest as stored. Raises _NoManifest when there is none, ValueError when it is not one
+    we would restore, and the S3 error for anything else (throttling, no access)."""
     try:
         body = client().get_object(Bucket=_bucket(), Key=f"{PREFIX}{unit}/{MANIFEST}")["Body"].read()
+    except Exception as e:
+        if _missing(e):
+            raise _NoManifest(unit) from None
+        raise
+    try:
         man = json.loads(body)
-        files, links = man["files"], man.get("links") or {}
-        if not all(isinstance(s, int) and s >= 0 for s in files.values()):
-            raise ValueError("sizes")
-        return {"files": files, "links": links}
-    except Exception as e:  # no such key, no access, not JSON: there is no usable mirror of this unit
-        log(event="mirror_manifest", unit=unit, found=False, reason=type(e).__name__)
-        return None
+    except (ValueError, TypeError) as e:
+        raise ValueError("not JSON") from e
+    if not _valid(man):
+        raise ValueError("not a usable manifest")
+    return {"files": man["files"], "links": man.get("links", {})}
 
 
 def _stats(unit, source, nbytes, t0, **extra):
@@ -118,51 +182,83 @@ def _stats(unit, source, nbytes, t0, **extra):
 
 # ---------------------------------------------------------------- restore
 
+def _write_all(fd, data, pos):
+    """pwrite until every byte is on disk (a full disk returns a short count before it raises)."""
+    view, done = memoryview(data), 0
+    while done < len(view):
+        n = os.pwrite(fd, view[done:], pos + done)
+        if n <= 0:
+            raise OSError("short write")
+        done += n
+
+
 def _fetch(unit, local_dir, need, progress):
     """Download `need` ([(relative path, size)]) with parallel ranged GETs into <file>.part, then rename."""
     s3, bucket, total = client(), _bucket(), sum(s for _, s in need)
-    fds, parts, done, stop = {}, [], [0], threading.Event()
+    parts, done, stop = [], [0], threading.Event()
+    sizes = dict(need)
 
     def get(rel, off, n):
-        for attempt in range(TRIES):
-            got = 0
-            try:
-                if stop.is_set():
-                    return
-                body = s3.get_object(Bucket=bucket, Key=f"{PREFIX}{unit}/{rel}",
-                                     Range=f"bytes={off}-{off + n - 1}")["Body"]
-                while not stop.is_set():
-                    chunk = body.read(CHUNK)
-                    if not chunk:
-                        break
-                    os.pwrite(fds[rel], chunk, off + got)
-                    got += len(chunk)
+        fd = os.open(os.path.join(local_dir, rel) + ".part", os.O_WRONLY)
+        try:
+            for attempt in range(TRIES):
+                got, body = 0, None
+                try:
+                    if stop.is_set():
+                        return
+                    resp = s3.get_object(Bucket=bucket, Key=f"{PREFIX}{unit}/{rel}", Range=f"bytes={off}-{off + n - 1}")
+                    body = resp["Body"]
+                    whole = str(resp.get("ContentRange") or "").rpartition("/")[2]
+                    if whole.isdigit() and int(whole) != sizes[rel]:  # the object is not the one the manifest lists
+                        raise _Failed(f"{rel}: {whole} bytes in the bucket, {sizes[rel]} in the manifest")
+                    while not stop.is_set():
+                        chunk = body.read(min(CHUNK, n - got) or 1)
+                        if not chunk:
+                            break
+                        if got + len(chunk) > n:
+                            raise OSError(f"{rel}: more than {n} bytes at {off}")
+                        _write_all(fd, chunk, off + got)
+                        got += len(chunk)
+                        with _lock:
+                            done[0] += len(chunk)
+                        if got == n:
+                            break
+                    if got == n or stop.is_set():
+                        return
+                    raise OSError(f"{rel}: got {got} of {n} bytes at {off}")
+                except Exception as e:  # a dropped connection mid-file: this part again, from its start
                     with _lock:
-                        done[0] += len(chunk)
-                if got == n or stop.is_set():
-                    return
-                raise OSError(f"{rel}: got {got} of {n} bytes at {off}")
-            except Exception:  # a dropped connection mid-file: this part again, from its start
-                with _lock:
-                    done[0] -= got
-                if attempt == TRIES - 1:
-                    raise
+                        done[0] -= got
+                    if attempt == TRIES - 1 or isinstance(e, _Failed):
+                        raise
+                    stop.wait(attempt + 1)
+                finally:
+                    if body is not None and hasattr(body, "close"):
+                        body.close()
+        finally:
+            os.close(fd)
 
     def tell():
         if progress:
-            progress(f"restoring {unit} from the model mirror: {done[0] / 1e9:.1f}/{total / 1e9:.1f} GB")
+            try:
+                progress(f"restoring {unit} from the model mirror: {done[0] / 1e9:.1f}/{total / 1e9:.1f} GB")
+            except BaseException as e:
+                raise _ProgressRaised() from e
 
     try:
         for rel, size in need:
             path = os.path.join(local_dir, rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not _inside(local_dir, path):
+                raise _Failed(f"{rel}: its folder is outside {local_dir}")
             if os.path.lexists(path):
                 os.remove(path)
-            if size == 0:
-                open(path, "wb").close()
-                continue
-            fds[rel] = os.open(path + ".part", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            os.ftruncate(fds[rel], size)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path if size == 0 else path + ".part", flags, 0o644)
+            try:
+                os.ftruncate(fd, size)
+            finally:
+                os.close(fd)
             parts += [(rel, off, min(PART, size - off)) for off in range(0, size, PART)]
         tell()
         with ThreadPoolExecutor(THREADS) as pool:
@@ -178,22 +274,43 @@ def _fetch(unit, local_dir, need, progress):
                 stop.set()  # on an error or a cancel the running parts end at their next read
                 for f in pending:
                     f.cancel()
-    except BaseException:
-        _close(fds)
         for rel, size in need:
-            if size and os.path.exists(os.path.join(local_dir, rel) + ".part"):
-                os.remove(os.path.join(local_dir, rel) + ".part")
+            if size:
+                os.rename(os.path.join(local_dir, rel) + ".part", os.path.join(local_dir, rel))
+    except BaseException:
+        for rel, size in need:
+            part = os.path.join(local_dir, rel) + ".part"
+            if size and os.path.lexists(part) and _inside(local_dir, part):
+                os.remove(part)
         raise
-    _close(fds)
-    for rel, size in need:
-        if size:
-            os.rename(os.path.join(local_dir, rel) + ".part", os.path.join(local_dir, rel))
     return total
 
 
-def _close(fds):
-    for rel in list(fds):
-        os.close(fds.pop(rel))
+def _restore(unit, local_dir, man, progress):
+    def have(rel, size):
+        p = os.path.join(local_dir, rel)
+        return os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) == size and _inside(local_dir, p)
+
+    need = [(rel, size) for rel, size in sorted(man["files"].items()) if not have(rel, size)]
+    total = sum(s for _, s in need)
+    if need:
+        at = local_dir
+        while not os.path.isdir(at):
+            at = os.path.dirname(at) or "/"
+        if total > shutil.disk_usage(at).free - DISK_RESERVE:
+            raise _Failed(f"{total / 1e9:.0f} GB to restore, not enough free disk")
+        _fetch(unit, local_dir, need, progress)
+    for rel, target in sorted(man["links"].items()):
+        path = os.path.join(local_dir, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not _inside(local_dir, path):
+            raise _Failed(f"{rel}: its folder is outside {local_dir}")
+        if os.path.islink(path) and os.readlink(path) == target:
+            continue
+        if os.path.lexists(path):
+            os.remove(path)
+        os.symlink(target, path)
+    return total, len(need)
 
 
 def pull(unit, local_dir, progress=None):
@@ -203,32 +320,18 @@ def pull(unit, local_dir, progress=None):
     if not enabled() or not _safe(unit):
         return None
     t0 = time.time()
-    man = _manifest(unit)
-    if man is None:
-        return None
-    if not all(_safe(r) for r in man["files"]) or not all(_link_ok(local_dir, r, t) for r, t in man["links"].items()):
-        log(event="mirror_pull", unit=unit, ok=False, reason="a path in the manifest leaves the folder")
-        return None
-
-    def have(rel, size):
-        p = os.path.join(local_dir, rel)
-        return os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) == size
-
-    need = [(rel, size) for rel, size in sorted(man["files"].items()) if not have(rel, size)]
     try:
-        nbytes = _fetch(unit, local_dir, need, progress) if need else 0
-        for rel, target in man["links"].items():
-            path = os.path.join(local_dir, rel)
-            if os.path.islink(path) and os.readlink(path) == target:
-                continue
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            if os.path.lexists(path):
-                os.remove(path)
-            os.symlink(target, path)
-    except (_Failed, OSError) as e:
-        log(event="mirror_pull", unit=unit, ok=False, reason=str(e)[:300])
+        man = _read_manifest(unit)
+        nbytes, nfiles = _restore(unit, local_dir, man, progress)
+    except _ProgressRaised as p:
+        raise p.__cause__ from None
+    except _NoManifest:
+        log(event="mirror_pull", unit=unit, ok=False, reason="not in the mirror")
         return None
-    stats = _stats(unit, "mirror", nbytes, t0, files=len(need))
+    except Exception as e:
+        log(event="mirror_pull", unit=unit, ok=False, reason=f"{type(e).__name__}: {str(e)[:300]}")
+        return None
+    stats = _stats(unit, "mirror", nbytes, t0, files=nfiles)
     log(event="mirror_pull", ok=True, **stats)
     return stats
 
@@ -241,9 +344,9 @@ def units():
         page = client().list_objects_v2(Bucket=_bucket(), Prefix=PREFIX, **kw)
         out += [o["Key"][len(PREFIX):-len(MANIFEST) - 1] for o in page.get("Contents") or []
                 if o["Key"].endswith("/" + MANIFEST)]
-        if not page.get("IsTruncated"):
+        token = page.get("NextContinuationToken")
+        if not page.get("IsTruncated") or not token:
             return sorted(out)
-        token = page["NextContinuationToken"]
 
 
 def pull_all(local_root, skip=(), progress=None):
@@ -278,9 +381,9 @@ def _remote_sizes(unit):
         kw = {"ContinuationToken": token} if token else {}
         page = client().list_objects_v2(Bucket=_bucket(), Prefix=prefix, **kw)
         out.update({o["Key"][len(prefix):]: o["Size"] for o in page.get("Contents") or []})
-        if not page.get("IsTruncated"):
+        token = page.get("NextContinuationToken")
+        if not page.get("IsTruncated") or not token:
             return out
-        token = page["NextContinuationToken"]
 
 
 def _listing(local_dir, files):
@@ -296,7 +399,10 @@ def _listing(local_dir, files):
 def push(unit, local_dir, files=None, _listed=None):
     """Upload what the mirror lacks of a unit (files: the unit's relative paths when the folder holds more
     than the unit), then its manifest. Returns stats, or None when nothing could be mirrored. Never raises:
-    the mirror is a convenience, the weights on disk are what the machine uses."""
+    the mirror is a convenience, the weights on disk are what the machine uses.
+
+    Two machines pushing the same unit at the same moment can each write a manifest without the other's
+    new files; the objects stay, and that machine's next start adds them back."""
     if not enabled() or not _safe(unit):
         return None
     t0 = time.time()
@@ -305,16 +411,23 @@ def push(unit, local_dir, files=None, _listed=None):
         if not listed or not listed[0]:
             return None
         mine, links = listed
-        man = _manifest(unit) or {"files": {}, "links": {}}
+        try:
+            man = _read_manifest(unit)
+        except (_NoManifest, ValueError):  # none yet, or one nobody could restore: start it again
+            man = {"files": {}, "links": {}}
+        # Any other error (throttling, a timeout) stops here: writing a manifest without knowing the
+        # current one would drop what another machine mirrored.
         if all(man["files"].get(r) == s for r, s in mine.items()) and \
                 all(man["links"].get(r) == t for r, t in links.items()):
             return _stats(unit, "disk", 0, t0, uploaded=0)  # the mirror already holds all of it
+        # Kept: what another machine sharing this unit mirrored (its objects are still there).
+        merged = {"files": {**man["files"], **mine}, "links": {**man["links"], **links}}
+        if not _valid(merged):
+            raise ValueError("this folder's layout can't be mirrored (a file below a symlink, or a link out of it)")
         remote = _remote_sizes(unit)
         todo = [(rel, size) for rel, size in sorted(mine.items()) if remote.get(rel) != size]
         for rel, _ in todo:
             _upload(os.path.join(local_dir, rel), f"{PREFIX}{unit}/{rel}")
-        # Kept: what another machine sharing this unit mirrored (its objects are still there).
-        merged = {"files": {**man["files"], **mine}, "links": {**man["links"], **links}}
         client().put_object(Bucket=_bucket(), Key=f"{PREFIX}{unit}/{MANIFEST}",
                             Body=json.dumps(merged, indent=1, sort_keys=True).encode(), ContentType="application/json")
     except Exception as e:
