@@ -97,3 +97,18 @@ key); run_video order (first frame before the planner, image passed, no image wi
 rule; plan-only path (no video/sound calls, result beats/seed, planner failure fails the job); API rules; CLI `plan`
 (files, printed command; watcher saving plan files); dashboard in the browser preview. Live: the 50 s mirabel take
 (plan first, render with the beats and seed) compared with the last run for halo, detail and invented content.
+
+## Live check (2026-11-25)
+
+- `vidgen plan` (job a6afc595a9c747658faaaf37cfd23b47, mirabel pier prompt, 50 s, seed 7, Wan first frame): a few
+  minutes including the render box start; 10 beats that stay in the scene (her, the pier, light, clouds, sea; one
+  beat describes a sound, harmless); `pier-plan.beats.txt` and `pier-plan.keyframe.png` saved; the printed command
+  was correctly quoted.
+- Render from the plan (job dd85424368c745a3a4a42b4809be9eb2, same seed, avatar Wan LoRA attached automatically):
+  50.03 s, 32 fps, sound; colour steady (luma 141-148, saturation 21.9-23.2).
+- Invented content: none in 50 s. The previous run with the same seed and LoRA had two strangers walking on the water
+  at 25-38 s. The planner seeing the first frame works.
+- Halo: not reduced. At 47.5 s the bright outline around her hair and coat is as strong as in the previous run, and the
+  face and coat show over-sharpened texture (a fine cross-hatch on the face). The 0.8 px softening of start frames did
+  not stop the build-up and may push Wan to sharpen more. Next: turn `CONDITION_BLUR` off and find the halo's cause
+  (compare raw 16 fps vs final frames, and runs with colour matching off) before another fix.
