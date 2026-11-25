@@ -84,3 +84,16 @@ median of 3 after a warm-up (`trainer/spike/bench_wan.py`; raw files in
   box was only read).
 - The trial box ran 21:31-22:10 UTC (us-east-1b; us-east-1a had no on-demand capacity) and was terminated
   (criterion 2). Hugging Face download on it: 118 GB in 874 s (135 MB/s).
+
+### g6e baseline, same script (2026-11-25, cut short)
+
+Run on the render box with the worker paused. Only the warm-up run finished: the user had queued jobs behind
+it, so the benchmark was stopped after ~11 minutes and the worker restarted (criterion 3: the box is back in
+service).
+
+| | g6e (L40S, torch 2.5.1) | g7e (torch 2.9.0) |
+|---|---|---|
+| One plain denoising step (T2V, Lightning only) | 39.6 s | 22.1 s |
+
+1.8x per step. The warm-up's swap steps (175 s, 149 s) and total (453 s) include first-use paging and are not
+a measurement of a steady segment; the production log's ~240 s per I2V segment stays the practical g6e number.
