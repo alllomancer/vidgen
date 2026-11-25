@@ -392,7 +392,9 @@ def plan_only_result(job, params, cast, seed, first_path):
                            "beats yourself") from e
     if not models.valid_segment_plan(plan, n):
         raise RuntimeError("the planner could not write a timeline; try again or write beats yourself")
-    beats = "\n".join(f"{models.SEGMENT_SECONDS * i}: {' '.join(p.split())}" for i, p in enumerate(plan))
+    # One line per beat; ";" would split a beat in the API's parser, so it becomes ",".
+    beats = "\n".join(f"{models.SEGMENT_SECONDS * i}: {' '.join(p.replace(';', ',').split())}"
+                      for i, p in enumerate(plan))
     result = {"plan_only": True, "segment_prompts": plan, "beats": beats, "seed": seed}
     if first_path:
         result["keyframe_key"] = upload(first_path, job["client"], job["job_id"], "keyframe.png", "image/png")

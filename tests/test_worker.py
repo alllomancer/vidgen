@@ -274,6 +274,9 @@ segments.clear()
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, work_dir=wdb)
 assert len(segments) == 10, "new blur: rendered again"
 models.CONDITION_BLUR = real_blur
+softened.clear(), segments.clear()
+models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, anchor_every=3, reanchor=lambda frame, n=0: f"a:{frame}")
+assert len(softened) == 6 and all(not str(img).startswith("a:") for img, _ in softened), "re-anchored frames aren't softened"
 models.soften = lambda image, radius=None: image
 models.write_video = real_write_video
 models._render_segment = real_fake
@@ -409,6 +412,9 @@ res = worker.run_video({"client": "m", "job_id": "pl1"}, dict(base, seed=4, seco
 assert events == ["kf", "plan"] and not takes, events
 assert res["plan_only"] is True and res["seed"] == 4 and res["segment_prompts"] == [f"s{i}" for i in range(10)]
 assert res["beats"].splitlines() == [f"{5 * i}: s{i}" for i in range(10)] and res["keyframe_key"] == "outputs/keyframe.png"
+models.plan_segments = lambda p, n, cast=(), seconds=None, image=None: [f"she turns; step {i}" for i in range(n)]
+res = worker.run_video({"client": "m", "job_id": "pl3"}, dict(base, seed=4, seconds=50, plan_only=True), tempfile.mkdtemp())
+assert ";" not in res["beats"] and res["beats"].splitlines()[1] == "5: she turns, step 1", res["beats"]
 models.plan_segments = lambda p, n, cast=(), seconds=None, image=None: (_ for _ in ()).throw(ValueError("no JSON"))
 _stubs.expect_error(worker.run_video, {"client": "m", "job_id": "pl2"}, dict(base, seed=4, seconds=50, plan_only=True),
                     tempfile.mkdtemp(), contains="could not write a timeline", exc=RuntimeError)

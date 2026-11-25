@@ -440,6 +440,8 @@ def fetch_results(local, remote):
     # "video" goes to the requested path; everything else (subtitles, plan,
     # narration, keyframe, avatar candidates) lands next to it as <base>.<name><ext>.
     saved = []
+    result = remote.get("result") or {}
+    result = json.loads(result) if isinstance(result, str) else result
     video_url = (remote.get("downloads") or {}).get("video")
     if video_url:
         out = video_target(out, os.path.splitext(urllib.parse.urlparse(video_url).path)[1])
@@ -453,7 +455,64 @@ def fetch_results(local, remote):
             path = out if name == "video" else f"{base}.{name}{ext}"
         download(url, path)
         saved.append(path)
+    if result.get("plan_only") and result.get("beats"):  # a reviewed plan: one "SECONDS: text" per line
+        path = f"{base}.beats.txt"
+        with open(path, "w") as f:
+            f.write(result["beats"].rstrip("\n") + "\n")
+        saved.append(path)
     return saved
+
+
+def plan_render_command(args, seed, beats_path):
+    """The `vidgen video` command that renders a reviewed plan: same prompt, length and avatar, its seed (the same
+    first frame) and the beats file."""
+    parts = ["vidgen", "video", json.dumps(args.prompt), "--seconds", str(args.seconds), "--seed", str(seed),
+             "--beats-file", beats_path]
+    if getattr(args, "no_avatar", False):
+        parts.append("--no-avatar")
+    elif getattr(args, "avatar", None):
+        parts += ["--avatar", args.avatar]
+    if getattr(args, "image_model", "auto") not in (None, "auto"):
+        parts += ["--image-model", args.image_model]
+    return " ".join(parts)
+
+
+PLAN_POLL_SECONDS = 15
+
+
+def wait_for_plan(job_id, args):
+    """`vidgen plan`: wait for the plan-only job (Ctrl-C leaves it to the watcher), save <name>.beats.txt and the
+    first frame, print the beats and the command that renders them."""
+    last = None
+    try:
+        while True:
+            job = api("GET", f"/jobs/{job_id}")
+            status, prog = job.get("status"), job.get("progress")
+            if (status, prog) != last:
+                print(f"  {status}{': ' + prog if prog else ''}", flush=True)
+                last = (status, prog)
+            if status in ("done", "failed", "cancelled"):
+                break
+            time.sleep(PLAN_POLL_SECONDS)
+    except KeyboardInterrupt:
+        print("\nleft to the watcher: the beats and first frame will be saved to the download folder")
+        return
+    if status != "done":
+        raise ApiError(f"plan {status}: {job.get('error') or ''}".strip())
+    with locked():
+        jobs = load_jobs()
+        local = jobs.get(job_id) or {"type": "video", "out": local_out("video", job_id, args.out)}
+        saved = fetch_results(local, job)
+        if job_id in jobs:
+            jobs[job_id]["status"] = "downloaded"
+            save_jobs(jobs)
+    result = job.get("result") or {}
+    result = json.loads(result) if isinstance(result, str) else result
+    beats_path = next((p for p in saved if p.endswith(".beats.txt")), "")
+    print("\nbeats (edit the file, then render):\n" + result.get("beats", ""))
+    for p in saved:
+        print(f"saved {p}")
+    print("\nrender with:\n  " + plan_render_command(args, result.get("seed"), beats_path))
 
 
 def fetch_photos(folder, remote):
@@ -1607,7 +1666,8 @@ def main():
     k = sub.add_parser("cancel", help="cancel a queued or running job")
     k.add_argument("job_id", help="job id or unique prefix")
 
-    v = sub.add_parser("video", help="text to short video")
+    v = sub.add_parser("video", aliases=["plan"],
+                       help="text to video; `plan` (same options, takes over 15 s): first frame + editable beats, no video")
     v.add_argument("prompt")
     v.add_argument("--negative", default="")
     v.add_argument("--seconds", type=int, default=5, help="clip length, 1-60 s (over 5 s chains 5 s segments; ~5 min per 5 s segment)")
@@ -1813,12 +1873,15 @@ def main():
         elif args.cmd == "smoke":
             import smoke
             sys.exit(smoke.run(skip_cancel=args.skip_cancel))
-        elif args.cmd == "video":
+        elif args.cmd in ("video", "plan"):
             beats = video_beats(args)
-            if args.seconds > 15:
+            planning = args.cmd == "plan"
+            if planning and (args.seconds <= 15 or beats or args.variations > 1):
+                raise ApiError("plan: a take over 15 s, without --beats or --variations (it writes the beats)")
+            if args.seconds > 15 and not planning:
                 print(take_estimate(args.seconds), flush=True)
             if ensure_avatar(args):
-                submit({
+                body = {
                     "type": "video", "prompt": args.prompt, "negative_prompt": args.negative,
                     "seconds": args.seconds, "width": args.width, "height": args.height, "seed": args.seed,
                     "variations": args.variations,
@@ -1828,7 +1891,11 @@ def main():
                     **({"beats": beats} if beats else {}),
                     **({"anchor_every": args.anchor_every} if args.anchor_every else {}),
                     **({"avatar_lora": False} if args.no_avatar_lora else {}),
-                }, args.out)
+                    **({"plan_only": True} if planning else {}),
+                }
+                job_id = submit(body, args.out)
+                if planning:
+                    wait_for_plan(job_id, args)
         elif args.cmd == "photos":
             if args.image and args.avatar:
                 raise ApiError("give --image or --avatar, not both")

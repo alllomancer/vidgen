@@ -1,4 +1,6 @@
 """Trainer (captions, speed, auto-preview) and CLI (parsers, downloads, captions edit) tests."""
+import contextlib
+import io
 import json
 import os
 import sys
@@ -868,6 +870,41 @@ assert sub[-1][0]["image_model"] is None, "auto (default) leaves the choice to t
 with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--image-model", "wan"]):
     vidgen.main()
 assert sub[-1][0]["image_model"] == "wan"
+# vidgen plan: a plan-only job; waits, saves <name>.beats.txt and the first frame, prints the render command
+plan_dl = tempfile.mkdtemp()
+real_api_p, real_dd_p, real_dl_p, real_reg_p = vidgen.api, vidgen.download_dir, vidgen.download, vidgen.register_job
+real_sub_p, real_sleep_p, real_lj_p, real_sj_p = vidgen.submit, vidgen.time.sleep, vidgen.load_jobs, vidgen.save_jobs
+plan_jobs, plan_posts = {}, []
+vidgen.submit = lambda body, out, extra=None, quiet=False: plan_posts.append(body) or plan_jobs.__setitem__(
+    "p" * 32, {"type": "video", "out": os.path.join(plan_dl, out + ".mp4"), "status": "queued"}) or "p" * 32
+vidgen.load_jobs, vidgen.save_jobs = (lambda: plan_jobs), (lambda j: None)
+vidgen.download_dir = lambda: plan_dl
+polls = []
+
+
+def plan_api(m, p, b=None):
+    polls.append(p)
+    if len(polls) < 2:
+        return {"status": "running", "progress": "planning 10 segments"}
+    return {"status": "done", "result": {"plan_only": True, "seed": 4, "beats": "0: she walks\n5: she stops"},
+            "downloads": {"keyframe": "https://d/keyframe.png"}}
+
+
+vidgen.api = plan_api
+vidgen.download = lambda url, path: open(path, "w").write("png")
+vidgen.time.sleep = lambda s: None
+out_buf = io.StringIO()
+with mock.patch.object(sys, "argv", ["vidgen", "plan", "mirabel on a pier", "--seconds", "50", "--avatar", "mirabel",
+                                     "-o", "pier"]), contextlib.redirect_stdout(out_buf):
+    vidgen.main()
+assert plan_posts[-1]["plan_only"] is True and plan_posts[-1]["seconds"] == 50 and plan_posts[-1]["type"] == "video"
+bf_p = os.path.join(plan_dl, "pier.beats.txt")
+assert open(bf_p).read() == "0: she walks\n5: she stops\n" and os.path.exists(os.path.join(plan_dl, "pier.keyframe.png"))
+printed = out_buf.getvalue()
+assert "--seed 4" in printed and f"--beats-file {bf_p}" in printed and "--seconds 50" in printed and "0: she walks" in printed
+assert plan_jobs["p" * 32]["status"] == "downloaded"
+vidgen.api, vidgen.download_dir, vidgen.download, vidgen.register_job = real_api_p, real_dd_p, real_dl_p, real_reg_p
+vidgen.submit, vidgen.time.sleep, vidgen.load_jobs, vidgen.save_jobs = real_sub_p, real_sleep_p, real_lj_p, real_sj_p
 vidgen.ensure_avatar = real_ensure
 vidgen.avatar_generate("mira", "a sailor", 4, "krea2")
 assert sub[-1][0] == {"type": "avatar", "description": "a sailor", "candidates": 4, "model": "krea2"}
@@ -898,6 +935,9 @@ assert posted[-1][:2] == ("GET", "/avatars/mira/media")
 _stubs.expect_error(ui.avatar_media, "../x", "GET", contains="avatar name")
 ui.avatar_wan_lora("mira")
 assert posted[-1][:2] == ("POST", "/avatars/mira/wan-lora")
+ui.get_job("a" * 32)
+assert posted[-1][:2] == ("GET", "/jobs/" + "a" * 32)
+_stubs.expect_error(ui.get_job, "../x", contains="job id")
 _stubs.expect_error(ui.avatar_wan_lora, "Bad Name", contains="avatar name")
 # the LoRA list marks versions copied to this computer
 vidgen.api = lambda m, p, b=None: {"loras": [{"name": "moody", "current": 1, "versions": [{"version": 1}, {"version": 2}]}]}

@@ -197,6 +197,11 @@ form:not(.krea) .krea-text { display: none !important; }
         <label>Seconds (1-60; over 5 chains 5 s segments)<input name="seconds" type="number" min="1" max="60" value="5"></label>
         <p class="wide hint take-estimate" role="status" aria-live="polite" hidden></p>
         <label class="wide long-only" hidden>Beats (optional)<textarea name="beats" maxlength="6500" aria-describedby="beats-hint" placeholder="0: a man walks into a sunny kitchen&#10;10: he sits down at the table&#10;30: he looks up at the window"></textarea></label>
+        <div class="wide plan-first-row" hidden>
+          <button type="button" class="small plan-first" aria-describedby="plan-first-status">Plan first</button>
+          <span class="hint" id="plan-first-status" role="status"></span>
+          <img class="plan-first-frame" alt="First frame of the plan" hidden style="max-width:240px;display:block;margin-top:6px">
+        </div>
         <p class="wide hint long-only" id="beats-hint" hidden>What happens when: one "SECONDS: text" per line, times in multiples of 5, each a full description of the shot. Empty: over 15 s the planner writes the timeline.</p>
         <label class="anchor-only" hidden>Re-anchor the avatar every N segments<input name="anchor_every" type="number" min="2" max="6" placeholder="off" aria-describedby="anchor-hint"></label>
         <p class="hint anchor-only" id="anchor-hint" hidden>2-6. Restores the avatar's face before segments N, 2N, ... (~2-4 min each). Empty: off.</p>
@@ -1142,6 +1147,7 @@ function videoLong(f) {
 function videoForm() {
   const f = $("create-video"), long = videoLong(f);
   for (const el of f.querySelectorAll(".long-only")) el.hidden = !long.beats;
+  f.querySelector(".plan-first-row").hidden = long.secs <= 15;  // the planner's range
   for (const el of f.querySelectorAll(".anchor-only")) el.hidden = !long.anchor;
   const v = f.elements.variations;
   if (long.secs > 5 && !v.disabled) { v.dataset.kept = v.value; v.value = 1; v.disabled = true; }
@@ -1150,6 +1156,40 @@ function videoForm() {
   est.hidden = long.secs <= 15;
   est.textContent = `${segs} segments of 5 s: at least ${segs * 5 + 5} min to render (~5 min per segment plus smoothing and sound; more with Best or Upscale).`;
 }
+// "Plan first": a plan-only job (first frame + beats, no video); its beats and seed fill the form for review.
+$("create-video").querySelector(".plan-first").onclick = async () => {
+  const f = $("create-video"), status = $("plan-first-status"), btn = f.querySelector(".plan-first");
+  const img = f.querySelector(".plan-first-frame");
+  try {
+    if (!(f.elements.prompt.value || "").trim()) throw new Error("Write a prompt first");
+    const job = createBody("video", f);
+    delete job.beats;
+    job.plan_only = true;
+    btn.disabled = true;
+    status.textContent = "Planning: starting the render machine if needed…";
+    const r = await api("POST", "/api/create", {job, out: (f.elements.out.value || "").trim() || undefined});
+    let j;
+    for (;;) {
+      await new Promise(res => setTimeout(res, 10000));
+      j = await api("GET", `/api/jobs/${r.job_id}`);
+      if (["done", "failed", "cancelled"].includes(j.status)) break;
+      status.textContent = `Planning: ${j.progress || j.status}…`;
+    }
+    if (j.status !== "done") throw new Error(`Plan ${j.status}: ${j.error || ""}`);
+    const res = typeof j.result === "string" ? JSON.parse(j.result) : (j.result || {});
+    f.elements.beats.value = res.beats || "";
+    if (res.seed !== undefined && res.seed !== null) f.elements.seed.value = res.seed;
+    const kf = (j.downloads || {}).keyframe;
+    img.hidden = !kf;
+    if (kf) img.src = kf;
+    videoForm();
+    status.textContent = "Plan ready: edit the beats, then Make video (same seed, same first frame).";
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
 $("create-video").addEventListener("input", videoForm);
 $("create-video").addEventListener("change", videoForm);
 videoForm();

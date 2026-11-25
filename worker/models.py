@@ -527,12 +527,14 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
         if progress and len(sizes) > 1:
             progress(f"segment {n + 1}/{len(sizes)}")
         num = sizes[n]
-        if reanchor and anchor_every and n and (n + 1) % anchor_every == 0:
+        anchored = bool(reanchor and anchor_every and n and (n + 1) % anchor_every == 0)
+        if anchored:
             before = np_frame(cond)
             cond = reanchor(cond, n)
             if colour:  # keep the take's colours across the edit
                 cond = Image.fromarray(transfer_colours(np_frame(cond), colour_stats([before])))
-        if n and seconds > SEGMENT_SECONDS and CONDITION_BLUR:  # the halo: soften what the next segment starts from
+        # The halo: soften what the next segment starts from (not a freshly re-anchored frame: no build-up there).
+        if n and seconds > SEGMENT_SECONDS and CONDITION_BLUR and not anchored:
             cond = soften(cond, CONDITION_BLUR)
         seg_prompt, seg_negative = styled[min(n, len(styled) - 1)]
         frames = _render_segment(seg_prompt, seg_negative, num, width, height,

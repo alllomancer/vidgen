@@ -406,6 +406,14 @@ def avatar_krea_lora(name):
     return vidgen.api("POST", f"/avatars/{name}/krea-lora")
 
 
+def get_job(job_id):
+    """One job's status, progress, result and download links (the dashboard's "Plan first" waits on it)."""
+    job_id = str(job_id or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise ValueError("job id must be 32 hex characters")
+    return vidgen.api("GET", f"/jobs/{job_id}")
+
+
 def avatar_wan_lora(name):
     """Build (a new version of) the avatar's Wan LoRA from its media now."""
     name = str(name or "").strip().lower()
@@ -488,7 +496,9 @@ def make_handler(port, token):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy",
-                             "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; "
+                             # S3 presigned links: plan first frames (img), avatar preview clips (media)
+                             "default-src 'self'; img-src 'self' blob: https://*.amazonaws.com; "
+                             "media-src 'self' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; "
                              "script-src 'self' 'unsafe-inline'")
             self.end_headers()
             self.wfile.write(data)
@@ -523,6 +533,9 @@ def make_handler(port, token):
                     return self._send(200, vidgen.api("POST", "/wake"))
                 if method == "GET" and path == "/api/jobs":
                     return self._send(200, job_history())
+                m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})", path)
+                if method == "GET" and m:
+                    return self._send(200, get_job(m.group(1)))
                 m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/story", path)
                 if method == "GET" and m:
                     return self._send(200, written_story(m.group(1)))
