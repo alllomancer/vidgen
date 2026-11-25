@@ -12,7 +12,7 @@ Jira: N/A
 - [x] Task 4: Trainer: avatar Wan builds — reviewed; version-collision blocker fixed (D6)
 - [x] Task 5: Automatic avatar LoRA on video jobs — reviewed
 - [x] Task 6: On-demand Wan LoRA builds, CLI and dashboard — reviewed, browser-checked
-- [ ] Task 7: Docs, deploy and live check — docs done; deploy waiting for go-ahead
+- [x] Task 7: Docs, deploy and live check — deployed; live: people check, on-demand build, auto-attach
 
 ## Tasks
 

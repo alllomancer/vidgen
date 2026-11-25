@@ -114,3 +114,16 @@ job (params, conditional put, redelivery), skipped when `wan_lora` false or medi
 and `wan_lora` state (staleness, failure, cancel); API `wan_lora` on create, `POST /wan-lora` (202/404/409), auto
 attach and limits on video jobs; CLI/dashboard states. Live: rebuild inbal's photo set (people check), create one new
 avatar end to end, and render the 50 s mirabel take with her automatic Wan LoRA.
+
+## Live check (2026-11-25)
+
+- One-person check: inbal's media rebuild failed as intended, "only 10 of 24 photos show exactly one person; use
+  reference images of just this person"; no media or LoRA was built from mixed faces.
+- On-demand build: `vidgen avatar wan-train --name mirabel` built `avatar-mirabel-wan` v1 from her stored 24 photos
+  and 4 clips on the trainer; her `wan_lora` became ready.
+- Automatic use: job 5acceb6e9362424496f61bb7900d2101, the 50 s pier take with `--seed 7 --image-model wan` and no
+  `--lora`: the API attached `avatar-mirabel-wan` v1 at 1.0 by itself. 50.03 s, 32 fps, sound.
+- Likeness: held to the end (red curls, her face), on par with the photo-only spike LoRA; seams at 5, 25, 45 s clean;
+  colour steady (luma 141-148, saturation 21.9-23.1). No visible gain from the clips in this one take.
+- Remaining artefacts (not from the LoRA): strangers walking on the water near 25 s (planner prompts) and the halo
+  building up by 45 s (re-sharpening at each seam); both are what improvement 1 targets.

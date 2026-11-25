@@ -1405,7 +1405,8 @@ def lora_command(args):
             cps = ",".join(f"[{c}]" if c == pick else str(c) for c in v["checkpoints"]) or "-"
             using = f"  using step {pick}" if pick else ("  using final" if current else "")
             if v.get("source") in ("upload", "avatar"):
-                kind = "krea2" if "krea2" in (v.get("models") or []) else "uploaded"
+                kind = "krea2" if "krea2" in (v.get("models") or []) else \
+                    ("wan" if v.get("source") == "avatar" else "uploaded")
                 note = (f"  avatar {v.get('trigger') or l['name']}" if v.get("source") == "avatar"
                         else ("  " + v["description"] if v.get("description") else ""))
                 print(f"{mark} {l['name']:16} v{v['version']:<3} {kind:10} {when}  "
