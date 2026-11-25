@@ -112,3 +112,15 @@ rule; plan-only path (no video/sound calls, result beats/seed, planner failure f
   face and coat show over-sharpened texture (a fine cross-hatch on the face). The 0.8 px softening of start frames did
   not stop the build-up and may push Wan to sharpen more. Next: turn `CONDITION_BLUR` off and find the halo's cause
   (compare raw 16 fps vs final frames, and runs with colour matching off) before another fix.
+
+## Halo investigation (2026-11-25)
+
+- `CONDITION_BLUR` set to 0 (off) and deployed.
+- Whole-frame measurements of the five 50 s takes (per second: fine-detail sharpness = mean |Laplacian|, halo
+  strength = mean |blur r1 - blur r4| of the luma): sharpness drops ~40% in the first 10 s in every take (the camera
+  moves in, the background goes soft) and the halo/detail ratio rises from ~0.68 to ~1.1 by 10 s, then levels off.
+- Frame by frame around the seams (autowan and planned takes): the ratio changes by 0.017-0.027 across the 5, 10 and
+  25 s seams, below the typical frame-to-frame change (0.030); halo strength barely moves at seams (e.g. 7.72 -> 7.74).
+  The halo is not added at the seams (consistent with the start-frame blur having no effect).
+- Hypothesis: much of the visible halo is golden-hour backlight (rim light) exaggerated as the subject fills the frame,
+  not chaining build-up. Needs a controlled test: fixed framing, front-lit vs backlit, 30 s each.
