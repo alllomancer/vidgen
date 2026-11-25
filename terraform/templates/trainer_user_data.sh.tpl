@@ -21,6 +21,7 @@ VLM_MODEL=${vlm_model}
 HF_HOME=/opt/models
 HOME=/root
 PYTHONUNBUFFERED=1
+HF_XET_HIGH_PERFORMANCE=1
 EOF
 
 python3 -m venv /opt/trainer/venv
@@ -31,7 +32,7 @@ git clone https://github.com/kohya-ss/musubi-tuner.git /opt/trainer/musubi-tuner
 git -C /opt/trainer/musubi-tuner checkout --detach ${musubi_commit}
 /opt/trainer/venv/bin/pip install -e /opt/trainer/musubi-tuner
 # The training venv keeps exactly what musubi-tuner pins (transformers 5.x, huggingface_hub 1.x).
-/opt/trainer/venv/bin/pip install boto3
+/opt/trainer/venv/bin/pip install boto3==1.35.99
 # Captioning (Qwen2.5-VL) gets its own venv with the render worker's known-good stack.
 python3 -m venv /opt/trainer/caption-venv
 /opt/trainer/caption-venv/bin/pip install --upgrade pip wheel
@@ -42,14 +43,22 @@ python3 -m venv /opt/trainer/caption-venv
 aws s3 sync "s3://${bucket}/code/trainer/" /opt/trainer/code/ --delete --region ${region}
 
 # Weights: ComfyUI-format Wan2.2 T2V experts (fp16), Wan2.1 VAE, umT5, and Qwen2.5-VL for captions.
+# First from the model mirror in the bucket (what an earlier trainer uploaded; mirror.py), else from
+# Hugging Face at pinned commits (bump deliberately). The Krea 2 files come with the first Krea job.
 # `hf` replaced `huggingface-cli` (which no longer works in huggingface_hub 1.x).
+export BUCKET=${bucket} AWS_REGION=${region} HF_XET_HIGH_PERFORMANCE=1
 HF=/opt/trainer/venv/bin/hf
-$HF download Comfy-Org/Wan_2.2_ComfyUI_Repackaged \
-  split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
-  split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
-  split_files/vae/wan_2.1_vae.safetensors --local-dir /opt/trainer/models
-$HF download Wan-AI/Wan2.1-T2V-14B models_t5_umt5-xxl-enc-bf16.pth --local-dir /opt/trainer/models
-HF_HOME=/opt/models $HF download "${vlm_model}"
+MIRROR="/opt/trainer/venv/bin/python /opt/trainer/code/mirror.py"
+if ! $MIRROR pull trainer/wan /opt/trainer/models; then
+  $HF download Comfy-Org/Wan_2.2_ComfyUI_Repackaged --revision 5df3a4a3ed0628002308022198249dbbbd045d09 \
+    split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
+    split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
+    split_files/vae/wan_2.1_vae.safetensors --local-dir /opt/trainer/models
+  $HF download Wan-AI/Wan2.1-T2V-14B --revision a064a6c71f5be440641209c07bf2a5ce7a2ff5e4 \
+    models_t5_umt5-xxl-enc-bf16.pth --local-dir /opt/trainer/models
+fi
+VLM_UNIT="hub/models--$(echo "${vlm_model}" | sed 's#/#--#g')"
+$MIRROR pull "$VLM_UNIT" "/opt/models/$VLM_UNIT" || HF_HOME=/opt/models $HF download "${vlm_model}"
 
 cat > /etc/systemd/system/ai-video-trainer.service <<'EOF'
 [Unit]

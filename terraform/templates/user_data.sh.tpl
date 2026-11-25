@@ -27,6 +27,7 @@ HF_HOME=/opt/models
 # systemd sets no HOME; PyTorch needs one to cache compiled kernels between runs.
 HOME=/root
 HF_HUB_ENABLE_HF_TRANSFER=1
+HF_XET_HIGH_PERFORMANCE=1
 EOF
 
 python3 -m venv /opt/ai-video/venv
@@ -35,10 +36,14 @@ python3 -m venv /opt/ai-video/venv
 aws s3 sync "s3://${bucket}/code/worker/" /opt/ai-video/worker/ --delete --region ${region}
 /opt/ai-video/venv/bin/pip install -r /opt/ai-video/worker/requirements.txt
 
-# Pre-download weights so the first job does not wait for them.
+# Weights, so the first job does not wait for them. First from the model mirror in the bucket (every
+# folder an earlier box uploaded, bf16 Wan copies included; worker/mirror.py), then whatever is still
+# missing from Hugging Face: the commands below find mirrored files in place and skip them.
 set -a; . /etc/ai-video.env; set +a
-/opt/ai-video/venv/bin/huggingface-cli download "${video_model}"
-/opt/ai-video/venv/bin/huggingface-cli download "${i2v_model}"
+/opt/ai-video/venv/bin/python /opt/ai-video/worker/mirror.py pull-all /opt/models --skip trainer/ || true
+# The fp32 Wan repos are only needed to make the bf16 copies (convert_bf16.py below).
+[ -f "/opt/models/bf16/$(basename "${video_model}")/model_index.json" ] || /opt/ai-video/venv/bin/huggingface-cli download "${video_model}"
+[ -f "/opt/models/bf16/$(basename "${i2v_model}")/model_index.json" ] || /opt/ai-video/venv/bin/huggingface-cli download "${i2v_model}"
 /opt/ai-video/venv/bin/huggingface-cli download "${vlm_model}"
 /opt/ai-video/venv/bin/huggingface-cli download "${edit_model}"
 /opt/ai-video/venv/bin/python - <<'PY'
