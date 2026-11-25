@@ -54,7 +54,7 @@ make apply       # applies exactly the reviewed tfplan
 
 ### 1.4 First boot (30–45 min, one time only)
 
-The instance launches immediately. It installs packages and downloads about 310 GB of model weights (video, description, avatar-keyframe and voice models). Watch it with:
+The instance launches immediately. It installs packages and gets the model weights (video, description, avatar-keyframe and voice models): from the [model mirror](#model-mirror) in your bucket when an earlier box filled it, else about 310 GB from Hugging Face plus the Wan conversion. Watch it with:
 
 ```bash
 eval "$(terraform -chdir=terraform output -raw ssh_command)"
@@ -156,7 +156,7 @@ vidgen wake              # start the machine now (e.g. before a batch); also cle
 Every `video` and `story` stars your **default avatar**, so the same character appears in every clip.
 
 **Krea 2 LoRA per avatar** (on by default): creating or replacing an avatar also builds a Krea 2 character LoRA for it, so Krea photos and Krea first frames can show that person.
-- **How**: the render box makes 24 varied Qwen photos of the avatar (framing, light, places, outfits), checks each with the Krea content filter (flagged ones dropped; fewer than 16 left and there is no LoRA), and writes them as `datasets/<client>/avatar-<name>/v<N>/`; the trainer machine trains a rank-32 LoRA on Krea 2 RAW (960 steps, ~55 min) and registers it as `avatar-<name>` (`krea2`, samples under `samples/`). About 1.5 h of GPU and ~$3 per avatar. The first Krea build also downloads ~66 GB of Krea models to the trainer and builds its Krea venv.
+- **How**: the render box makes 24 varied Qwen photos of the avatar (framing, light, places, outfits), checks each with the Krea content filter (flagged ones dropped; fewer than 16 left and there is no LoRA), and writes them as `datasets/<client>/avatar-<name>/v<N>/`; the trainer machine trains a rank-32 LoRA on Krea 2 RAW (960 steps, ~55 min) and registers it as `avatar-<name>` (`krea2`, samples under `samples/`). About 1.5 h of GPU and ~$3 per avatar. The first Krea build on a trainer disk also gets ~66 GB of Krea models (from the [model mirror](#model-mirror) when it has them, else Hugging Face with the four files in parallel; started in the background as soon as the job starts) and builds its Krea venv.
 - **Trigger word = the avatar name**: write the name in prompts ("dana reading on a park bench"); when it's missing it is put in front, also with `--raw`. Common words or very short names are weaker triggers.
 - **State**: `vidgen avatar list` and the dashboard show `queued`, `photos`, `training`, `ready`, `failed` (with the reason) or `skipped`. A rebuild keeps the last ready LoRA in use until the new one is ready; one build at a time per avatar. Image edits and restores keep the link.
 - **Opt out / on demand**: `--no-krea-lora` on `avatar refresh`/`pick` (dashboard: untick "Also train a Krea 2 LoRA"); `vidgen avatar krea-train --name N` builds one (or a new version) later, e.g. for avatars made before this. Existing avatars are not built automatically.
@@ -194,6 +194,7 @@ Every `video` and `story` stars your **default avatar**, so the same character a
 | `vidgen avatar use --name N` | switch the default to another saved avatar |
 | `vidgen avatar history [--name N]` | earlier versions, with 1-hour preview links |
 | `vidgen avatar restore <version> [--name N]` | bring an earlier version back. The version it replaces goes into history too, so a restore can be undone |
+| `vidgen avatar delete --name N [--with-loras] [--yes]` | delete the avatar from the server: images, earlier versions and media. **No undo.** Refused while a job that uses it is queued or running. `--with-loras` also deletes its own LoRAs (`avatar-N`, `avatar-N-wan`) and their training photos; without it they stay in your LoRA list. Files already copied to your download folder stay |
 | `--avatar a,b` on `video`/`story` | star up to **3** avatars together in this job (the first is the lead) |
 | `--no-avatar` on `video`/`story` | no avatar in this job |
 
@@ -272,7 +273,7 @@ vidgen story my_story.txt --image-model krea2      # first frames for the shots 
 - Avatar photos, series and keyframes stay on Qwen-Image-Edit (Krea 2 can't take reference images); video stays on Wan. With `--image-model krea2` Krea 2 makes the first frame and Wan animates it.
 - **Content filter** (required by the license): every Krea 2 image is checked by `Falconsai/nsfw_image_detection`; a flagged image is re-rolled once with another seed and dropped if flagged again. Job results and the worker log show how many were dropped and the seconds for loading, generating and filtering. It can't be turned off.
 - **Setup, once:** accept the terms at https://huggingface.co/krea/Krea-2-Turbo, create a read token, and store it (replace the value):
-  `aws ssm put-parameter --region us-east-1 --name /ai-video/hf_token --type SecureString --value "hf_…"`. The first Krea job then installs its own Python environment (`/opt/krea-venv`, a few minutes) and downloads ~36 GB; later jobs only load it (~1-2 min) and the worker reloads Wan/Qwen afterwards.
+  `aws ssm put-parameter --region us-east-1 --name /ai-video/hf_token --type SecureString --value "hf_…"`. The first Krea job then installs its own Python environment (`/opt/krea-venv`, a few minutes) and gets ~36 GB of weights (from the [model mirror](#model-mirror) when it has them, else Hugging Face); later jobs only load it (~1-2 min) and the worker reloads Wan/Qwen afterwards.
 - **License:** commercial use of the model and its outputs is allowed only for organisations under $1M annual revenue; above that you need a Krea enterprise license. Check before using it for work.
 - Dashboard: Photos → Avatar "no person: Krea 2"; Video/Story → Realism → "First frame without an avatar"; Create → Avatar → **Generate candidates** (model Krea 2 or Wan), then **Pick N** in History.
 
@@ -353,7 +354,7 @@ vidgen ui --port 9000 --no-browser
 
 - **Server**: instance state and type, uptime, queue, uptime hold, Wake button; the deployed models (T2V, I2V, edit, VLM), Lightning repo and revision, MMAudio variant, and the worker code version and deploy time. Refreshes every 15 s.
 - **History**: your jobs from the last 30 days, newest first: prompt and settings, status, **Waited** (queued to started) and **Render time** (started to finished, including model loads), totals and average. Filter by type or search prompts. **Re-run** queues the same job again (same settings and seed) and the watcher downloads it next to the original; **Show** reveals a downloaded file.
-- **Create**: forms for video, photos and story (submitted like CLI jobs and downloaded by the watcher), each with a **Realism** section (look, natural skin, candid, film grain, best); Photos also has **Series in one place**. **Write** writes a story from a premise; **Use in Story** in History loads it into the Story form. And **Avatar**: name, optional description and 1-12 photos of the same person (png/jpg/webp, up to 25 MB each). Thumbnails show the order; ◀ ▶ reorder and ✕ removes, and photo 1 is the main image. "Make it my default avatar" is off unless you have no avatar yet. An existing name is replaced (its previous version goes into history). Same as `vidgen avatar refresh --name N --image … --image …`.
+- **Create**: forms for video, photos and story (submitted like CLI jobs and downloaded by the watcher), each with a **Realism** section (look, natural skin, candid, film grain, best); Photos also has **Series in one place**. **Write** writes a story from a premise; **Use in Story** in History loads it into the Story form. And **Avatar**: name, optional description and 1-12 photos of the same person (png/jpg/webp, up to 25 MB each). Thumbnails show the order; ◀ ▶ reorder and ✕ removes, and photo 1 is the main image. "Make it my default avatar" is off unless you have no avatar yet. An existing name is replaced (its previous version goes into history). Same as `vidgen avatar refresh --name N --image … --image …`. Each avatar card has **Make default** and **Delete**: Delete asks first, removes the avatar's images, earlier versions and media from the server (no undo; refused while a job that uses it is queued or running) and can also delete its own LoRAs and their training photos (unticked by default). Same as `vidgen avatar delete`.
 - **Learning**: mark a folder (Choose… opens the macOS folder picker) as a theme: name, kind (character, style, motion, place) and trigger word. The folder is scanned against the clips each kind needs and problems are listed; themes live in `~/.vidgen/themes.json`. **Upload** copies the theme's clips and photos to your private S3 bucket (see "Learning datasets" below) with a progress bar; the card then shows "up to date" or "changed since upload". Train arrives with the trainer.
 - **Security**: the page is only served on 127.0.0.1, rejects other Host headers, and its API calls need a per-session token, so other websites cannot use it.
 
@@ -381,7 +382,7 @@ vidgen train singing --steps 600      # quick first try, ~4.5 h
 vidgen lora list                      # trained versions, steps, checkpoints
 ```
 
-- **Where it runs**: the trainer machine (`training_enabled = true` in `terraform.tfvars`), a separate spot g6e.4xlarge. The render box is not involved; both can run at once. The trainer starts when a train job is queued and stops itself 15 min after its queue is empty. Its very first start installs musubi-tuner and downloads ~85 GB of weights (~35 min).
+- **Where it runs**: the trainer machine (`training_enabled = true` in `terraform.tfvars`), a separate spot g6e.4xlarge. The render box is not involved; both can run at once. The trainer starts when a train job is queued and stops itself 15 min after its queue is empty. Its very first start installs musubi-tuner and gets ~85 GB of weights (from the [model mirror](#model-mirror) when it has them, else Hugging Face, ~35 min).
 - **What a job does**: downloads the dataset from its manifest, cuts clips into 5 s segments (at most 12 per source video, spread over the clip; photos are used as single frames), captions every segment with Qwen2.5-VL (trigger word first), caches latents and text, trains the T2V **low-noise** then **high-noise** expert (fp16 + fp8 base, rank 32), converts and uploads. Progress shows in the dashboard (card and History) and `vidgen jobs`, e.g. "low-noise expert 600/1250 · ~6 h 40 min left".
 - **Result**: `s3://<bucket>/loras/<client>/<name>/v<N>/`: `t2v_low.safetensors`, `t2v_high.safetensors`, `checkpoints/` every 250 steps, `lora.json`. Each training makes a new version; `current.json` points at the newest.
 - **Rendering with it**: `vidgen video "..." --lora NAME[:WEIGHT]` (also `story`; repeat `--lora` for a second one, max 2; weight 0–1.5, default 1.0). The API pins the current version when the job is submitted (a re-run uses the same one), the worker downloads both expert files once per version to `/opt/models/loras/` and loads them next to Lightning (high-noise into `transformer`, low-noise into `transformer_2`). The LoRA's trigger word is put in front of every clip prompt when missing. The job result lists the LoRAs used.
@@ -463,7 +464,7 @@ The queue is not strictly FIFO, so the worker may still run a job out of the pla
 | Machine off → first job starts | 2–4 min, plus the first model load |
 | Rendering a 2 s clip (Lightning) | ~1.5 min; most of a 4-step render is moving the two 14B experts on and off the GPU |
 | Sound | ~10–20 s per clip (MMAudio stays loaded) |
-| Switching models | on `g6e.4xlarge`: ~5 min per switch (reload ~60 GB from disk); on 8xlarge/16xlarge the big models stay in RAM after their first load |
+| Switching models | on `g6e.4xlarge`: ~5 min per switch (reload ~60 GB from disk); on 8xlarge/16xlarge all three stay in RAM, and an idle worker loads the ones not used yet (`preloaded` in the worker log) |
 | Describe a 1-minute video | ~1 min |
 | Photos | ~40 s per photo (Lightning 8 steps), plus the edit-model load |
 | Smoke test | ~34 min on a warm `g6e.4xlarge` (jobs are queued grouped by model) |
@@ -513,7 +514,7 @@ The queue is not strictly FIFO, so the worker may still run a job out of the pla
 | Instance, queue, hold | `vidgen status` |
 | End-to-end check | `make smoke` |
 | API, auth and waker log (`auth_failed`, `max_uptime_stop`, `start_failed`) | `aws logs tail /aws/lambda/ai-video-api --follow` |
-| Worker log (`start`/`done`/`cancelled`/`failed` events with seconds) | `eval "$(terraform -chdir=terraform output -raw ssh_command)"` → `journalctl -u ai-video-worker -f` |
+| Worker log (`start`/`done`/`cancelled`/`failed` events with seconds; `pipeline_timing` per model call with seconds per step, `video_timing` per video with seconds for render, colour, interpolate, upscale and encode) | `eval "$(terraform -chdir=terraform output -raw ssh_command)"` → `journalctl -u ai-video-worker -f` |
 | Watcher log | `~/.vidgen/watcher.log` |
 | GPU use | on the box: `nvidia-smi` |
 | Dead-letter queue | `aws sqs get-queue-attributes --queue-url $(aws sqs get-queue-url --queue-name ai-video-jobs-dlq --query QueueUrl --output text) --attribute-names ApproximateNumberOfMessages` |
@@ -532,6 +533,20 @@ The queue is not strictly FIFO, so the worker may still run a job out of the pla
 | `CUDA out of memory` | describe input too long, or too many seconds/too high a resolution. Avatar jobs on an instance smaller than 4xlarge also do this. Clips over 5 s are clamped for this reason |
 | Smoke step fails right after a deploy | usually a library version or model API mismatch. The traceback in the worker log names the call; fix it in `worker/models.py` or `worker/requirements.txt`, `make plan && make apply`, restart the worker, rerun `make smoke` |
 | Watcher not downloading | `vidgen watcher status`. On Linux, check `systemctl --user list-timers`; on Windows, check that the Startup-folder launcher exists and `pythonw` is running |
+
+### Model mirror
+
+A copy of the weights both machines use is kept in your bucket under `models/`, so a machine with a new disk (another instance type or AZ, spot ↔ on-demand) restores them from S3 instead of downloading from Hugging Face and converting Wan to bf16 again. Design: [docs/specs/2026-11-25-model-mirror.md](docs/specs/2026-11-25-model-mirror.md).
+
+- **What it holds**: render box: the bf16 Wan copies, the Hugging Face cache folders (description/planner model, Qwen-Image-Edit, Lightning), MMAudio, Krea 2 Turbo and its content filter. Trainer (all under `trainer/`): the Wan training files (`trainer/wan/<pins>`), the Krea 2 training files (`trainer/krea2/<pins>`; the folder name comes from the pinned commits, so a bumped pin starts a new folder) and its own copy of the caption model. About 420 GB, roughly $10 a month in S3.
+- **It fills itself**: every time the worker or the trainer starts, it queues what is complete on its disk and uploads only what the bucket lacks, in the background (one folder at a time; `{"event": "mirror_push", ...}` in the log). The first start after this is deployed uploads everything (the render box reads ~210 GB off its disk while it works); a stop in the middle is fine, the next start continues. A folder counts only once its manifest (`.mirror-manifest.json`, written last) is there.
+- **It is used**: at first boot (render box: every folder in the mirror; trainer: Wan files and caption model) and on the first Krea job of a disk (both machines). Anything not in the mirror comes from Hugging Face as before and is then uploaded.
+- **How fast it was**: `{"event": "model_download", "unit": ..., "source": "mirror" | "huggingface", "bytes": ..., "seconds": ..., "mb_per_s": ...}` in the worker/trainer log; a Krea LoRA build that fetched the models also has `krea_download` in its job result. Restores are checked by file size.
+- **Check it**: `aws s3 ls s3://<bucket>/models/ --recursive --summarize | tail -2` (size), `aws s3 ls s3://<bucket>/models/ --recursive | grep mirror-manifest` (the folders that are complete).
+- **Remove a folder** (an old Krea revision, a model you no longer use): `aws s3 rm --recursive s3://<bucket>/models/<folder>/`. A machine that still has it on disk uploads it again at its next start.
+- **Turn it off** on a machine: `MODEL_MIRROR=0` in `/etc/ai-video.env` (render box) or `/etc/ai-video-trainer.env` (trainer), then restart the service.
+- **Access**: only the two machine roles, each to its own folders (the trainer to `models/trainer/` only), so neither machine restores anything the other wrote. The Krea weights are gated on Hugging Face: this copy is for these machines only.
+- **Idle stop**: a machine doesn't stop itself while it is uploading to the mirror (or, on the trainer, while the Krea models are still downloading); the max-uptime guard still applies.
 
 ### Common changes
 
@@ -685,6 +700,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | `vidgen avatar use --name N` | make N the default avatar |
 | `vidgen avatar history --name N` | earlier versions (every change saves one) |
 | `vidgen avatar restore --name N VERSION` | bring back an earlier version |
+| `vidgen avatar delete --name N [--with-loras]` | delete an avatar (no undo); `--with-loras`: its own LoRAs too |
 
 ### Learning datasets, training and LoRAs
 
@@ -726,9 +742,10 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | `journalctl -u ai-video-worker -f` | follow the worker log |
 | `systemctl status ai-video-worker` / `sudo systemctl restart ai-video-worker` | worker state / restart (pulls the latest worker code from S3) |
 | `nvidia-smi` | GPU use and memory |
-| `sudo nano /etc/ai-video.env` | runtime settings: `VIDEO_LIGHTNING`, `EDIT_LIGHTNING`, `IDLE_MINUTES`, models (restart after editing) |
+| `sudo nano /etc/ai-video.env` | runtime settings: `VIDEO_LIGHTNING`, `EDIT_LIGHTNING`, `KEEP_RAM_WEIGHTS` (`0` = models copy their weights back from the GPU as before), `PRELOAD_MODELS` (`0` = an idle 8xlarge/16xlarge no longer loads the big models ahead), `IDLE_MINUTES`, models (restart after editing) |
 | `ls /opt/models/loras/` | downloaded LoRA files (per client/name/version) |
 | `df -h /` | disk space (models live on the 500 GB root disk) |
+| `journalctl -u ai-video-worker \| grep -E 'model_download\|mirror_'` | where weights came from and how fast; what was uploaded to the [model mirror](#model-mirror) |
 
 ### On the trainer (root shell)
 

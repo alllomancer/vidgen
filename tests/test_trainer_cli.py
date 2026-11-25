@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _stubs  # noqa: E402
 
-_stubs.install("trainer", "cli")
+_stubs.install("trainer", "cli", "worker")  # worker: mirror.py, shipped to the trainer too
 import trainer  # noqa: E402
 import vidgen  # noqa: E402
 
@@ -277,7 +277,7 @@ wl = json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]
 assert wl["state"] == "failed" and wl["error"] == "out of memory" and wl["ready"]["version"] == 1, wl
 # models: a token without Krea 2 RAW access fails with the licence message
 trainer._hf_token = lambda: "t"
-trainer._hf_download = lambda repo, filename, local_dir, token: (_ for _ in ()).throw(PermissionError("403 gated"))
+trainer._hf_download = lambda repo, filename, local_dir, token, revision: (_ for _ in ()).throw(PermissionError("403 gated"))
 kj3, _ = make_job(**KP)
 try:
     kj3.krea_models()
@@ -962,6 +962,14 @@ assert ui.cancel_job("c" * 32) == {"status": "cancelled"} and posted[-1][:2] == 
 _stubs.expect_error(ui.cancel_job, "../status", contains="job id")
 ui.get_avatar(" Mira ")
 assert posted[-1][:2] == ("GET", "/avatars/mira")
+ui.delete_avatar(" Mira ")
+assert posted[-1] == ("DELETE", "/avatars/mira", {"loras": False})
+ui.delete_avatar("mira", loras=True)
+assert posted[-1] == ("DELETE", "/avatars/mira", {"loras": True})
+_stubs.expect_error(ui.delete_avatar, "mira/images/1", contains="avatar name")
+ui.set_default_avatar({"name": "Mira"})
+assert posted[-1] == ("PUT", "/avatars/default", {"name": "mira"})
+_stubs.expect_error(ui.set_default_avatar, {"name": "../x"}, contains="avatar name")
 _stubs.expect_error(ui.get_avatar, "mira/media", contains="avatar name")
 pv = tempfile.mkdtemp()
 for fname, data in (("photo_1.png", b"\x89PNG-bytes"), ("prompts.txt", b"a prompt"), ("clip.MP4", b"mp4-bytes")):

@@ -7,6 +7,10 @@ invisible, honours cancel requests and enforces JOB_TIMEOUT_MINUTES."""
 import hashlib
 import json
 import os
+
+# Before anything imports huggingface_hub: its Xet transfers at full speed (weights are tens of GB).
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +26,7 @@ from PIL import Image
 
 import models
 import krea
+import mirror
 import photos
 import realism
 
@@ -112,6 +117,27 @@ def stop_self():
     instance_id = _instance_id()
     log(event="idle_stop", instance=instance_id)
     ec2.stop_instances(InstanceIds=[instance_id])
+
+
+_preload = {"on": True}
+
+
+def preload_idle():
+    """Queue empty: load one more big model into RAM where the box has room for all of them (see
+    models.preload_next). A load that fails is logged and not tried again until the worker restarts."""
+    if not _preload["on"]:
+        return
+    start = time.time()
+    try:
+        name = models.preload_next()
+    except Exception as e:
+        _preload["on"] = False
+        log(event="preload_failed", error=str(e)[:300])
+        return
+    if name:
+        log(event="preloaded", model=name, seconds=round(time.time() - start, 1))
+    else:
+        _preload["on"] = False  # all loaded, or a box that holds one model: nothing more to do
 
 
 # ---------------------------------------------------------------- job plumbing
@@ -256,15 +282,16 @@ def sound_for_clip(path, prompt, seconds, seed, workdir, tag="sound"):
     if seconds <= SOUND_CHUNK + 3:
         return models.generate_sound(path, out, prompt, seconds, seed)
     chunks, start, n = [], 0.0, 0
-    while start < seconds - 0.01:
-        length = min(SOUND_CHUNK + SOUND_OVERLAP, seconds - start)
-        piece = os.path.join(workdir, f"{tag}_part{n}.mp4")
-        ffmpeg("-ss", f"{start:.3f}", "-i", path, "-t", f"{length:.3f}", "-an", "-c:v", "libx264",
-               "-preset", "veryfast", "-crf", "18", piece)
-        chunks.append(models.generate_sound(piece, os.path.join(workdir, f"{tag}_part{n}.wav"), prompt,
-                                            length, None if seed is None else int(seed) + n))
-        start += SOUND_CHUNK
-        n += 1
+    with models.sound_session():  # the sound model stays on the GPU for all the chunks
+        while start < seconds - 0.01:
+            length = min(SOUND_CHUNK + SOUND_OVERLAP, seconds - start)
+            piece = os.path.join(workdir, f"{tag}_part{n}.mp4")
+            ffmpeg("-ss", f"{start:.3f}", "-i", path, "-t", f"{length:.3f}", "-an", "-c:v", "libx264",
+                   "-preset", "veryfast", "-crf", "18", piece)
+            chunks.append(models.generate_sound(piece, os.path.join(workdir, f"{tag}_part{n}.wav"), prompt,
+                                                length, None if seed is None else int(seed) + n))
+            start += SOUND_CHUNK
+            n += 1
     joined = chunks[0]
     for i, nxt in enumerate(chunks[1:], 1):
         mixed = os.path.join(workdir, f"{tag}_join{i}.wav")
@@ -639,6 +666,8 @@ def run_story(job, params, workdir):
     # so interleaving them would reload one per shot.
     clips = [os.path.join(workdir, f"shot_{i:02}.mp4") for i in range(len(shots))]
     order = sorted(range(len(shots)), key=lambda i: keyframes[i] is not None)
+    # Burning in subtitles encodes the whole story again, so the shots are quick near-lossless intermediates.
+    x264 = models.X264_INTERMEDIATE if params.get("subtitles", True) else None
     for n, i in enumerate(order):
         progress(job_id, f"rendering shot {n + 1}/{len(shots)}")
         shot = shots[i]
@@ -647,16 +676,17 @@ def run_story(job, params, workdir):
                                     params)
         models.generate_video(clips[i], prompt=prompt, seconds=secs, seed=seed, image=keyframes[i],
                               fps=params.get("fps", 16), upscale=params.get("upscale", False),
-                              grain=bool(params.get("grain")), **size)
+                              grain=bool(params.get("grain")), x264=x264, **size)
 
     # Then all shot sounds: one more model load for the whole story.
     sound = None
     if params.get("sound", True):
         sounds = []
-        for i, (clip, shot) in enumerate(zip(clips, shots)):
-            progress(job_id, f"adding sound, shot {i + 1}/{len(shots)}")
-            sounds.append(models.generate_sound(clip, os.path.join(workdir, f"sound_{i:02}.wav"),
-                                                shot["prompt"], secs, seed))
+        with models.sound_session():  # the sound model stays on the GPU for all the shots
+            for i, (clip, shot) in enumerate(zip(clips, shots)):
+                progress(job_id, f"adding sound, shot {i + 1}/{len(shots)}")
+                sounds.append(models.generate_sound(clip, os.path.join(workdir, f"sound_{i:02}.wav"),
+                                                    shot["prompt"], secs, seed))
         sound_list = os.path.join(workdir, "sound_concat.txt")
         with open(sound_list, "w") as f:
             f.writelines(f"file '{s}'\n" for s in sounds)
@@ -1323,9 +1353,48 @@ def process(job_id, receipt):
 
 # ---------------------------------------------------------------- main loop
 
+def mirror_backfill(hf_home=None):
+    """Queue for the model mirror every weights folder that is complete on this disk (mirror.py uploads only
+    what the bucket lacks, in the background, and skips mirrored folders after one small request). This is
+    how a running box seeds the mirror, so the next new disk restores from the bucket instead of Hugging
+    Face. Never stops the worker."""
+    try:
+        hub = os.path.join(hf_home or os.environ.get("HF_HOME", "/opt/models"), "hub")
+        units = []
+        for name in sorted(os.listdir(models.BF16_DIR)) if os.path.isdir(models.BF16_DIR) else []:
+            if os.path.exists(os.path.join(models.BF16_DIR, name, "model_index.json")):  # a finished conversion
+                units.append((f"bf16/{name}", os.path.join(models.BF16_DIR, name)))
+        # The fp32 Wan downloads are not mirrored: their bf16 copies are.
+        fp32 = {"models--" + r.replace("/", "--") for r in (models.VIDEO_MODEL, models.I2V_MODEL)}
+        for name in sorted(os.listdir(hub)) if os.path.isdir(hub) else []:
+            folder = os.path.join(hub, name)
+            if not name.startswith("models--") or name in fp32:
+                continue
+            if any(f.endswith(".incomplete") for _, _, fs in os.walk(folder) for f in fs):
+                continue  # a download in progress or cut off
+            units.append((f"hub/{name}", folder))
+        if os.path.isdir(models.MMAUDIO_DIR) and mirror.local_files(models.MMAUDIO_DIR)[0]:
+            units.append(("mmaudio", models.MMAUDIO_DIR))
+        for unit, folder in ((krea.MODEL_UNIT, krea.MODEL_DIR), (krea.FILTER_UNIT, krea.FILTER_DIR)):
+            if os.path.exists(os.path.join(folder, ".complete")):
+                units.append((unit, folder))
+        for unit, folder in units:
+            mirror.push_async(unit, folder)
+        log(event="mirror_backfill", units=[u for u, _ in units])
+    except Exception as e:
+        log(event="mirror_backfill", error=f"{type(e).__name__}: {e}")
+
+
+def mirror_busy():
+    """Uploads to the model mirror still queued or running: the box doesn't stop itself in the middle (an
+    interrupted file starts again from zero). The API's max-uptime guard still applies."""
+    return mirror.busy()
+
+
 def main():
     log(event="worker_up", idle_seconds=IDLE_SECONDS, job_timeout_seconds=JOB_TIMEOUT_SECONDS)
     sweep_work_dirs()
+    mirror_backfill()
     last_work = time.time()
     while True:
         resp = sqs.receive_message(
@@ -1336,9 +1405,11 @@ def main():
         )
         messages = resp.get("Messages", [])
         if not messages:
-            if time.time() - last_work > IDLE_SECONDS and _queue_empty():
+            if time.time() - last_work > IDLE_SECONDS and _queue_empty() and not mirror_busy():
                 stop_self()
                 time.sleep(300)  # the instance is going down; don't poll meanwhile
+            else:
+                preload_idle()
             continue
 
         message = messages[0]

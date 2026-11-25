@@ -42,6 +42,12 @@ variable "instance_type" {
   default     = "g6e.4xlarge"
 }
 
+variable "on_demand" {
+  description = "Run the render box on-demand instead of spot: for a type with no spot capacity, at the on-demand price (g6e.8xlarge ~$4.5/h). Changing this replaces the instance and its disk."
+  type        = bool
+  default     = false
+}
+
 variable "spot_max_price" {
   description = "Max hourly spot price in USD. Empty string = cap at on-demand price."
   type        = string
@@ -70,24 +76,48 @@ variable "video_model" {
   description = "Hugging Face repo for text-to-video and avatar candidate frames (diffusers format)."
   type        = string
   default     = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.video_model))
+    error_message = "video_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "i2v_model" {
   description = "Hugging Face repo for image-to-video from an avatar keyframe (diffusers format)."
   type        = string
   default     = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.i2v_model))
+    error_message = "i2v_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "vlm_model" {
   description = "Hugging Face repo for the vision-language model used for descriptions and story shot lists."
   type        = string
   default     = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.vlm_model))
+    error_message = "vlm_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "edit_model" {
   description = "Hugging Face repo for the image-edit model that places 1-3 avatars into each shot (diffusers format)."
   type        = string
   default     = "Qwen/Qwen-Image-Edit-2511"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.edit_model))
+    error_message = "edit_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "edit_lightning" {
@@ -144,6 +174,12 @@ variable "train_instance_type" {
   description = "Trainer instance type. g6e.4xlarge (L40S 48 GB) trains a T2V expert at ~12.7 s/step (measured); H100 spot was not available in this account."
   type        = string
   default     = "g6e.4xlarge"
+}
+
+variable "train_availability_zone" {
+  description = "AZ for the trainer's subnet. Empty = the same as availability_zone. Set it to keep the trainer where it is when the render box moves to another AZ."
+  type        = string
+  default     = ""
 }
 
 variable "train_root_volume_gb" {

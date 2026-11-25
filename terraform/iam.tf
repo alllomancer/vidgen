@@ -53,8 +53,22 @@ data "aws_iam_policy_document" "worker" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["code/*", "uploads/*"]
+      values   = ["code/*", "uploads/*", "models/*"]
     }
+  }
+
+  # Model mirror (docs/specs/2026-11-25-model-mirror.md): the render box restores its weights from the
+  # bucket and uploads what the mirror lacks. Its own units only; models/trainer/ belongs to the trainer.
+  statement {
+    sid     = "ModelMirror"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      "${aws_s3_bucket.data.arn}/models/hub/*",
+      "${aws_s3_bucket.data.arn}/models/bf16/*",
+      "${aws_s3_bucket.data.arn}/models/mmaudio/*",
+      "${aws_s3_bucket.data.arn}/models/krea-2-turbo/*",
+      "${aws_s3_bucket.data.arn}/models/nsfw-filter/*",
+    ]
   }
 
   statement {
@@ -197,6 +211,17 @@ data "aws_iam_policy_document" "api" {
       "${aws_s3_bucket.data.arn}/outputs/*",
       "${aws_s3_bucket.data.arn}/uploads/*",
       "${aws_s3_bucket.data.arn}/avatars/*",
+    ]
+  }
+
+  # DELETE /avatars/{name}: the avatar's folder and the default marker, and (when asked) the avatar's own
+  # LoRAs. Uploaded LoRAs cannot be named avatar-*, so no other LoRA is in reach.
+  statement {
+    sid     = "DeleteAvatars"
+    actions = ["s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.data.arn}/avatars/*",
+      "${aws_s3_bucket.data.arn}/loras/*/avatar-*",
     ]
   }
 
