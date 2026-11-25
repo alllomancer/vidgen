@@ -47,6 +47,7 @@
            padding: 6px 12px; border-radius: 7px; cursor: pointer; white-space: nowrap; }
   button:hover:not(:disabled) { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.danger { background: var(--bad); border-color: var(--bad); color: var(--accent-text); font-weight: 600; }
   button:disabled { opacity: .5; cursor: not-allowed; }
   .plan-first-frame { max-width: 240px; display: block; margin-top: 6px; }
   .plan-first-frame[hidden] { display: none; }
@@ -77,7 +78,7 @@
   .theme ul { margin: 8px 0 0; padding-left: 18px; }
   .theme li.problem { color: var(--bad); }
   .theme li.warning { color: var(--warn); }
-  .theme .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .theme .actions, .avatar .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
   .counts { display: flex; gap: 18px; margin-top: 10px; }
   .counts div b { display: block; font-size: 20px; }
   .bar { height: 6px; background: var(--idle-bg); border-radius: 3px; overflow: hidden; margin-top: 8px; }
@@ -94,6 +95,16 @@
   form.add .checks label { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
   dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: min(560px, calc(100vw - 32px)); }
   dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+  /* Photo viewer: one photo filling the window (or the screen), with Previous / Next. */
+  dialog#viewer { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0;
+                  border-radius: 0; background: #000; color: #fff; }
+  dialog#viewer[open] { display: flex; flex-direction: column; }
+  #viewer .v-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: #111; }
+  #viewer .v-bar .v-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  #viewer .v-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  #viewer .v-stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #viewer button:focus-visible { outline-color: #fff; }
+  .preview img { cursor: zoom-in; }
   fieldset.speed { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
   fieldset.speed legend { font-size: 12.5px; color: var(--muted); padding: 0 4px; }
   fieldset.speed label { flex-direction: row; align-items: baseline; gap: 6px; color: var(--text); font-size: 13px; }
@@ -452,6 +463,16 @@ form:not(.krea) .krea-text { display: none !important; }
     </div>
   </form>
 </dialog>
+<dialog id="viewer" aria-label="Photo viewer">
+  <div class="v-bar">
+    <span class="v-name" id="viewer-name"></span>
+    <span id="viewer-count" aria-live="polite"></span>
+    <button type="button" id="viewer-prev" title="Left arrow">‹ Previous</button>
+    <button type="button" id="viewer-next" title="Right arrow">Next ›</button>
+    <button type="button" id="viewer-close" title="Esc">Close</button>
+  </div>
+  <div class="v-stage"><img id="viewer-img" alt=""></div>
+</dialog>
 <dialog id="pick-dialog" aria-labelledby="pick-h">
   <form method="dialog" class="add">
     <h2 id="pick-h" class="wide" style="margin:0;font-size:16px"></h2>
@@ -461,6 +482,18 @@ form:not(.krea) .krea-text { display: none !important; }
       <button value="cancel">Cancel</button>
       <button value="save">Save</button>
       <button value="default" class="primary">Save and make default</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="delete-avatar-dialog" aria-labelledby="delete-avatar-h" aria-describedby="delete-avatar-note">
+  <form method="dialog" class="add">
+    <h2 id="delete-avatar-h" class="wide" style="margin:0;font-size:16px"></h2>
+    <p class="hint wide" id="delete-avatar-note"></p>
+    <div class="wide checks" id="delete-avatar-loras-row"><label><input type="checkbox" id="delete-avatar-loras">
+      <span>Also delete its LoRAs (<span class="mono" id="delete-avatar-lora-names"></span>) and their training photos. Unticked, they stay in your LoRA list.</span></label></div>
+    <div class="wide" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
+      <button value="cancel" autofocus>Cancel</button>
+      <button value="delete" class="danger">Delete avatar</button>
     </div>
   </form>
 </dialog>
@@ -789,6 +822,50 @@ function pickButtons(j) {
   const name = j.local.avatar_name || "star";
   return nums.map(n => ` <button class="small" data-pick-job="${esc(j.job_id)}" data-pick-n="${n}" title="Save candidate ${n} as avatar ${esc(name)}">Pick ${n}</button>`).join("");
 }
+// Photo viewer: a job's photos one at a time, full screen, with Previous / Next (also the arrow keys; Esc
+// closes). It goes through every photo of the job, not only the 12 the preview row shows.
+const viewer = {job: null, files: [], at: 0};
+function showViewerPhoto() {
+  const f = viewer.files[viewer.at], name = f.path.split(/[\\/]/).pop(), img = $("viewer-img"), many = viewer.files.length > 1;
+  $("viewer-name").textContent = name;
+  $("viewer-count").textContent = `${viewer.at + 1} of ${viewer.files.length}`;
+  $("viewer-prev").disabled = $("viewer-next").disabled = !many;
+  img.alt = name;
+  img.removeAttribute("src");
+  fileUrl(fileSrc(viewer.job, f)).then(url => { if (viewer.files[viewer.at] === f) img.src = url; },
+    () => { if (viewer.files[viewer.at] === f) $("viewer-name").textContent = `${name}: not on this computer any more`; });
+}
+function stepViewer(by) {
+  const n = viewer.files.length;
+  if (n < 2) return;
+  viewer.at = (viewer.at + by + n) % n;
+  showViewerPhoto();
+}
+function openViewer(j, index) {
+  const d = $("viewer");
+  viewer.job = j;
+  viewer.files = previewFiles(j).filter(f => !f.video);
+  if (!viewer.files.length) return;
+  viewer.at = Math.max(0, viewer.files.findIndex(f => f.i === index));
+  showViewerPhoto();
+  d.showModal();
+  if (d.requestFullscreen) d.requestFullscreen().catch(() => {});  // refused: the dialog still fills the window
+  (viewer.files.length > 1 ? $("viewer-next") : $("viewer-close")).focus();
+}
+$("viewer-prev").onclick = () => stepViewer(-1);
+$("viewer-next").onclick = () => stepViewer(1);
+$("viewer-close").onclick = () => $("viewer").close();
+$("viewer").addEventListener("keydown", e => {
+  if (e.key === "ArrowRight") { e.preventDefault(); stepViewer(1); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); stepViewer(-1); }
+});
+$("viewer").addEventListener("close", () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  $("viewer-img").removeAttribute("src");
+});
+document.addEventListener("fullscreenchange", () => {  // Esc leaves full screen first: close the viewer with it
+  if (!document.fullscreenElement && $("viewer").open) $("viewer").close();
+});
 // The row under a job with its images and videos (up to 12; the rest are in the folder).
 function previewRow(j) {
   const tr = document.createElement("tr"), td = tr.insertCell(), box = document.createElement("div");
@@ -803,6 +880,15 @@ function previewRow(j) {
     el.dataset.fileSrc = fileSrc(j, f);
     cap.textContent = name;
     fig.append(el, cap);
+    if (!f.video) {  // a photo: open it full screen (the button, or a click on the photo)
+      const full = document.createElement("button");
+      full.type = "button";
+      full.className = "small";
+      full.textContent = "Full screen";
+      full.setAttribute("aria-label", `Full screen: ${name}`);
+      full.onclick = el.onclick = e => { e.stopPropagation(); openViewer(j, f.i); };
+      fig.append(full);
+    }
     box.append(fig);
     loadFile(el);
   }
@@ -1182,6 +1268,9 @@ function avatarCard(a) {
       ` <button class="small" data-media-play="${name}" aria-label="Play ${name}'s preview clip">Play clip</button>` : ""}${BUSY.includes(m.state) ? "" :
       ` <button class="small" data-media-make="${name}" aria-label="${made ? "Remake" : "Make"} media for ${name}">${made ? "Remake" : "Make"}</button>`}${failed(m)}</div>
     <div class="media-preview" data-media-for="${name}"></div>
+    <div class="actions">${createOptions.def === a.name ? "" :
+      `<button class="small" data-avatar-default="${name}" aria-label="Make ${name} the default avatar">Make default</button>`}
+      <button class="small" data-avatar-delete="${name}" aria-label="Delete avatar ${name}">Delete</button></div>
   </article>`;
 }
 function renderAvatars() {
@@ -1210,8 +1299,35 @@ function loadAvatarThumbs() {
 $("avatars").onclick = async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  const d = b.dataset, name = d.kreaTrain || d.wanTrain || d.mediaPlay || d.mediaMake, path = `/api/avatars/${encodeURIComponent(name)}`;
+  const d = b.dataset, name = d.kreaTrain || d.wanTrain || d.mediaPlay || d.mediaMake || d.avatarDefault || d.avatarDelete;
+  const path = `/api/avatars/${encodeURIComponent(name)}`;
   try {
+    if (d.avatarDefault) {
+      b.disabled = true;
+      await api("PUT", "/api/avatars/default", {name});
+      toast(`${name} is now the default avatar`);
+      await loadCreateOptions();
+      return;
+    }
+    if (d.avatarDelete) {
+      const a = createOptions.avatars.find(x => x.name === name) || {};
+      const loras = [...new Set([(a.krea_lora || {}).lora, (a.wan_lora || {}).lora].filter(Boolean))];
+      $("delete-avatar-h").textContent = `Delete avatar ${name}?`;
+      $("delete-avatar-note").textContent = `This removes ${name}'s images, earlier versions and media (photos and clips) ` +
+        `from the server. It can't be undone. Files already copied to this computer stay.` +
+        (createOptions.def === name ? ` ${name} is your default avatar: afterwards there is no default until you make another one the default.` : "");
+      $("delete-avatar-loras-row").hidden = !loras.length;
+      $("delete-avatar-loras").checked = false;
+      $("delete-avatar-lora-names").textContent = loras.join(", ");
+      if (await askDialog($("delete-avatar-dialog")) !== "delete") return;
+      b.disabled = true;
+      const r = await api("DELETE", `${path}${$("delete-avatar-loras").checked ? "?loras=1" : ""}`);
+      const n = (r.loras || []).length;
+      toast(`Avatar ${name} deleted${n ? ` with ${n} LoRA${n === 1 ? "" : "s"}` : ""}`);
+      await loadCreateOptions();
+      $("tab-avatars").focus();  // the card (and the button that had focus) is gone
+      return;
+    }
     if (d.mediaPlay) {
       const r = await api("GET", `${path}/media`);
       const clip = (r.files || []).find(f => /^clip_\d\.mp4$/.test(f.name));
