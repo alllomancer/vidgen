@@ -41,3 +41,10 @@
 **Decision**: Avatar Wan builds upload under `loras/<client>/avatar-<name>-wan/v<version>/` with the version picked by the API (monotonic: replacing an avatar drops only the `ready` link, never the version); the trainer re-checks it is still current after the first expert and before uploading, and a replaced build writes nothing; video jobs get the star's ready Wan LoRA pinned at 1.0, a broken link is skipped, never a 400.
 **Reason**: Review: dropping the version on replacement let a still-training build of the previous person collide with the new person's version and overwrite it; a missing LoRA file must not block a user's video.
 **Alternatives considered**: Version picked by the trainer (next free) — the avatar would not know which version to link until the upload.
+
+## D7 — [2026-11-25] — The content filter scores on the CPU and no longer unloads the models
+
+**Status**: Accepted (unit-tested; not yet measured on the render box)
+**Decision**: `krea.score_images` no longer calls `models.release_all()`; score mode loads the filter on the CPU (`krea_gen.run_score`). Same filter, same threshold, still mandatory. Krea generation is unchanged (it still unloads the models and filters on the GPU).
+**Reason**: Each filter call dropped the loaded model (~60 GB, ~5 min to reload) to run a small ViT classifier over 12-24 images. Avatar media paid for it twice: the edit model after the photo set and Wan I2V after the clips. This replaces the reason given in D2; the single `score_images` call for the clips stays (one filter process instead of four).
+**Alternatives considered**: Keeping the filter on the GPU beside the loaded model — the VLM sits on the GPU and a pipeline mid-offload can hold most of the 48 GB, so a second process there can fail for lack of memory.

@@ -102,10 +102,10 @@ def flagged(score):
 
 def score_images(paths, progress=lambda msg: None):
     """The content filter's NSFW score for each image (same filter and threshold as Krea images; no Krea
-    model is loaded). Used to keep flagged photos out of avatar LoRA training sets."""
+    model is loaded). Used to keep flagged photos out of avatar LoRA training sets. The filter runs on the
+    CPU in its own process, so the worker's loaded models stay where they are (no reload afterwards)."""
     ensure_env(progress)
     ensure_filter(progress)
-    models.release_all()
     import shutil
 
     work = tempfile.mkdtemp(prefix="krea-score-")

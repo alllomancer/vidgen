@@ -117,9 +117,9 @@ def apply_loras(pipe, loras):
     return pipe
 
 
-def load_filter(filter_dir):
+def load_filter(filter_dir, device=0):
     from transformers import pipeline as hf_pipeline
-    return hf_pipeline("image-classification", model=filter_dir, device=0)
+    return hf_pipeline("image-classification", model=filter_dir, device=device)
 
 
 def load(model_dir, filter_dir, loras=()):
@@ -144,10 +144,11 @@ def nsfw_score(nsfw, image):
 
 
 def run_score(req):
-    """Score mode: the filter alone over existing images (e.g. an avatar's training photos)."""
+    """Score mode: the filter alone over existing images (e.g. an avatar's training photos). On the CPU
+    (a small ViT, well under a second per image), so the worker's loaded models keep the GPU."""
     from PIL import Image
 
-    nsfw = load_filter(req["filter_dir"])
+    nsfw = load_filter(req["filter_dir"], device="cpu")
     scores = [round(nsfw_score(nsfw, Image.open(p).convert("RGB")), 4) for p in req["images"]]
     with open(req["result"], "w") as f:
         json.dump({"scores": scores}, f)

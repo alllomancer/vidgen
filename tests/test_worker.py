@@ -16,6 +16,7 @@ import models  # noqa: E402
 import photos  # noqa: E402
 import worker  # noqa: E402
 
+real_render_segment = models._render_segment  # most tests stub it; the prompt-embedding test needs the real one
 worker.WORK_ROOT = tempfile.mkdtemp()  # long takes' saved segments/timelines, never /opt in tests
 
 
@@ -499,6 +500,81 @@ open(os.path.join(pdir, "b.bin"), "wb").write(b"y" * 10)
 open(os.path.join(pdir, "readme.md"), "w").write("skip")
 models.PREFETCH_CHUNK = 64
 assert models.prefetch(pdir, threads=3) == 1010
+# A model given as a repo id is warmed from its Hugging Face cache snapshot; not downloaded yet = nothing to warm
+sys.modules["huggingface_hub"] = types.SimpleNamespace(
+    snapshot_download=lambda repo, local_files_only: pdir if repo == "org/cached" and local_files_only
+    else (_ for _ in ()).throw(FileNotFoundError(repo)))
+assert models._model_folder(pdir) == pdir and models._model_folder("org/missing") is None
+assert models.prefetch_model("org/cached") == 1010 and models.prefetch_model("org/missing") == 0
+del sys.modules["huggingface_hub"]
+# the edit model and the VLM are warmed before they load (Wan does it in _load_wan)
+warmed = []
+real_prefetch_model, models.prefetch_model = models.prefetch_model, warmed.append
+sys.modules["diffusers"] = sys.modules["transformers"] = mock.MagicMock()
+models._load_edit()
+models._load_vlm()
+assert warmed == [models.EDIT_MODEL, models.VLM_MODEL], warmed
+del sys.modules["diffusers"], sys.modules["transformers"]
+models.prefetch_model = real_prefetch_model
+
+
+# Prompt embeddings: a prompt is encoded once per pipeline and reused (variations, candidates, long takes)
+class Emb:  # a tensor stand-in that remembers where it was moved
+    def __init__(self, text, device="cuda"):
+        self.text, self.device = text, device
+
+    def to(self, device):
+        return Emb(self.text, device)
+
+
+class WanPipe:
+    def __init__(self):
+        self.encoded, self.calls = [], []
+
+    def encode_prompt(self, prompt, negative_prompt, do_classifier_free_guidance, max_sequence_length):
+        self.encoded.append((prompt, negative_prompt, do_classifier_free_guidance, max_sequence_length))
+        return Emb(prompt), Emb(negative_prompt) if do_classifier_free_guidance else None
+
+    def __call__(self, **kw):
+        self.calls.append(kw)
+        return mock.MagicMock(frames=[["frame"]])
+
+
+wan = {"t2v": WanPipe(), "i2v": WanPipe()}
+kept = (models._swap_to, models._apply_loras, models._generator, models.LIGHTNING)
+models._swap_to = lambda name, loader: wan[name]
+models._apply_loras = lambda pipe: pipe
+models._generator = lambda seed: seed
+models.LIGHTNING = True
+for s in (1, 2):
+    real_render_segment("a cat", "blurry", 81, 1280, 704, s, None)
+assert wan["t2v"].encoded == [("a cat", "blurry", False, 512)], "same prompt, two seeds: one encode, at 512 tokens"
+kw = wan["t2v"].calls[-1]
+assert "prompt" not in kw and "negative_prompt" not in kw and kw["generator"] == 2
+assert (kw["prompt_embeds"].text, kw["prompt_embeds"].device) == ("a cat", "cuda")
+assert kw["negative_prompt_embeds"] is None, "Lightning runs without CFG: no negative embedding"
+assert all(e.device == "cpu" for e, _ in models._embed_cache.values()), "cached off the GPU"
+real_render_segment("a dog", "blurry", 81, 1280, 704, 1, None)
+real_render_segment("a cat", "blurry", 81, 1280, 704, 1, Img(0))
+assert len(wan["t2v"].encoded) == 2 and wan["i2v"].encoded == [("a cat", "blurry", False, 512)], \
+    "a new prompt and the other pipeline are encoded for themselves"
+assert "image" in wan["i2v"].calls[-1] and wan["i2v"].calls[-1]["prompt_embeds"].text == "a cat"
+models.LIGHTNING = False  # the full model uses CFG: the negative is encoded too, under its own cache entry
+real_render_segment("a cat", "blurry", 81, 1280, 704, 1, None)
+assert wan["t2v"].encoded[-1] == ("a cat", "blurry", True, 512)
+assert wan["t2v"].calls[-1]["negative_prompt_embeds"].text == "blurry" and wan["t2v"].calls[-1]["guidance_scale"] == 4.0
+models.LIGHTNING = True
+for i in range(models.EMBED_CACHE_SIZE + 4):  # bounded: the oldest prompts go
+    real_render_segment(f"prompt {i}", "", 81, 1280, 704, 1, None)
+assert len(models._embed_cache) == models.EMBED_CACHE_SIZE and ("t2v", "a cat", "blurry", False) not in models._embed_cache
+# avatar candidates: one encode for all of them
+sys.modules["numpy"].clip = lambda f, lo, hi: mock.MagicMock()
+n_enc = len(wan["t2v"].encoded)
+assert len(models.generate_avatar_candidates("a tall woman", 3, seed=5)) == 3
+assert len(wan["t2v"].encoded) == n_enc + 1 and [c["generator"] for c in wan["t2v"].calls[-3:]] == [5, 6, 7]
+assert "prompt" not in wan["t2v"].calls[-1] and wan["t2v"].calls[-1]["num_frames"] == 1
+del sys.modules["numpy"].clip
+models._swap_to, models._apply_loras, models._generator, models.LIGHTNING = kept
 # write: title split, story.txt, sampling settings
 assert models.split_title("Title: The Keeper\n\nShe climbed.") == {"title": "The Keeper", "text": "She climbed."}
 assert models.split_title("**The Keeper**\n\nShe climbed.")["title"] == "The Keeper"
@@ -685,7 +761,9 @@ krea_gen.load = stub_load
 # Score mode: the filter alone over existing images (avatar photo sets), no Krea pipeline load
 loaded_krea = []
 krea_gen.load = lambda *a, **k: loaded_krea.append(1) or (_ for _ in ()).throw(AssertionError("no Krea load"))
-krea_gen.load_filter = lambda f: (lambda im: [{"label": "nsfw", "score": 0.9 if "bad" in im.name else 0.02}])
+filter_devices = []
+krea_gen.load_filter = lambda f, device=0: filter_devices.append(device) or (
+    lambda im: [{"label": "nsfw", "score": 0.9 if "bad" in im.name else 0.02}])
 sys.modules["PIL"].Image.open = lambda path: types.SimpleNamespace(name=os.path.basename(path), convert=lambda m: types.SimpleNamespace(name=os.path.basename(path)))
 kd3 = tempfile.mkdtemp()
 sreq = {"mode": "score", "filter_dir": kd3, "result": os.path.join(kd3, "s.json"),
@@ -693,6 +771,7 @@ sreq = {"mode": "score", "filter_dir": kd3, "result": os.path.join(kd3, "s.json"
 open(os.path.join(kd3, "sreq.json"), "w").write(_json.dumps(sreq))
 krea_gen.main(os.path.join(kd3, "sreq.json"))
 assert _json.load(open(sreq["result"]))["scores"] == [0.02, 0.9, 0.02] and not loaded_krea
+assert filter_devices == ["cpu"], "score mode keeps off the GPU: the worker's models stay loaded beside it"
 krea_gen.load = stub_load
 
 # krea.generate: runs the generator process, turns results into images (None = filtered) and stats
@@ -777,8 +856,10 @@ class ScoreProc(FakeProc):
 
 
 krea.subprocess = types.SimpleNamespace(Popen=ScoreProc, PIPE=-1)
+released.clear()
 scores = krea.score_images(["/a.png", "/b.png", "/c.png"])
 assert scores == [0.0, 0.1, 0.2] and weights_asked == ["filter"], (scores, weights_asked)
+assert not released, "the filter runs on the CPU: scoring must not unload the worker's models"
 assert krea.flagged(0.6) and not krea.flagged(0.3) and krea.flagged(krea.NSFW_THRESHOLD)
 
 
@@ -1188,7 +1269,7 @@ r = worker.run_avatar_photoset({"client": "m", "job_id": "pk2"}, dict(pparams, v
 av = _json.loads(fs3.objects["avatars/m/ava/avatar.json"])
 assert av["media"]["state"] == "failed" and "content filter" in av["media"]["error"] and av["krea_lora"]["state"] == "training"
 assert len([k for k in fs3.uploaded if "/media/photo_" in k]) == 24, "photos are stored even when every clip is flagged"
-# the clips are filtered in one call after all four are rendered (each filter call unloads Wan)
+# the clips are filtered in one call after all four are rendered (one filter process, not four)
 score_calls = []
 real_score = krea.score_images
 krea.score_images = lambda paths, progress=None: score_calls.append(list(paths)) or [0.01] * len(paths)

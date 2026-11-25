@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -414,6 +415,40 @@ def get_job(job_id):
     return vidgen.api("GET", f"/jobs/{job_id}")
 
 
+def cancel_job(job_id):
+    """Cancel a queued job, or ask a running one to stop (as `vidgen cancel` does)."""
+    job_id = str(job_id or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise ValueError("job id must be 32 hex characters")
+    return vidgen.api("POST", f"/jobs/{job_id}/cancel")
+
+
+PREVIEW_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+                 ".mp4": "video/mp4"}
+
+
+def job_file(job_id, index):
+    """(path, content type) of a downloaded job's index-th file, for the History previews. Only files the
+    watcher saved for that job, and only images and mp4 video; anything else is not found."""
+    job = vidgen.load_jobs().get(str(job_id)) or {}
+    files = job.get("files") or []
+    if job.get("status") != "downloaded" or not 0 <= index < len(files):
+        raise KeyError(f"{job_id}/{index}")
+    path = files[index]
+    content_type = PREVIEW_TYPES.get(os.path.splitext(path)[1].lower())
+    if not content_type or not os.path.isfile(path):
+        raise KeyError(f"{job_id}/{index}")
+    return path, content_type
+
+
+def get_avatar(name):
+    """One avatar with 1-hour preview links to its images (the Avatars tab's thumbnails)."""
+    name = str(name or "").strip().lower()
+    if not THEME_NAME.match(name):
+        raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    return vidgen.api("GET", f"/avatars/{name}")
+
+
 def avatar_wan_lora(name):
     """Build (a new version of) the avatar's Wan LoRA from its media now."""
     name = str(name or "").strip().lower()
@@ -489,19 +524,37 @@ def make_handler(port, token):
         def log_message(self, fmt, *args):  # quiet; errors still reach the page
             pass
 
-        def _send(self, status, body, content_type="application/json"):
-            data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
+        def _head(self, status, content_type):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy",
-                             # S3 presigned links: plan first frames (img), avatar preview clips (media)
+                             # S3 presigned links: plan first frames and avatar thumbnails (img), avatar preview
+                             # clips (media). blob: downloaded job files, which the page fetches with its token.
                              "default-src 'self'; img-src 'self' blob: https://*.amazonaws.com; "
-                             "media-src 'self' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; "
+                             "media-src 'self' blob: https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; "
                              "script-src 'self' 'unsafe-inline'")
+
+        def _send(self, status, body, content_type="application/json"):
+            data = body if isinstance(body, bytes) else json.dumps(body, default=str).encode()
+            self._head(status, content_type)
             self.end_headers()
             self.wfile.write(data)
+
+        def _send_file(self, path, content_type):
+            try:
+                f = open(path, "rb")
+            except OSError:
+                raise KeyError(os.path.basename(path))
+            with f:
+                self._head(200, content_type)
+                self.send_header("Content-Length", str(os.fstat(f.fileno()).st_size))
+                self.end_headers()
+                try:
+                    shutil.copyfileobj(f, self.wfile)
+                except (BrokenPipeError, ConnectionResetError):  # the page stopped loading it (row closed, reload)
+                    pass
 
         def _body(self):
             n = int(self.headers.get("Content-Length") or 0)
@@ -542,6 +595,13 @@ def make_handler(port, token):
                 m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/rerun", path)
                 if method == "POST" and m:
                     return self._send(202, rerun(m.group(1)))
+                m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/cancel", path)
+                if method == "POST" and m:
+                    r = cancel_job(m.group(1))
+                    return self._send(200 if r.get("status") == "cancelled" else 202, r)
+                m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})/files/(\d{1,3})", path)
+                if method == "GET" and m:
+                    return self._send_file(*job_file(m.group(1), int(m.group(2))))
                 if method == "POST" and path == "/api/create":
                     return self._send(202, create_job(self._body()))
                 if method == "GET" and path == "/api/avatars":
@@ -552,6 +612,9 @@ def make_handler(port, token):
                     return self._send(201, create_avatar(self._body()))
                 if method == "GET" and path == "/api/loras":
                     return self._send(200, list_loras())
+                m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})", path)
+                if method == "GET" and m:
+                    return self._send(200, get_avatar(m.group(1)))
                 m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})/krea-lora", path)
                 if method == "POST" and m:
                     return self._send(202, avatar_krea_lora(m.group(1)))

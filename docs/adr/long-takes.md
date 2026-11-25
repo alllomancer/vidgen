@@ -104,3 +104,10 @@
 **Decision**: `CONDITION_BLUR` is 0 (off); the softening code stays, switchable, while the halo's cause is investigated.
 **Reason**: Live check: with 0.8 px the halo at 47.5 s was as strong as without, and faces/coats showed over-sharpened texture; the edge-amplification explanation was wrong or incomplete.
 **Alternatives considered**: A stronger blur (would soften detail further without evidence it addresses the cause).
+
+## D16 — [2026-11-25] — Long-take quality: the halo is lighting, not chaining
+
+**Status**: Accepted
+**Decision**: No pipeline fix for the halo; `CONDITION_BLUR` stays off; the RUNBOOK advises side or front light for close shots of people at golden hour.
+**Reason**: A front-lit 30 s take (6 chained segments, fixed framing) showed no outline and no build-up; a backlit one had the glow from the first frame, growing as Wan moved the camera in. Measurements across seams showed no step at the joins.
+**Alternatives considered**: Post-processing to suppress glow (would fight intended golden-hour looks).

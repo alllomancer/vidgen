@@ -124,3 +124,16 @@ rule; plan-only path (no video/sound calls, result beats/seed, planner failure f
   The halo is not added at the seams (consistent with the start-frame blur having no effect).
 - Hypothesis: much of the visible halo is golden-hour backlight (rim light) exaggerated as the subject fills the frame,
   not chaining build-up. Needs a controlled test: fixed framing, front-lit vs backlit, 30 s each.
+
+## Halo test result (2026-11-25)
+
+Two 30 s takes, mirabel, seed 7, Wan first frame, her Wan LoRA, one beat (the same prompt in all 6 segments):
+- Front-lit (reading at a table, soft daylight from the front; job abfc3654ee784ceba4c4bd8c419be92b): frames at 2.5 s
+  and 27.5 s practically identical, no outline; halo/detail 0.97 -> 0.88 and fine detail 6.4 -> 7.6. Six chained
+  segments build up no halo.
+- Backlit (end of the pier, low sun directly behind her; job 6726b82c70b04932b186ca0dbe025f74): the glow is there
+  from the first frame; Wan moved the camera in by ~5 s despite the tripod default, so the rim-lit hair fills more of
+  the frame and the glow looks stronger.
+- Conclusion: the "halo" is golden-hour backlight (rim light, sun glow) growing with the subject's size in frame, not
+  chaining. No pipeline fix; `CONDITION_BLUR` stays off. For close or approaching shots of people, avoid the sun
+  directly behind them (write side or front light); the negative prompt has no effect with Lightning.

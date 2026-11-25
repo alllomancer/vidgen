@@ -881,7 +881,7 @@ class MediaFailed(Exception):
 
 def _avatar_media(client, name, job_id, created, kept, workdir, trigger):
     """The avatar's media: the kept photos stored first, then four 2 s clips from kept photos (positions 0,
-    n/4, n/2, 3n/4), content-filtered together after rendering (each filter call unloads Wan), stored with
+    n/4, n/2, 3n/4), content-filtered together after rendering (one filter process for all 12 stills), stored with
     media.json under avatars/<client>/<name>/media/, and the media record set ready. Raises MediaFailed
     (after marking the media failed) when no clip is left; the photos stay stored."""
     stale = {"media": "skipped: the avatar was replaced or newer media was requested"}

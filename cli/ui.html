@@ -21,7 +21,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--line);
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px 24px; border-bottom: 1px solid var(--line);
            background: var(--panel); position: sticky; top: 0; z-index: 2; }
   header h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
   header .spacer { flex: 1; }
@@ -51,7 +51,7 @@
   .plan-first-frame { max-width: 240px; display: block; margin-top: 6px; }
   .plan-first-frame[hidden] { display: none; }
   button.small { padding: 3px 9px; font-size: 12.5px; }
-  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .tabs { display: flex; gap: 4px; margin: 24px 0 12px; border-bottom: 1px solid var(--line); }
   .tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px; color: var(--muted); font-weight: 600; }
   .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
@@ -111,12 +111,42 @@
   ul.plain { margin: 0; padding-left: 18px; font-size: 13px; display: grid; gap: 4px; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
   .seg button { border: none; border-radius: 0; background: var(--panel); padding: 6px 16px; }
-  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
   .hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
   #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
            padding: 9px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
   #toast.show { opacity: 1; }
   [hidden] { display: none !important; }
+  #errors { flex-basis: 100%; display: grid; gap: 6px; }
+  #errors:empty { display: none; }
+  .error-item { display: flex; gap: 10px; align-items: flex-start; background: var(--bad-bg); border: 1px solid var(--bad);
+                border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+  .error-item span { flex: 1; overflow-wrap: anywhere; }
+  details.err-more { max-width: 320px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  details.err-more summary { cursor: pointer; }
+  details.err-more:not([open]) summary::after { content: "… (show all)"; }
+  td .bar { min-width: 140px; margin: 6px 0 4px; }
+  button.thumb { padding: 0; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; vertical-align: middle; }
+  button.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  tr.preview-row td { background: var(--bg); }
+  .preview { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
+  .preview figure { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); max-width: 100%; }
+  .preview img, .preview video { max-width: min(420px, 100%); max-height: 320px; border-radius: 8px; border: 1px solid var(--line);
+                                 background: var(--idle-bg); }
+  details.advanced { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  details.advanced > summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+  .adv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; margin-top: 12px; }
+  @media (max-width: 600px) { .adv-grid { grid-template-columns: 1fr; } }
+  label:has(input:disabled) { opacity: .55; }
+  .plan-status { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--idle-bg); font-size: 13px; }
+  .plan-status:empty { display: none; }
+  .avatar-head { display: flex; gap: 12px; align-items: center; margin-bottom: 4px; }
+  .avatar-thumb { width: 72px; height: 72px; flex: none; border-radius: 10px; overflow: hidden; border: 1px solid var(--line);
+                  background: var(--idle-bg); }
+  .avatar-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+  .avatar h3 { margin: 0; font-size: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .media-preview video { margin-top: 10px; max-width: 240px; border-radius: 8px; }
+  #pick-img { max-width: 100%; max-height: 50vh; border-radius: 8px; justify-self: center; }
 form.krea .person-only, form.krea .person-text { display: none !important; }
 form:not(.krea) .krea-text { display: none !important; }
 .lora-block { display: flex; flex-direction: column; gap: 6px; }
@@ -133,6 +163,7 @@ form:not(.krea) .krea-text { display: none !important; }
   <span class="spacer"></span>
   <span class="sub" id="refreshed"></span>
   <button class="small" id="refresh">Refresh</button>
+  <div id="errors" role="alert"></div>
 </header>
 
 <main>
@@ -159,14 +190,14 @@ form:not(.krea) .krea-text { display: none !important; }
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-history" aria-selected="true" aria-controls="panel-history">History</button>
     <button role="tab" id="tab-create" aria-selected="false" aria-controls="panel-create">Create</button>
+    <button role="tab" id="tab-avatars" aria-selected="false" aria-controls="panel-avatars">Avatars</button>
     <button role="tab" id="tab-learning" aria-selected="false" aria-controls="panel-learning">Learning</button>
   </div>
 
   <section id="panel-history" role="tabpanel" aria-labelledby="tab-history">
     <div class="toolbar">
       <select id="f-type" aria-label="Filter by type">
-        <option value="">All types</option><option>video</option><option>story</option><option>write</option><option>photos</option><option>avatar</option>
-        <option>avatar</option><option>describe</option><option>train</option>
+        <option value="">All types</option>
       </select>
       <input id="f-text" type="search" placeholder="Search prompts" aria-label="Search prompts">
       <div class="stats" id="stats"></div>
@@ -190,7 +221,6 @@ form:not(.krea) .krea-text { display: none !important; }
         <button type="button" data-kind="photos" aria-pressed="false">Photos</button>
         <button type="button" data-kind="write" aria-pressed="false">Write</button>
         <button type="button" data-kind="story" aria-pressed="false">Story</button>
-        <button type="button" data-kind="avatar" aria-pressed="false">Avatar</button>
       </div>
 
       <form class="add create" id="create-video" data-kind="video">
@@ -199,40 +229,46 @@ form:not(.krea) .krea-text { display: none !important; }
         <label>Seconds (1-60; over 5 chains 5 s segments)<input name="seconds" type="number" min="1" max="60" value="5"></label>
         <p class="wide hint take-estimate" role="status" aria-live="polite" hidden></p>
         <label class="wide long-only" hidden>Beats (optional)<textarea name="beats" maxlength="6500" aria-describedby="beats-hint" placeholder="0: a man walks into a sunny kitchen&#10;10: he sits down at the table&#10;30: he looks up at the window"></textarea></label>
+        <p class="wide hint long-only" id="beats-hint" hidden>What happens when: one "SECONDS: text" per line, times in multiples of 5, each a full description of the shot. Empty: over 15 s the planner writes the timeline.</p>
         <div class="wide plan-first-row" hidden>
           <button type="button" class="small plan-first" aria-describedby="plan-first-status">Plan first</button>
-          <span class="hint" id="plan-first-status" role="status"></span>
+          <span class="hint">Makes the first frame and the beats (no video yet), so you can edit them before rendering.</span>
+          <p class="plan-status" id="plan-first-status" role="status"></p>
           <img class="plan-first-frame" alt="First frame of the plan" hidden>
         </div>
-        <p class="wide hint long-only" id="beats-hint" hidden>What happens when: one "SECONDS: text" per line, times in multiples of 5, each a full description of the shot. Empty: over 15 s the planner writes the timeline.</p>
-        <label class="anchor-only" hidden>Re-anchor the avatar every N segments<input name="anchor_every" type="number" min="2" max="6" placeholder="off" aria-describedby="anchor-hint"></label>
-        <p class="hint anchor-only" id="anchor-hint" hidden>2-6. Restores the avatar's face before segments N, 2N, ... (~2-4 min each). Empty: off.</p>
-        <div class="wide lora-block"><span class="lora-title">LoRAs</span><div class="lora-rows"></div><button type="button" class="small add-lora-row">+ Add LoRA</button></div>
-        <label>Variations (1-4; long takes: 1)<input name="variations" type="number" min="1" max="4" value="1"></label>
-        <label>Seed (optional)<input name="seed" type="number" min="0" placeholder="random"></label>
-        <div class="wide checks">
-          <label><input type="checkbox" name="smooth" checked> Smooth (32 fps)</label>
-          <label><input type="checkbox" name="upscale"> Upscale 2x</label>
-          <label title="Render at 832x480, then 32 fps + 2x upscale to 1664x960: about 2-3x faster, softer detail"><input type="checkbox" name="draft"> Draft (faster)</label>
-          <label><input type="checkbox" name="sound" checked> Sound</label>
-          <label title="Videos starring an avatar with a ready Wan LoRA get it automatically (keeps the face over long takes)"><input type="checkbox" name="avatar_lora" checked> Avatar's Wan LoRA</label>
-        </div>
-        <fieldset class="wide realism">
-          <legend>Realism</legend>
-          <label>Look<select name="look">
-            <option value="pro">Pro (clean 50mm, default)</option><option value="phone">Phone snapshot</option>
-            <option value="candid">Candid 35mm documentary</option><option value="portrait">Portrait 85mm, soft background</option>
-            <option value="film">35mm film colours</option></select></label>
-          <label class="first-frame" title="Krea 2 needs no avatar, or one avatar with a ready Krea 2 LoRA">First frame<select name="image_model">
-            <option value="auto" selected>Auto (default): Krea 2 when it can be made, else Wan</option><option value="wan">Wan (as rendered)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
-          <div class="checks">
-            <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
-            <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
-            <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
-            <label><input type="checkbox" name="best"> Best keyframe (full model for the avatar frame, ~+1.5 min)</label>
+        <details class="wide advanced" id="video-advanced">
+          <summary>More options <span class="sub">LoRAs, variations, seed, quality, realism, file name</span></summary>
+          <div class="adv-grid">
+            <div class="wide lora-block"><span class="lora-title">LoRAs</span><div class="lora-rows"></div><button type="button" class="small add-lora-row">+ Add LoRA</button></div>
+            <label class="anchor-only" hidden>Re-anchor the avatar every N segments<input name="anchor_every" type="number" min="2" max="6" placeholder="off" aria-describedby="anchor-hint"></label>
+            <p class="hint anchor-only" id="anchor-hint" hidden>2-6. Restores the avatar's face before segments N, 2N, ... (~2-4 min each). Empty: off.</p>
+            <label>Variations (1-4; long takes: 1)<input name="variations" type="number" min="1" max="4" value="1"></label>
+            <label>Seed (optional)<input name="seed" type="number" min="0" placeholder="random"></label>
+            <div class="wide checks">
+              <label><input type="checkbox" name="smooth" checked> Smooth (32 fps)</label>
+              <label><input type="checkbox" name="upscale"> Upscale 2x</label>
+              <label title="Render at 832x480, then 32 fps + 2x upscale to 1664x960: about 2-3x faster, softer detail"><input type="checkbox" name="draft"> Draft (faster)</label>
+              <label><input type="checkbox" name="sound" checked> Sound</label>
+              <label title="Videos starring an avatar with a ready Wan LoRA get it automatically (keeps the face over long takes)"><input type="checkbox" name="avatar_lora" checked> Avatar's Wan LoRA</label>
+            </div>
+            <fieldset class="wide realism">
+              <legend>Realism</legend>
+              <label>Look<select name="look">
+                <option value="pro">Pro (clean 50mm, default)</option><option value="phone">Phone snapshot</option>
+                <option value="candid">Candid 35mm documentary</option><option value="portrait">Portrait 85mm, soft background</option>
+                <option value="film">35mm film colours</option></select></label>
+              <label class="first-frame" title="Krea 2 needs no avatar, or one avatar with a ready Krea 2 LoRA">First frame<select name="image_model">
+                <option value="auto" selected>Auto (default): Krea 2 when it can be made, else Wan</option><option value="wan">Wan (as rendered)</option><option value="krea2">Krea 2 image (no avatar, or an avatar's Krea LoRA), then Wan animates it</option></select></label>
+              <div class="checks">
+                <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
+                <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
+                <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
+                <label><input type="checkbox" name="best"> Best keyframe (full model for the avatar frame, ~+1.5 min)</label>
+              </div>
+            </fieldset>
+            <label class="wide">File name (optional)<input name="out" placeholder="market.mp4" autocomplete="off"></label>
           </div>
-        </fieldset>
-        <label class="wide">File name (optional)<input name="out" placeholder="market.mp4" autocomplete="off"></label>
+        </details>
         <div><button class="primary" type="submit">Make video</button></div>
       </form>
 
@@ -315,8 +351,16 @@ form:not(.krea) .krea-text { display: none !important; }
         <label class="wide">File name (optional)<input name="out" placeholder="story.mp4" autocomplete="off"></label>
         <div><button class="primary" type="submit">Make story</button></div>
       </form>
-      <form class="add" id="avatar-generate" data-kind="avatar" hidden>
-        <h3 class="wide" style="margin:0;font-size:13px">Generate candidates from a description</h3>
+      <p class="hint err" id="create-err" role="alert"></p>
+      <p class="hint">Jobs go to the render machine (it starts if needed) and download to your vidgen folder like CLI jobs; follow them in History.</p>
+    </div>
+  </section>
+
+  <section id="panel-avatars" role="tabpanel" aria-labelledby="tab-avatars" hidden>
+    <div class="themes" id="avatars"><div class="card empty">Loading…</div></div>
+    <div class="card" style="margin-top:16px">
+      <h2>New avatar from a description</h2>
+      <form class="add" id="avatar-generate">
         <label>Name<input name="name" required pattern="[a-z0-9][a-z0-9_\-]{0,31}" maxlength="32" placeholder="e.g. mira" autocomplete="off"></label>
         <label>Model<select name="model"><option value="krea2">Krea 2 Turbo (sharper)</option><option value="wan">Wan (one video frame)</option></select></label>
         <label class="wide">Description<textarea name="description" required maxlength="500" placeholder="a woman in her 30s, short dark hair, green raincoat"></textarea></label>
@@ -326,8 +370,11 @@ form:not(.krea) .krea-text { display: none !important; }
         <p class="hint wide">When they've downloaded, History shows <b>Pick</b> buttons: the one you pick is saved as this avatar. Krea 2 images go through its content filter; flagged ones are dropped.</p>
         <div><button class="primary" type="submit">Generate candidates</button></div>
       </form>
-
-      <form class="add create" id="create-avatar" data-kind="avatar" hidden>
+      <p class="hint err" id="avatar-gen-err" role="alert"></p>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h2>New avatar from photos</h2>
+      <form class="add" id="create-avatar">
         <label>Name<input name="name" required pattern="[a-z0-9][a-z0-9_\-]{0,31}" maxlength="32" placeholder="e.g. dana" autocomplete="off"></label>
         <label>Description (optional)<input name="description" maxlength="500" placeholder="woman in her 30s, short dark hair"></label>
         <p class="hint wide" id="avatar-replace" hidden></p>
@@ -339,10 +386,9 @@ form:not(.krea) .krea-text { display: none !important; }
         <div class="wide checks"><label title="Generates 24 photos of this avatar and trains a Krea 2 LoRA on the trainer (~1.5 h GPU, about $3), so Krea photos and first frames can show this person; its trigger word is the avatar name"><input type="checkbox" name="krea_lora" checked> Also train a Krea 2 LoRA (~1.5 h GPU; only for people who agreed)</label></div>
         <div><button class="primary" type="submit" id="avatar-go" disabled>Create avatar</button></div>
       </form>
-      <p class="hint err" id="create-err" role="alert"></p>
-      <div id="avatar-krea" hidden></div>
-      <p class="hint">Jobs go to the render machine (it starts if needed) and download to your vidgen folder like CLI jobs; follow them in History.</p>
+      <p class="hint err" id="avatar-err" role="alert"></p>
     </div>
+    <p class="hint">Each avatar can have a Krea 2 LoRA (for Krea photos and first frames), media (its photo set and four 2 s clips, copied to your download folder) and a Wan LoRA trained on that media (videos starring the avatar use it automatically).</p>
   </section>
 
   <section id="panel-learning" role="tabpanel" aria-labelledby="tab-learning" hidden>
@@ -406,6 +452,18 @@ form:not(.krea) .krea-text { display: none !important; }
     </div>
   </form>
 </dialog>
+<dialog id="pick-dialog" aria-labelledby="pick-h">
+  <form method="dialog" class="add">
+    <h2 id="pick-h" class="wide" style="margin:0;font-size:16px"></h2>
+    <img id="pick-img" class="wide" alt="" hidden>
+    <p class="hint wide" id="pick-note"></p>
+    <div class="wide" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
+      <button value="cancel">Cancel</button>
+      <button value="save">Save</button>
+      <button value="default" class="primary">Save and make default</button>
+    </div>
+  </form>
+</dialog>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -430,6 +488,38 @@ async function api(method, path, body) {
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3500); }
+// Errors stay in the header until dismissed (a toast is gone before a long message can be read).
+function showError(msg) {
+  msg = String(msg || "Something went wrong");
+  const box = $("errors");
+  for (const el of [...box.children]) if (el.dataset.msg === msg) el.remove();  // the same error again: shown once
+  while (box.children.length >= 3) box.firstElementChild.remove();
+  const item = document.createElement("div"), text = document.createElement("span"), close = document.createElement("button");
+  item.className = "error-item"; item.dataset.msg = msg;
+  text.textContent = msg;
+  Object.assign(close, {type: "button", className: "small", textContent: "Dismiss", onclick: () => item.remove()});
+  item.append(text, close);
+  box.append(item);
+}
+const store = {  // localStorage, or nothing when the browser blocks it
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  del(k) { try { localStorage.removeItem(k); } catch (e) {} },
+};
+const sleep = ms => new Promise(done => setTimeout(done, ms));
+// Opens a <dialog> whose buttons are in a method="dialog" form; resolves to the pressed button's value ("" for Esc).
+function askDialog(d) {
+  return new Promise(done => {
+    d.returnValue = "";
+    d.addEventListener("close", () => done(d.returnValue), {once: true});
+    d.showModal();
+  });
+}
+function roughly(s) {
+  if (s < 60) return "under a minute";
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`;
+}
 function dur(s) {
   if (s == null) return "—";
   if (s < 90) return `${s} s`;
@@ -481,7 +571,7 @@ async function loadStatus() {
 }
 $("wake").onclick = async () => {
   $("wake").disabled = true;
-  try { await api("POST", "/api/wake"); toast("GPU instance starting"); } catch (e) { toast(e.message); }
+  try { await api("POST", "/api/wake"); toast("GPU instance starting"); } catch (e) { showError(e.message); }
   loadStatus();
 };
 
@@ -526,9 +616,16 @@ function renderTrainer() {
 }
 
 // ---------------------------------------------------------------- history
+// A row is rebuilt only when its content changes, so open previews, playing clips and keyboard focus survive the
+// 30 s refresh; the texts that change with the clock ("5 min ago", "running for…") are filled in by fillTimes().
+const openErrors = new Set(), openPreviews = new Map(), cancelling = new Set(), pace = new Map();
+let rowSig = new Map();
 async function loadJobs() {
   try { jobs = (await api("GET", "/api/jobs")).jobs; renderJobs(); renderTrainer(); }
-  catch (e) { $("jobs").innerHTML = `<tr><td colspan="8" class="empty err">History unavailable: ${esc(e.message)}</td></tr>`; }
+  catch (e) {
+    $("jobs").innerHTML = `<tr><td colspan="8" class="empty err">History unavailable: ${esc(e.message)}</td></tr>`;
+    $("jobs")._ids = null;
+  }
 }
 function details(j) {
   const d = j.details || {}, bits = [];
@@ -542,53 +639,229 @@ function details(j) {
   if (j.rerun_of) bits.push(`re-run of ${j.rerun_of.slice(0, 8)}`);
   return bits.join(" · ");
 }
+// The type filter lists the job types that exist (plus the chosen one, so a filter never vanishes under you).
+function syncTypeFilter() {
+  const sel = $("f-type"), types = [...new Set(jobs.map(j => j.type))].sort();
+  if (sel.value && !types.includes(sel.value)) types.push(sel.value);
+  if (sel._types === types.join(",")) return;
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">All types</option>` + types.map(t => `<option>${esc(t)}</option>`).join("");
+  sel.value = keep;
+  sel._types = types.join(",");
+}
+// Downloaded files the page can show: images and mp4, served by /api/jobs/<id>/files/<n> (n = place in the job's files).
+function previewFiles(j) {
+  if (!j.local || j.local.status !== "downloaded") return [];
+  return (j.local.files || []).map((path, i) => ({path, i, video: /\.mp4$/i.test(path)}))
+    .filter(f => /\.(png|jpe?g|webp|mp4)$/i.test(f.path));
+}
+const fileSrc = (j, f) => `/api/jobs/${j.job_id}/files/${f.i}`;
+const blobUrls = new Map();  // file route -> promise of an object URL (the route needs the token header, so no plain src)
+function fileUrl(src) {
+  if (!blobUrls.has(src)) {
+    blobUrls.set(src, fetch(src, {headers: {"X-UI-Token": TOKEN}})
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob(); })
+      .then(b => URL.createObjectURL(b))
+      .catch(e => { blobUrls.delete(src); throw e; }));
+  }
+  return blobUrls.get(src);
+}
+function loadFile(el) {
+  fileUrl(el.dataset.fileSrc).then(url => { el.src = url; }, () => {
+    const thumb = el.closest("button.thumb");
+    if (thumb) thumb.hidden = true;  // the file is gone from this computer: nothing to preview
+    else el.replaceWith(document.createTextNode("not on this computer any more"));
+  });
+}
+const lazyFiles = "IntersectionObserver" in window ? new IntersectionObserver(entries => {
+  for (const en of entries) if (en.isIntersecting) { lazyFiles.unobserve(en.target); loadFile(en.target); }
+}, {rootMargin: "200px"}) : null;
+function watchFiles(root) {
+  for (const el of root.querySelectorAll("img[data-file-src]:not([src])")) lazyFiles ? lazyFiles.observe(el) : loadFile(el);
+}
+// Seconds left for a running job, from the pace seen on this page since its counter started (so model loading
+// and earlier phases don't count). null until the counter has moved once.
+function finishTime(j, n, of) {
+  const phase = j.progress.replace(/\d+/g, "#"), now = Date.now() / 1000;
+  let p = pace.get(j.job_id);
+  if (!p || p.phase !== phase || n < p.n) { p = {phase, n0: n, t0: now, n, t: now}; pace.set(j.job_id, p); }
+  if (n > p.n) { p.n = n; p.t = now; }
+  return p.n > p.n0 && n < of ? Math.round(p.t + (of - n) * (p.t - p.t0) / (p.n - p.n0)) : null;
+}
+function errorHtml(j) {
+  if (!j.error) return "";
+  if (j.error.length <= 140) return `<div class="sub err">${esc(j.error)}</div>`;
+  return `<details class="sub err err-more" data-err="${esc(j.job_id)}"${openErrors.has(j.job_id) ? " open" : ""}>` +
+         `<summary>${esc(j.error.slice(0, 140))}</summary>${esc(j.error.slice(140))}</details>`;
+}
+function statusHtml(j) {
+  if (j.status === "queued") return pill("queued") + `<div class="sub"><span data-waiting="${Number(j.created_at)}"></span></div>`;
+  if (j.status !== "running") return pill(j.status) + errorHtml(j);
+  const text = j.progress || "", m = /(\d+)\s*\/\s*(\d+)/.exec(text), n = m && Number(m[1]), of = m && Number(m[2]);
+  const pct = m && of > 0 && n <= of ? Math.round(100 * n / of) : null;
+  const eta = pct === null || /\bleft\b/.test(text) ? null : finishTime(j, n, of);  // the trainer writes its own "left"
+  return pill("running", cancelling.has(j.job_id) ? "stopping" : "running") +
+    (text ? `<div class="sub">${esc(text)}</div>` : "") +
+    (pct === null ? "" : `<div class="bar" role="progressbar" aria-label="${esc(text)}" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>`) +
+    `<div class="sub">${j.started_at ? `<span data-elapsed="${Number(j.started_at)}"></span>` : ""}` +
+    `${eta === null ? "" : `<span data-eta="${eta}"></span>`}</div>`;
+}
+function filesHtml(j) {
+  if (j.type === "train") return `<span class="sub">${j.status === "done" ? "LoRA in S3" : "—"}</span>`;
+  const out = j.local && j.local.out;
+  if (!out) return `<span class="sub">${j.status === "done" ? "not on this computer" : "—"}</span>`;
+  const files = previewFiles(j), img = files.find(f => !f.video), open = openPreviews.has(j.job_id), id = esc(j.job_id);
+  const what = `${files.length} file${files.length > 1 ? "s" : ""}`;
+  const preview = !files.length ? "" : img
+    ? `<button class="thumb" data-preview="${id}" aria-expanded="${open}" aria-label="${open ? "Hide" : "Preview"} ${what}" title="${open ? "Hide the preview" : "Preview"}"><img data-file-src="${fileSrc(j, img)}" alt=""></button> `
+    : `<button class="small" data-preview="${id}" aria-expanded="${open}">${open ? "Hide" : "Play"}</button> `;
+  return preview + `<button class="small" data-reveal="${esc((j.local.files && j.local.files[0]) || out)}" title="${esc(out)}">Show file</button>`;
+}
+function rowHtml(j) {
+  const id = esc(j.job_id), live = j.status === "queued" || j.status === "running", stop = cancelling.has(j.job_id);
+  return `<tr data-job="${id}">
+      <td title="${esc(new Date(j.created_at * 1000).toLocaleString())}"><span data-ago="${Number(j.created_at)}"></span><div class="sub">${esc(when(j.created_at))}</div></td>
+      <td><span class="chip">${esc(j.type)}</span></td>
+      <td class="summary"><div class="text" title="${esc(j.summary)}">${esc(j.summary || "—")}</div><div class="sub">${esc(details(j))}</div></td>
+      <td>${statusHtml(j)}</td>
+      <td class="num">${dur(j.wait_seconds)}</td>
+      <td class="num"><b>${dur(j.run_seconds)}</b></td>
+      <td>${filesHtml(j)}</td>
+      <td>${live ? `<button class="small" data-cancel="${id}" ${stop ? "disabled" : ""}>${stop ? "Stopping…" : "Cancel"}</button> ` : ""}<button class="small" data-rerun="${id}" ${j.type === "describe" ? "disabled title=\"needs the original upload\"" : ""}>Re-run</button>${
+        j.type === "write" && j.local && j.local.status === "downloaded" ? ` <button class="small" data-use-story="${id}" title="Put this story into the Story form">Use in Story</button>` : ""}${
+        j.type === "avatar" && j.local && j.local.status === "downloaded" ? pickButtons(j) : ""}</td>
+    </tr>`;
+}
+function fillTimes() {
+  const now = Date.now() / 1000, body = $("jobs");
+  for (const el of body.querySelectorAll("[data-ago]")) el.textContent = ago(el.dataset.ago);
+  for (const el of body.querySelectorAll("[data-waiting]")) el.textContent = `waiting ${roughly(now - el.dataset.waiting)}`;
+  for (const el of body.querySelectorAll("[data-elapsed]")) el.textContent = `running for ${roughly(now - el.dataset.elapsed)}`;
+  for (const el of body.querySelectorAll("[data-eta]")) {
+    const left = el.dataset.eta - now;
+    el.textContent = left < 60 ? " · under a minute left" : ` · about ${roughly(left)} left`;
+  }
+}
+// The focused button of a row, as a selector that finds it again after the row was rebuilt.
+function focusKey(el) {
+  const tr = el && el.tagName === "BUTTON" && el.closest("#jobs tr[data-job]");
+  if (!tr) return null;
+  const data = [...el.attributes].filter(a => a.name.startsWith("data-")).map(a => `[${a.name}="${CSS.escape(a.value)}"]`).join("");
+  return data && `tr[data-job="${tr.dataset.job}"] button${data}`;
+}
 function renderJobs() {
-  const type = $("f-type").value, q = $("f-text").value.trim().toLowerCase();
+  syncTypeFilter();
+  const type = $("f-type").value, q = $("f-text").value.trim().toLowerCase(), body = $("jobs");
   const list = jobs.filter(j => (!type || j.type === type) && (!q || (j.summary || "").toLowerCase().includes(q)));
   const done = list.filter(j => j.run_seconds != null);
   const total = done.reduce((a, j) => a + j.run_seconds, 0);
   $("stats").innerHTML = `<span><b>${list.length}</b> jobs</span><span><b>${dur(total)}</b> GPU render time</span>` +
     (done.length ? `<span>avg <b>${dur(Math.round(total / done.length))}</b></span>` : "");
-  if (!list.length) { $("jobs").innerHTML = `<tr><td colspan="8" class="empty">No jobs${jobs.length ? " match the filter" : " yet"}.</td></tr>`; return; }
-  $("jobs").innerHTML = list.map(j => {
-    const status = j.status === "running" && j.progress ? `${pill("running")}<div class="sub">${esc(j.progress)}</div>` :
-                   pill(j.status) + (j.error ? `<div class="sub err">${esc(j.error.slice(0, 140))}</div>` : "");
-    const out = j.local && j.local.out;
-    const files = j.type === "train" ? `<span class="sub">${j.status === "done" ? "LoRA in S3" : "—"}</span>` : out ?`<button class="small" data-reveal="${esc((j.local.files && j.local.files[0]) || out)}" title="${esc(out)}">Show</button>`
-                      : `<span class="sub">${j.status === "done" ? "not on this computer" : "—"}</span>`;
-    return `<tr>
-      <td title="${esc(new Date(j.created_at * 1000).toLocaleString())}">${esc(ago(j.created_at))}<div class="sub">${esc(when(j.created_at))}</div></td>
-      <td><span class="chip">${esc(j.type)}</span></td>
-      <td class="summary"><div class="text" title="${esc(j.summary)}">${esc(j.summary || "—")}</div><div class="sub">${esc(details(j))}</div></td>
-      <td>${status}</td>
-      <td class="num">${dur(j.wait_seconds)}</td>
-      <td class="num"><b>${dur(j.run_seconds)}</b></td>
-      <td>${files}</td>
-      <td><button class="small" data-rerun="${esc(j.job_id)}" ${j.type === "describe" ? "disabled title=\"needs the original upload\"" : ""}>Re-run</button>${
-        j.type === "write" && j.local && j.local.status === "downloaded" ? ` <button class="small" data-use-story="${esc(j.job_id)}" title="Put this story into the Story form">Use in Story</button>` : ""}${
-        j.type === "avatar" && j.local && j.local.status === "downloaded" ? pickButtons(j) : ""}</td>
-    </tr>`;
-  }).join("");
+  const running = new Set(jobs.filter(j => j.status === "running").map(j => j.job_id));
+  for (const known of [pace, cancelling]) for (const id of [...known.keys()]) if (!running.has(id)) known.delete(id);
+  const html = new Map(list.map(j => [j.job_id, rowHtml(j)])), ids = [...html.keys()].join(",");
+  const focus = focusKey(document.activeElement);
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="8" class="empty">No jobs${jobs.length ? " match the filter" : " yet"}.</td></tr>`;
+    openPreviews.clear();
+  } else if (body._ids !== ids) {  // a new job, or another filter: rebuild, and put the open previews back
+    body.innerHTML = [...html.values()].join("");
+    for (const [id, tr] of [...openPreviews]) {
+      const row = body.querySelector(`tr[data-job="${id}"]`);
+      if (row) row.after(tr); else openPreviews.delete(id);
+    }
+  } else {
+    for (const [id, h] of html) {
+      if (rowSig.get(id) === h) continue;
+      const fresh = document.createElement("tbody");
+      fresh.innerHTML = h;
+      body.querySelector(`tr[data-job="${id}"]`).replaceWith(fresh.firstElementChild);
+    }
+  }
+  body._ids = list.length ? ids : null;
+  rowSig = html;
+  if (focus && !body.contains(document.activeElement)) { const el = body.querySelector(focus); if (el) el.focus(); }
+  watchFiles(body);
+  fillTimes();
 }
 function pickButtons(j) {
   const nums = (j.local.files || []).map(f => (f.match(/candidate_(\d+)\.png$/) || [])[1]).filter(Boolean);
   const name = j.local.avatar_name || "star";
   return nums.map(n => ` <button class="small" data-pick-job="${esc(j.job_id)}" data-pick-n="${n}" title="Save candidate ${n} as avatar ${esc(name)}">Pick ${n}</button>`).join("");
 }
+// The row under a job with its images and videos (up to 12; the rest are in the folder).
+function previewRow(j) {
+  const tr = document.createElement("tr"), td = tr.insertCell(), box = document.createElement("div");
+  const files = previewFiles(j);
+  tr.className = "preview-row";
+  td.colSpan = 8;
+  box.className = "preview";
+  for (const f of files.slice(0, 12)) {
+    const fig = document.createElement("figure"), cap = document.createElement("figcaption");
+    const el = document.createElement(f.video ? "video" : "img"), name = f.path.split(/[\\/]/).pop();
+    if (f.video) { el.controls = true; el.playsInline = true; el.setAttribute("aria-label", name); } else el.alt = name;
+    el.dataset.fileSrc = fileSrc(j, f);
+    cap.textContent = name;
+    fig.append(el, cap);
+    box.append(fig);
+    loadFile(el);
+  }
+  td.append(box);
+  if (files.length > 12) {
+    const more = document.createElement("p");
+    more.className = "hint";
+    more.textContent = `and ${files.length - 12} more in the folder (Show file)`;
+    td.append(more);
+  }
+  return tr;
+}
 $("f-type").onchange = renderJobs;
 $("f-text").oninput = renderJobs;
+$("jobs").addEventListener("toggle", e => {  // remember which long errors are open
+  const id = e.target.dataset && e.target.dataset.err, j = id && jobs.find(x => x.job_id === id);
+  if (!id) return;
+  if (e.target.open) openErrors.add(id); else openErrors.delete(id);
+  if (j) rowSig.set(id, rowHtml(j));
+}, true);
 $("jobs").onclick = async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  if (b.dataset.reveal) { try { await api("POST", "/api/reveal", {path: b.dataset.reveal}); } catch (err) { toast(err.message); } return; }
+  if (b.dataset.reveal) { try { await api("POST", "/api/reveal", {path: b.dataset.reveal}); } catch (err) { showError(err.message); } return; }
+  if (b.dataset.preview) {
+    const id = b.dataset.preview, j = jobs.find(x => x.job_id === id);
+    if (openPreviews.has(id)) { openPreviews.get(id).remove(); openPreviews.delete(id); }
+    else if (j) { openPreviews.set(id, previewRow(j)); b.closest("tr").after(openPreviews.get(id)); }
+    renderJobs();
+    return;
+  }
+  if (b.dataset.cancel) {
+    const j = jobs.find(x => x.job_id === b.dataset.cancel);
+    if (!j || !confirm(`Cancel this ${j.type} job?${j.status === "running" ? " It stops within about 15 s." : ""}\n\n${(j.summary || "").slice(0, 200)}`)) return;
+    b.disabled = true;
+    try {
+      const r = await api("POST", `/api/jobs/${j.job_id}/cancel`);
+      if (r.status === "cancelled") toast("Job cancelled");
+      else { cancelling.add(j.job_id); toast("Stopping the job; it shows as cancelled within about 15 s"); }
+      await loadJobs(); loadStatus();
+    } catch (err) { showError(err.message); b.disabled = false; }
+    return;
+  }
   if (b.dataset.pickJob) {
     const j = jobs.find(x => x.job_id === b.dataset.pickJob), name = (j && j.local && j.local.avatar_name) || "star";
-    const makeDefault = confirm(`Save candidate ${b.dataset.pickN} as avatar ${name}.\n\nOK = also make it your default avatar, Cancel = just save it.`);
+    const n = b.dataset.pickN, img = $("pick-img"), key = `${b.dataset.pickJob}/${n}`;
+    const file = j && previewFiles(j).find(f => f.path.endsWith(`candidate_${n}.png`));
+    $("pick-h").textContent = `Save candidate ${n} as avatar ${name}?`;
+    $("pick-note").textContent = createOptions && createOptions.avatars.some(a => a.name === name)
+      ? `An avatar named ${name} exists: this replaces its images (the current version goes into history, so it can be restored).` : "";
+    img.hidden = true; img.alt = `Candidate ${n}`; img.dataset.key = key;
+    if (file) fileUrl(fileSrc(j, file)).then(url => { if (img.dataset.key === key) { img.src = url; img.hidden = false; } }, () => {});
+    const choice = await askDialog($("pick-dialog"));
+    if (choice !== "save" && choice !== "default") return;
     try {
-      const r = await api("POST", "/api/avatars/pick", {job_id: b.dataset.pickJob, candidate: parseInt(b.dataset.pickN, 10), make_default: makeDefault});
+      const r = await api("POST", "/api/avatars/pick", {job_id: b.dataset.pickJob, candidate: parseInt(n, 10), make_default: choice === "default"});
       toast(`Avatar ${r.name} saved${r.default ? " and set as default" : ""}`);
       loadCreateOptions();
-    } catch (err) { toast(err.message); }
+    } catch (err) { showError(err.message); }
     return;
   }
   if (b.dataset.useStory) {
@@ -602,7 +875,7 @@ $("jobs").onclick = async e => {
       if (!f.elements.out.value) f.elements.out.value = `${base}.mp4`;
       f.elements.story.focus();
       toast("Story loaded: edit it if you like, then Make story");
-    } catch (err) { toast(err.message); }
+    } catch (err) { showError(err.message); }
     return;
   }
   if (b.dataset.rerun) {
@@ -610,7 +883,7 @@ $("jobs").onclick = async e => {
     if (!confirm(`Run this ${j.type} job again? It starts the GPU if it is stopped.\n\n${(j.summary || "").slice(0, 200)}`)) return;
     b.disabled = true;
     try { const r = await api("POST", `/api/jobs/${j.job_id}/rerun`); toast(`Queued ${r.job_id.slice(0, 8)}; the watcher downloads it when done`); loadJobs(); loadStatus(); }
-    catch (err) { toast(err.message); b.disabled = false; }
+    catch (err) { showError(err.message); b.disabled = false; }
   }
 };
 
@@ -620,7 +893,7 @@ function renderUploadedLoras() {
   for (const l of Object.values(loras)) for (const v of l.versions) if (v.source === "upload") {
     const on = v.version === l.current;
     const kind = ((v.models || []).includes("krea2") ? ' <span class="chip">Krea 2</span>' : ' <span class="chip">Wan</span>') +
-      (v.local ? ' <span class="chip">on this Mac</span>' : "");
+      (v.local ? ' <span class="chip">on this computer</span>' : "");
     rows.push(`<li><b>${esc(l.name)}</b> v${v.version}${kind}${on ? ' <span class="chip">in use</span>' : ""}` +
       `${v.trigger ? ` · trigger <code>${esc(v.trigger)}</code>` : ""}${v.description ? ` · ${esc(v.description)}` : ""}` +
       ` <span class="sub">${esc(new Date(v.created_at * 1000).toLocaleDateString())}</span></li>`);
@@ -651,7 +924,9 @@ $("add-lora").onsubmit = async e => {
 
 // ---------------------------------------------------------------- learning
 async function loadThemes() {
-  const r = await api("GET", "/api/themes");
+  let r;
+  try { r = await api("GET", "/api/themes"); }
+  catch (e) { $("themes").innerHTML = `<div class="card empty err">Themes unavailable: ${esc(e.message)}</div>`; return; }
   try { loras = Object.fromEntries((await api("GET", "/api/loras")).loras.map(l => [l.name, l])); } catch (e) { loras = {}; }
   kinds = r.kinds; showKindHint();
   const uploading = r.themes.some(t => t.upload_progress && t.upload_progress.state === "uploading");
@@ -797,7 +1072,7 @@ function showKindHint() {
 $("kind").onchange = showKindHint;
 $("pick").onclick = async () => {
   try { const r = await api("POST", "/api/pick-folder"); if (r.folder) $("folder").value = r.folder; }
-  catch (e) { toast(e.message); $("folder").focus(); }
+  catch (e) { showError(e.message); $("folder").focus(); }
 };
 $("add-theme").onsubmit = async e => {
   e.preventDefault();
@@ -834,36 +1109,45 @@ $("themes").onclick = async e => {
       await api("DELETE", `/api/themes/${b.dataset.remove}${n ? "?remote=1" : ""}`);
     }
     loadThemes();
-  } catch (err) { toast(err.message); b.disabled = false; }
+  } catch (err) { showError(err.message); b.disabled = false; }
 };
 
 // ---------------------------------------------------------------- tabs, refresh
 
 // ---------------------------------------------------------------- create
-let createOptions = null;
+let createOptions = null, createLoaded = false;
 async function loadCreateOptions() {
   try {
     const [av, lo] = await Promise.all([api("GET", "/api/avatars"), api("GET", "/api/loras")]);
     createOptions = {avatars: av.avatars || [], def: av.default, loras: lo.loras || []};
-  } catch (e) { createOptions = {avatars: [], def: null, loras: []}; }
+  } catch (e) {
+    if (createLoaded) return;  // a failed refresh keeps the lists that are shown
+    createOptions = {avatars: [], def: null, loras: [], error: e.message};
+  }
+  const refill = (sel, html) => {  // new options only when they changed, and the selection stays
+    if (sel._html === html) return;
+    const keep = sel.value;
+    sel.innerHTML = sel._html = html;
+    sel.value = [...sel.options].some(o => o.value === keep) ? keep : "";
+  };
   for (const sel of document.querySelectorAll(".avatar-select")) {
     const opts = [`<option value="">default${createOptions.def ? " (" + esc(createOptions.def) + ")" : ""}</option>`];
     if (!sel.dataset.noNone) opts.push(`<option value="none">${esc(sel.dataset.noneLabel || "no avatar")}</option>`);
     for (const a of createOptions.avatars) opts.push(`<option value="${esc(a.name)}">${esc(a.name)}</option>`);
-    sel.innerHTML = opts.join("");
+    refill(sel, opts.join(""));
   }
-  if (!createOptions.def) $("create-avatar").elements.make_default.checked = true;
   for (const id of ["create-video", "create-story", "create-photos"]) {
     const rows = $(id).querySelector(".lora-rows");
     if (!rows.children.length) addLoraRow($(id));
-    for (const sel of rows.querySelectorAll(".lora-select")) {
-      const keep = sel.value;
-      sel.innerHTML = loraOptionsHtml();
-      sel.value = [...sel.options].some(o => o.value === keep) ? keep : "";
-    }
+    for (const sel of rows.querySelectorAll(".lora-select")) refill(sel, loraOptionsHtml());
   }
   for (const id of ["create-video", "create-story", "create-photos"]) syncLoraOptions($(id));
-  renderAvatarKrea();
+  renderAvatars();
+  if (!createLoaded && !createOptions.error) {  // once, when the lists first arrive
+    createLoaded = true;
+    if (!createOptions.def) $("create-avatar").elements.make_default.checked = true;
+    resumePlan();
+  }
 }
 // A LoRA's kind is its current version's model: Wan (t2v) or Krea 2. Pickers list only what the form
 // can use: Wan on video/story, plus Krea 2 with a Krea first frame; Krea 2 only on no-person photos.
@@ -876,72 +1160,79 @@ function avatarKreaReady(value) {
   const a = createOptions && createOptions.avatars.find(x => x.name === name);
   return !!(a && a.krea_lora && a.krea_lora.ready);
 }
-function wanHtml(a) {
-  const w = a.wan_lora || {state: "none"}, busy = ["queued", "photos", "training"].includes(w.state);
-  const ready = w.ready ? ` · <code>${esc(w.ready.lora)}</code> v${esc(String(w.ready.version))}` : "";
-  const err = w.state === "failed" && w.error ? ` <span class="sub">${esc(w.error)}</span>` : "";
-  const canTrain = !busy && (a.media || {}).state === "ready";
-  return ` <span class="chip">Wan LoRA: ${esc(w.state)}</span>${ready}${err}` + (canTrain ?
-    ` <button class="small" data-wan-train="${esc(a.name)}" aria-label="${w.ready ? "Retrain" : "Train"} the Wan LoRA for ${esc(a.name)}">${w.ready ? "Retrain" : "Train"} Wan LoRA</button>` : "");
+const BUSY = ["queued", "photos", "clips", "training"];
+const statePill = state => pill(state === "ready" ? "done" : state === "failed" ? "failed" : state === "none" ? "stopped" : "queued", state);
+function avatarCard(a) {
+  const name = esc(a.name), k = a.krea_lora || {state: "none"}, w = a.wan_lora || {state: "none"}, m = a.media || {state: "none"};
+  const version = x => x.ready ? ` <code>${esc(x.ready.lora)}</code> v${esc(String(x.ready.version))}` : "";
+  const failed = x => x.state === "failed" && x.error ? `<div class="sub err">${esc(x.error)}</div>` : "";
+  const made = m.state === "ready";
+  return `<article class="card avatar">
+    <div class="avatar-head">
+      <span class="avatar-thumb"><img data-thumb="${name}" alt="" hidden></span>
+      <div><h3>${name}${createOptions.def === a.name ? ' <span class="chip">default</span>' : ""}</h3>
+        ${a.description ? `<div class="sub">${esc(a.description)}</div>` : ""}
+        <div class="sub">${esc(String(a.images))} image${a.images === 1 ? "" : "s"}${a.created_at ? ` · ${esc(new Date(a.created_at * 1000).toLocaleDateString())}` : ""}</div></div>
+    </div>
+    <div class="upload-line">Krea LoRA ${statePill(k.state)}${version(k)}${BUSY.includes(k.state) ? "" :
+      ` <button class="small" data-krea-train="${name}" aria-label="${k.ready ? "Retrain" : "Train"} the Krea LoRA for ${name}">${k.ready ? "Retrain" : "Train"}</button>`}${failed(k)}</div>
+    <div class="upload-line">Wan LoRA ${statePill(w.state)}${version(w)}${!BUSY.includes(w.state) && made ?
+      ` <button class="small" data-wan-train="${name}" aria-label="${w.ready ? "Retrain" : "Train"} the Wan LoRA for ${name}">${w.ready ? "Retrain" : "Train"}</button>` : ""}${failed(w)}</div>
+    <div class="upload-line">Media ${statePill(m.state)}${made ? ` ${esc(String(m.photos || 0))} photos, ${esc(String(m.clips || 0))} clips` : ""}${made ?
+      ` <button class="small" data-media-play="${name}" aria-label="Play ${name}'s preview clip">Play clip</button>` : ""}${BUSY.includes(m.state) ? "" :
+      ` <button class="small" data-media-make="${name}" aria-label="${made ? "Remake" : "Make"} media for ${name}">${made ? "Remake" : "Make"}</button>`}${failed(m)}</div>
+    <div class="media-preview" data-media-for="${name}"></div>
+  </article>`;
 }
-function renderAvatarKrea() {
-  const el = $("avatar-krea"), avs = (createOptions && createOptions.avatars) || [];
-  el.hidden = !avs.length;
-  if (!avs.length) return;
-  const rows = avs.map(a => {
-    const k = a.krea_lora || {state: "none"}, busy = ["queued", "photos", "training"].includes(k.state);
-    const ready = k.ready ? ` · ready: <code>${esc(k.ready.lora)}</code> v${esc(String(k.ready.version))}` : "";
-    const err = k.state === "failed" && k.error ? ` <span class="sub">${esc(k.error)}</span>` : "";
-    const m = a.media || {state: "none"}, mBusy = ["queued", "photos", "clips"].includes(m.state);
-    const mErr = m.state === "failed" && m.error ? ` <span class="sub">${esc(m.error)}</span>` : "";
-    const mInfo = m.state === "ready" ? ` · ${esc(String(m.photos || 0))} photos, ${esc(String(m.clips || 0))} clips` : "";
-    return `<li><b>${esc(a.name)}</b> <span class="chip">Krea LoRA: ${esc(k.state)}</span>${ready}${err}` +
-      (busy ? "" : ` <button class="small" data-krea-train="${esc(a.name)}">${k.ready ? "Retrain" : "Train"} Krea LoRA</button>`) +
-      wanHtml(a) +
-      ` <span class="chip">Media: ${esc(m.state)}</span>${mInfo}${mErr}` +
-      (m.state === "ready" ? ` <button class="small" data-media-play="${esc(a.name)}" aria-label="Play ${esc(a.name)}'s preview clip">Play clip</button>` : "") +
-      (mBusy ? "" : ` <button class="small" data-media-make="${esc(a.name)}" aria-label="${m.state === "ready" ? "Remake" : "Make"} media for ${esc(a.name)}">${m.state === "ready" ? "Remake" : "Make"} media</button>`) +
-      `<div class="media-preview" data-media-for="${esc(a.name)}"></div></li>`;
-  });
-  el.innerHTML = `<h3 style="font-size:13px;margin:12px 0 4px">Avatars: Krea 2 LoRAs and media (photos + 2 s clips, copied to your download folder)</h3><ul class="plain">${rows.join("")}</ul>`;
+function renderAvatars() {
+  const el = $("avatars"), avs = createOptions.avatars;
+  const html = avs.length ? avs.map(avatarCard).join("") : `<div class="card empty${createOptions.error ? " err" : ""}">${
+    createOptions.error ? `Avatars unavailable: ${esc(createOptions.error)}` : "No avatars yet. Make one below."}</div>`;
+  if (el._html === html) return;  // unchanged: leave the cards (and a playing clip) alone
+  el.innerHTML = el._html = html;
+  if (!$("panel-avatars").hidden) loadAvatarThumbs();
 }
-$("avatar-krea").onclick = async e => {
-  const wanBtn = e.target.closest("button[data-wan-train]");
-  if (wanBtn) {
-    const name = wanBtn.dataset.wanTrain;
-    if (!confirm(`Train a Wan LoRA for ${name} from its photos and clips? About 1 h on the trainer.`)) return;
-    try { await api("POST", `/api/avatars/${encodeURIComponent(name)}/wan-lora`); toast("Wan LoRA build queued"); await loadCreateOptions(); }
-    catch (err) { toast(err.message); }
-    return;
+// Thumbnails: the avatar's first image, through a 1-hour link from the API (asked for once per avatar version).
+const avatarThumbs = new Map();
+function loadAvatarThumbs() {
+  for (const img of document.querySelectorAll("#avatars img[data-thumb]:not([src])")) {
+    const a = createOptions.avatars.find(x => x.name === img.dataset.thumb), key = a && `${a.name}:${a.created_at}:${a.images}`;
+    if (!a) continue;
+    const hit = avatarThumbs.get(key);
+    if (!hit || Date.now() - hit.at > 50 * 60000) {
+      avatarThumbs.set(key, {at: Date.now(), url: api("GET", `/api/avatars/${encodeURIComponent(a.name)}`)
+        .then(r => ((r.images || [])[0] || {}).preview || "").catch(() => { avatarThumbs.delete(key); return ""; })});
+    }
+    img.onload = () => { img.hidden = false; };  // until then (or when the link fails) the grey square stays
+    avatarThumbs.get(key).url.then(url => { if (url) img.src = url; });
   }
-  const play = e.target.closest("button[data-media-play]"), make = e.target.closest("button[data-media-make]");
-  if (play) {
-    const name = play.dataset.mediaPlay, box = document.querySelector(`[data-media-for="${CSS.escape(name)}"]`);
-    try {
-      const r = await api("GET", `/api/avatars/${encodeURIComponent(name)}/media`);
+}
+$("avatars").onclick = async e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const d = b.dataset, name = d.kreaTrain || d.wanTrain || d.mediaPlay || d.mediaMake, path = `/api/avatars/${encodeURIComponent(name)}`;
+  try {
+    if (d.mediaPlay) {
+      const r = await api("GET", `${path}/media`);
       const clip = (r.files || []).find(f => /^clip_\d\.mp4$/.test(f.name));
       if (!clip) { toast("No clip yet"); return; }
-      box.innerHTML = "";
-      const v = document.createElement("video");
+      const box = document.querySelector(`[data-media-for="${CSS.escape(name)}"]`), v = document.createElement("video");
       Object.assign(v, {src: clip.url, muted: true, loop: true, autoplay: true, controls: true, playsInline: true});
       v.setAttribute("aria-label", `${name}: 2 second preview clip`);
-      v.style.maxWidth = "240px";
-      box.appendChild(v);
-    } catch (err) { toast(err.message); }
-    return;
-  }
-  if (make) {
-    const name = make.dataset.mediaMake;
-    if (!confirm(`Make photos and four 2 s clips of ${name}? About 6-8 min of GPU time (more without a Krea photo set).`)) return;
-    try { await api("POST", `/api/avatars/${encodeURIComponent(name)}/media`); toast("Avatar media queued"); await loadCreateOptions(); }
-    catch (err) { toast(err.message); }
-    return;
-  }
-  const b = e.target.closest("button[data-krea-train]");
-  if (!b) return;
-  if (!confirm(`Train a Krea 2 LoRA for ${b.dataset.kreaTrain}? About 1.5 h of GPU time.`)) return;
-  try { await api("POST", `/api/avatars/${b.dataset.kreaTrain}/krea-lora`); toast("Krea LoRA build queued"); await loadCreateOptions(); }
-  catch (err) { toast(err.message); }
+      box.replaceChildren(v);
+      return;
+    }
+    const [question, route, queued] =
+      d.kreaTrain ? [`Train a Krea 2 LoRA for ${name}? About 1.5 h of GPU time.`, "krea-lora", "Krea LoRA build queued"] :
+      d.wanTrain ? [`Train a Wan LoRA for ${name} from its photos and clips? About 1 h on the trainer.`, "wan-lora", "Wan LoRA build queued"] :
+      [`Make photos and four 2 s clips of ${name}? About 6-8 min of GPU time (more without a Krea photo set).`, "media", "Avatar media queued"];
+    if (!confirm(question)) return;
+    b.disabled = true;
+    await api("POST", `${path}/${route}`);
+    toast(queued);
+    await loadCreateOptions();
+  } catch (err) { showError(err.message); }
+  finally { b.disabled = false; }
 };
 // Several LoRAs per job: one row each (LoRA + weight). The API takes up to 2 Wan and 2 Krea 2 LoRAs per job
 // (1 more Krea 2 LoRA when an avatar's own Krea LoRA is used).
@@ -1055,7 +1346,7 @@ function syncLoraOptions(f) {
       const who = f.elements.avatar.value || (createOptions && createOptions.def) || "this avatar";
       hint.hidden = !(wantsKrea && !kreaFrame);
       hint.textContent = hint.hidden ? "" : `Krea 2 LoRAs need avatar "none", or an avatar with a ready Krea LoRA; ` +
-        `${who} has none (train one in the avatar list below, or pick another avatar).`;
+        `${who} has none (train one in the Avatars tab, or pick another avatar).`;
     }
   }
   for (const sel of sels) {
@@ -1068,7 +1359,7 @@ for (const id of ["create-video", "create-story", "create-photos"]) $(id).addEve
 for (const b of document.querySelectorAll(".seg button")) {
   b.onclick = () => {
     for (const o of document.querySelectorAll(".seg button")) o.setAttribute("aria-pressed", o === b);
-    for (const f of document.querySelectorAll("form.create, #avatar-generate")) f.hidden = f.dataset.kind !== b.dataset.kind;
+    for (const f of document.querySelectorAll("form.create")) f.hidden = f.dataset.kind !== b.dataset.kind;
     $("create-err").textContent = "";
   };
 }
@@ -1146,8 +1437,16 @@ function videoLong(f) {
   const secs = Number(f.elements.seconds.value) || 5;
   return {secs, beats: secs > 5, anchor: secs > 10 && f.elements.avatar.value !== "none"};
 }
+// Draft and Best can't be combined: ticking Draft clears and locks Best.
+function draftBest(f) {
+  const best = f.elements.best, draft = f.elements.draft.checked;
+  if (draft) best.checked = false;
+  best.disabled = draft;
+  best.closest("label").title = draft ? "Not with Draft: untick Draft to use this" : "";
+}
 function videoForm() {
   const f = $("create-video"), long = videoLong(f);
+  draftBest(f);
   for (const el of f.querySelectorAll(".long-only")) el.hidden = !long.beats;
   f.querySelector(".plan-first-row").hidden = long.secs <= 15;  // the planner's range
   for (const el of f.querySelectorAll(".anchor-only")) el.hidden = !long.anchor;
@@ -1159,28 +1458,41 @@ function videoForm() {
   est.textContent = `${segs} segments of 5 s: at least ${segs * 5 + 5} min to render (~5 min per segment plus smoothing and sound; more with Best or Upscale).`;
 }
 // "Plan first": a plan-only job (first frame + beats, no video); its beats and seed fill the form for review.
-$("create-video").querySelector(".plan-first").onclick = async () => {
+// The job id and the form are kept in localStorage, so a reload (or closing the tab) picks the plan up again.
+const PLAN_KEY = "vidgen.plan", PLAN_MAX_MS = 45 * 60000;
+let planBusy = false;
+function formSnapshot(f) {
+  const fields = {};
+  for (const el of f.elements) if (el.name) fields[el.name] = el.type === "checkbox" ? el.checked : el.value;
+  return {fields, loras: [...f.querySelectorAll(".lora-row")].map(row => (
+    {name: row.querySelector(".lora-select").value, weight: row.querySelector(".lora-weight").value}))};
+}
+function formRestore(f, snap) {
+  for (const [name, value] of Object.entries(snap.fields || {})) {
+    const el = f.elements[name];
+    if (!el || el.type === "file") continue;
+    if (el.type === "checkbox") el.checked = value === true; else el.value = value;
+  }
+  f.querySelector(".lora-rows").replaceChildren();
+  for (const row of snap.loras || []) addLoraRow(f, row.name, row.weight);
+  if (!f.querySelector(".lora-row")) addLoraRow(f);
+}
+async function followPlan(jobId, startedAt) {
   const f = $("create-video"), status = $("plan-first-status"), btn = f.querySelector(".plan-first");
   const img = f.querySelector(".plan-first-frame");
+  planBusy = true; btn.disabled = true; btn.setAttribute("aria-busy", "true");
   try {
-    if (btn.getAttribute("aria-busy") === "true") return;
-    if (!(f.elements.prompt.value || "").trim()) throw new Error("Write a prompt first");
-    if ((f.elements.beats.value || "").trim() && !confirm("Replace the beats you wrote with the planner's?")) return;
-    const job = createBody("video", f);
-    delete job.beats;
-    job.plan_only = true;
-    btn.setAttribute("aria-busy", "true");
-    status.textContent = "Planning: starting the render machine if needed…";
-    const r = await api("POST", "/api/create", {job, out: (f.elements.out.value || "").trim() || undefined});
     let j;
-    for (let waited = 0; ; waited += 10) {
-      if (waited > 45 * 60) throw new Error("Still planning after 45 min; it will show in History when it's done");
-      await new Promise(res => setTimeout(res, 10000));
-      j = await api("GET", `/api/jobs/${r.job_id}`);
-      if (["done", "failed", "cancelled"].includes(j.status)) break;
-      status.textContent = `Planning: ${j.progress || j.status}…`;
+    for (;;) {
+      if (Date.now() - startedAt > PLAN_MAX_MS) throw new Error("Still planning after 45 min; it will show in History when it's done");
+      try {
+        j = await api("GET", `/api/jobs/${jobId}`);
+        if (["done", "failed", "cancelled"].includes(j.status)) break;
+        status.textContent = `Planning (${roughly((Date.now() - startedAt) / 1000)} so far): ${j.progress || j.status}…`;
+      } catch (e) { status.textContent = `Planning: can't check on it right now (${e.message}); trying again…`; }
+      await sleep(10000);
     }
-    if (j.status !== "done") throw new Error(`Plan ${j.status}: ${j.error || ""}`);
+    if (j.status !== "done") throw new Error(`Plan ${j.status}${j.error ? ": " + j.error : ""}`);
     const res = typeof j.result === "string" ? JSON.parse(j.result) : (j.result || {});
     f.elements.beats.value = res.beats || "";
     if (res.seed !== undefined && res.seed !== null) f.elements.seed.value = res.seed;
@@ -1189,12 +1501,48 @@ $("create-video").querySelector(".plan-first").onclick = async () => {
     if (kf) img.src = kf;
     videoForm();
     status.textContent = "Plan ready: edit the beats, then Make video (same seed, same first frame).";
+    toast("Plan ready: review the beats in Create, then Make video");
   } catch (err) {
     status.textContent = err.message;
   } finally {
-    btn.setAttribute("aria-busy", "false");
+    store.del(PLAN_KEY);
+    planBusy = false; btn.disabled = false; btn.setAttribute("aria-busy", "false");
   }
+}
+function resumePlan() {
+  const plan = store.get(PLAN_KEY);
+  if (!plan || planBusy) return;
+  if (!/^[0-9a-f]{32}$/.test(plan.job_id || "") || !(Date.now() - plan.at < PLAN_MAX_MS)) { store.del(PLAN_KEY); return; }
+  const f = $("create-video");
+  formRestore(f, plan.form || {});
+  videoForm(); syncLoraOptions(f);
+  toast("Picking up the plan you started; see Create");
+  followPlan(plan.job_id, plan.at);
+}
+$("create-video").querySelector(".plan-first").onclick = async () => {
+  const f = $("create-video"), status = $("plan-first-status");
+  if (planBusy) return;
+  let r;
+  try {
+    if (!(f.elements.prompt.value || "").trim()) throw new Error("Write a prompt first");
+    if ((f.elements.beats.value || "").trim() && !confirm("Replace the beats you wrote with the planner's?")) return;
+    const job = createBody("video", f);
+    delete job.beats;
+    job.plan_only = true;
+    planBusy = true;
+    status.textContent = "Planning: starting the render machine if needed…";
+    r = await api("POST", "/api/create", {job, out: (f.elements.out.value || "").trim() || undefined});
+  } catch (err) { planBusy = false; status.textContent = err.message; return; }
+  const at = Date.now();
+  store.set(PLAN_KEY, {job_id: r.job_id, at, form: formSnapshot(f)});
+  followPlan(r.job_id, at);
 };
+const advanced = $("video-advanced");
+advanced.open = store.get("vidgen.advanced") === true;
+advanced.addEventListener("toggle", () => store.set("vidgen.advanced", advanced.open));
+// A field in the closed section that fails validation: open the section so the browser can point at it.
+$("create-video").addEventListener("invalid", e => { if (advanced.contains(e.target)) advanced.open = true; }, true);
+$("create-story").addEventListener("change", () => draftBest($("create-story")));
 $("create-video").addEventListener("input", videoForm);
 $("create-video").addEventListener("change", videoForm);
 videoForm();
@@ -1202,7 +1550,7 @@ $("create-photos").addEventListener("input", photoForm);
 $("create-photos").addEventListener("change", photoForm);
 photoForm();
 
-for (const f of document.querySelectorAll("form.create:not(#create-avatar)")) {
+for (const f of document.querySelectorAll("form.create")) {
   f.onsubmit = async e => {
     e.preventDefault();
     $("create-err").textContent = "";
@@ -1239,7 +1587,7 @@ function avatarRender() {
   $("avatar-go").textContent = avatarFiles.length ? `Create avatar from ${avatarFiles.length} photo${avatarFiles.length > 1 ? "s" : ""}` : "Create avatar";
 }
 $("avatar-files").onchange = e => {
-  $("create-err").textContent = "";
+  $("avatar-err").textContent = "";
   const bad = [];
   for (const file of e.target.files) {
     if (!/^image\/(png|jpeg|webp)$/.test(file.type)) { bad.push(`${file.name}: not png/jpg/webp`); continue; }
@@ -1248,7 +1596,7 @@ $("avatar-files").onchange = e => {
     avatarFiles.push({file, url: URL.createObjectURL(file)});
   }
   e.target.value = "";
-  if (bad.length) $("create-err").textContent = "Skipped " + bad.join("; ");
+  if (bad.length) $("avatar-err").textContent = "Skipped " + bad.join("; ");
   avatarRender();
 };
 $("avatar-thumbs").onclick = e => {
@@ -1268,7 +1616,7 @@ const readBase64 = file => new Promise((ok, fail) => {
 $("avatar-generate").onsubmit = async e => {
   e.preventDefault();
   const f = $("avatar-generate"), btn = f.querySelector("button[type=submit]");
-  $("create-err").textContent = ""; btn.disabled = true;
+  $("avatar-gen-err").textContent = ""; btn.disabled = true;
   try {
     const d = Object.fromEntries(new FormData(f).entries());
     const r = await api("POST", "/api/create", {job: {type: "avatar", description: d.description.trim(), model: d.model,
@@ -1276,13 +1624,13 @@ $("avatar-generate").onsubmit = async e => {
       krea_lora: f.elements.krea_lora.checked});
     toast(`Generating candidates (${r.job_id.slice(0, 8)}); Pick them in History when they've downloaded`);
     loadJobs(); loadStatus();
-  } catch (err) { $("create-err").textContent = err.message || String(err); }
+  } catch (err) { $("avatar-gen-err").textContent = err.message || String(err); }
   finally { btn.disabled = false; }
 };
 $("create-avatar").onsubmit = async e => {
   e.preventDefault();
   const f = $("create-avatar"), btn = $("avatar-go");
-  $("create-err").textContent = "";
+  $("avatar-err").textContent = "";
   btn.disabled = true; btn.textContent = `Uploading ${avatarFiles.length} photo${avatarFiles.length > 1 ? "s" : ""}…`;
   try {
     const images = await Promise.all(avatarFiles.map(a => readBase64(a.file)));
@@ -1293,7 +1641,7 @@ $("create-avatar").onsubmit = async e => {
     for (const a of avatarFiles) URL.revokeObjectURL(a.url);
     avatarFiles = []; f.reset();
     await loadCreateOptions();
-  } catch (err) { $("create-err").textContent = err.message || String(err); }
+  } catch (err) { $("avatar-err").textContent = err.message || String(err); }
   finally { avatarRender(); }
 };
 
@@ -1302,13 +1650,19 @@ for (const tab of document.querySelectorAll('[role="tab"]')) {
     for (const t of document.querySelectorAll('[role="tab"]')) {
       const on = t === tab; t.setAttribute("aria-selected", on); $(t.getAttribute("aria-controls")).hidden = !on;
     }
+    if (tab.id === "tab-create" || tab.id === "tab-avatars") loadCreateOptions();  // avatar and LoRA states move on their own
+    if (tab.id === "tab-avatars" && createOptions) loadAvatarThumbs();
   };
 }
 $("refresh").onclick = () => { loadStatus(); loadJobs(); loadThemes(); loadCreateOptions(); };
 loadStatus(); loadJobs(); loadThemes(); loadCreateOptions();
 setInterval(loadStatus, 15000);
 setInterval(loadJobs, 30000);
+setInterval(fillTimes, 15000);
 setInterval(() => { if (!$("panel-learning").hidden) loadThemes(); }, 30000);
+setInterval(() => {
+  if (!document.hidden && !($("panel-create").hidden && $("panel-avatars").hidden)) loadCreateOptions();
+}, 30000);
 </script>
 </body>
 </html>

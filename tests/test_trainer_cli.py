@@ -954,4 +954,61 @@ vidgen.local_lora_versions = lambda: {("moody", 1): 40}
 ll = ui.list_loras()
 assert [v.get("local") for v in ll["loras"][0]["versions"]] == [True, False], ll
 _stubs.expect_error(ui.pick_candidate, {"job_id": "0" * 32, "candidate": 1}, exc=KeyError)
+
+# dashboard: cancel, avatar details, and the History previews of downloaded files
+posted.clear()
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"status": "cancelled"}
+assert ui.cancel_job("c" * 32) == {"status": "cancelled"} and posted[-1][:2] == ("POST", "/jobs/" + "c" * 32 + "/cancel")
+_stubs.expect_error(ui.cancel_job, "../status", contains="job id")
+ui.get_avatar(" Mira ")
+assert posted[-1][:2] == ("GET", "/avatars/mira")
+_stubs.expect_error(ui.get_avatar, "mira/media", contains="avatar name")
+pv = tempfile.mkdtemp()
+for fname, data in (("photo_1.png", b"\x89PNG-bytes"), ("prompts.txt", b"a prompt"), ("clip.MP4", b"mp4-bytes")):
+    with open(os.path.join(pv, fname), "wb") as fh:
+        fh.write(data)
+saved = [os.path.join(pv, n) for n in ("photo_1.png", "prompts.txt", "clip.MP4", "deleted.png")]
+vidgen.load_jobs = lambda: {"d" * 32: {"type": "photos", "status": "downloaded", "out": pv, "files": saved},
+                            "e" * 32: {"type": "photos", "status": "waiting", "out": pv, "files": saved}}
+assert ui.job_file("d" * 32, 0) == (saved[0], "image/png")
+assert ui.job_file("d" * 32, 2) == (saved[2], "video/mp4"), "the extension's case does not matter"
+for jid_, n in (("d" * 32, 1),    # not an image or a video
+                ("d" * 32, 3),    # listed by the watcher, deleted since
+                ("d" * 32, 4), ("d" * 32, -1),  # outside the job's list
+                ("e" * 32, 0),    # not downloaded yet
+                ("0" * 32, 0)):   # not a job of this computer
+    _stubs.expect_error(ui.job_file, jid_, n, exc=KeyError)
+
+# ...and the same through the server: the token is needed, files stream with their type, cancel answers 200 or 202
+from http.server import ThreadingHTTPServer  # noqa: E402
+srv = ThreadingHTTPServer(("127.0.0.1", 0), None)
+srv.RequestHandlerClass = ui.make_handler(srv.server_port, "tok")
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def ui_request(method, path, token="tok"):
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=10)
+    conn.request(method, path, headers={"X-UI-Token": token} if token else {})
+    r = conn.getresponse()
+    got = (r.status, r.getheader("Content-Type"), r.read())
+    conn.close()
+    return got
+
+
+files_url = "/api/jobs/" + "d" * 32 + "/files/"
+assert ui_request("GET", files_url + "0") == (200, "image/png", b"\x89PNG-bytes")
+assert ui_request("GET", files_url + "2")[:2] == (200, "video/mp4")
+assert ui_request("GET", files_url + "0", token=None)[0] == 403, "files need the page's token"
+assert ui_request("GET", files_url + "1")[0] == 404 and ui_request("GET", files_url + "3")[0] == 404
+assert ui_request("GET", files_url + "x")[0] == 404 and ui_request("GET", "/api/jobs/zz/files/0")[0] == 404
+assert ui_request("POST", "/api/jobs/" + "c" * 32 + "/cancel")[0] == 200
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"status": "running", "cancel_requested": True}
+assert ui_request("POST", "/api/jobs/" + "c" * 32 + "/cancel")[0] == 202, "a running job stops a little later"
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"name": "mira", "images": [{"n": 1, "preview": "https://s3/x"}]}
+status, _, body = ui_request("GET", "/api/avatars/mira")
+assert status == 200 and json.loads(body)["images"][0]["preview"] == "https://s3/x" and posted[-1][:2] == ("GET", "/avatars/mira")
+page_status, page_type, page = ui_request("GET", "/", token=None)
+assert page_status == 200 and b"__UI_TOKEN__" not in page and b'const TOKEN = "tok"' in page
+srv.shutdown()
+srv.server_close()
 print("trainer and cli tests passed")

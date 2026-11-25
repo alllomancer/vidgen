@@ -167,6 +167,29 @@ def prefetch(folder, threads=PREFETCH_THREADS):
     return total
 
 
+def _model_folder(model):
+    """Where a model's files are on disk: the path itself, or the Hugging Face cache snapshot of a repo
+    id. None when it isn't downloaded yet (from_pretrained will fetch it; nothing to warm)."""
+    if os.path.isdir(model):
+        return model
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(model, local_files_only=True)
+    except Exception:  # not in the cache, or the cache can't be read: loading works without the warm-up
+        return None
+
+
+def prefetch_model(model):
+    """prefetch() for a model given as a path or repo id; a warm-up only, so it never fails the load."""
+    try:
+        folder = _model_folder(model)
+        return prefetch(folder) if folder else 0
+    except OSError as e:
+        print(f"prefetch of {model} skipped: {e}", flush=True)
+        return 0
+
+
 def _load_wan(pipeline_cls, repo, lightning_dir):
     """A Wan2.2 A14B pipeline: two 14B experts (~28 GB each in bf16), so components
     move to the GPU only while they run; the 128 GB of RAM holds the rest."""
@@ -305,16 +328,44 @@ def _to_uint8_frames(frames):
     return frames
 
 
+# Text-encoder outputs of recent prompts. Variations and avatar candidates repeat one prompt, as do the
+# segments of a long take without beats; a hit skips moving the ~11 GB text encoder to the GPU and back.
+# Keyed per pipeline; LoRAs only touch the transformers, so they don't change the embeddings.
+EMBED_CACHE_SIZE = 16
+_embed_cache = {}  # (model, prompt, negative, cfg) -> (embeds, negative embeds or None) on the CPU, oldest first
+
+
+def _prompt_embeds(name, pipe, prompt, negative_prompt, cfg):
+    """`prompt_embeds`/`negative_prompt_embeds` kwargs for a Wan pipeline call, encoded once per prompt.
+    The same encoding the pipeline does itself (512 tokens; the negative only with CFG)."""
+    key = (name, prompt, negative_prompt, cfg)
+    if key in _embed_cache:
+        _embed_cache[key] = _embed_cache.pop(key)  # mark as most recently used
+    else:
+        with torch.no_grad():
+            embeds, negative = pipe.encode_prompt(prompt=prompt, negative_prompt=negative_prompt,
+                                                  do_classifier_free_guidance=cfg, max_sequence_length=512)
+        _embed_cache[key] = (embeds.to("cpu"), negative.to("cpu") if negative is not None else None)
+        for old in list(_embed_cache)[:-EMBED_CACHE_SIZE]:
+            del _embed_cache[old]
+    embeds, negative = _embed_cache[key]
+    return dict(prompt_embeds=embeds.to("cuda"),
+                negative_prompt_embeds=negative.to("cuda") if negative is not None else None)
+
+
 def _render_segment(prompt, negative_prompt, num_frames, width, height, seed, image):
     """One Wan pass (<= 81 frames): T2V, or I2V from `image`. Returns uint8 (N, H, W, 3)."""
-    kwargs = dict(prompt=prompt, negative_prompt=negative_prompt, width=width, height=height,
-                  num_frames=num_frames, **_sampling(), generator=_generator(seed),
+    sampling = _sampling()
+    kwargs = dict(width=width, height=height, num_frames=num_frames, **sampling, generator=_generator(seed),
                   output_type="np", callback_on_step_end=_on_step)
+    cfg = sampling["guidance_scale"] > 1.0
     if image is not None:
         i2v = _apply_loras(_swap_to("i2v", _load_i2v))
+        kwargs.update(_prompt_embeds("i2v", i2v, prompt, negative_prompt, cfg))
         frames = i2v(image=fit(image, width, height), **kwargs).frames[0]
     else:
         t2v = _apply_loras(_swap_to("t2v", _load_t2v))
+        kwargs.update(_prompt_embeds("t2v", t2v, prompt, negative_prompt, cfg))
         frames = t2v(**kwargs).frames[0]
     return _to_uint8_frames(frames)
 
@@ -599,15 +650,17 @@ def generate_avatar_candidates(description, count, seed=None):
     t2v = _apply_loras(_swap_to("t2v", _load_t2v))  # the worker clears job LoRAs; this drops leftovers
     prompt = avatar_prompt(description)
     base = seed if seed is not None else int.from_bytes(os.urandom(4), "big")
+    sampling = _sampling()
     images = []
     for i in range(count):
         frame = t2v(
-            prompt=prompt,
-            negative_prompt="blurry, distorted face, extra limbs, text, watermark",
+            # the same prompt for every candidate: encoded once
+            **_prompt_embeds("t2v", t2v, prompt, "blurry, distorted face, extra limbs, text, watermark",
+                             sampling["guidance_scale"] > 1.0),
             width=704,
             height=1280,
             num_frames=1,
-            **_sampling(),
+            **sampling,
             generator=_generator(base + i),
             output_type="np",
             callback_on_step_end=_on_step,
@@ -648,6 +701,7 @@ def _edit_sampling(best=False):
 def _load_edit():
     from diffusers import QwenImageEditPlusPipeline
 
+    prefetch_model(EDIT_MODEL)  # ~58 GB: warm the page cache in parallel, as for Wan
     pipe = QwenImageEditPlusPipeline.from_pretrained(EDIT_MODEL, torch_dtype=torch.bfloat16)
     steps = _edit_lightning()
     if steps:
@@ -891,6 +945,7 @@ def narrate(text, voice, out_path):
 def _load_vlm():
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+    prefetch_model(VLM_MODEL)  # ~16 GB
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         VLM_MODEL, torch_dtype=torch.bfloat16, device_map="cuda"
     )
