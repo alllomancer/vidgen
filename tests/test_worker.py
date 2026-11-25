@@ -256,10 +256,16 @@ assert anchored == [], "no anchoring without anchor_every"
 # halo: segments 2+ of a long take start from a softened copy of the previous last frame
 softened = []
 models.soften = lambda image, radius=None: softened.append((image, radius)) or f"soft:{image}"
+assert models.CONDITION_BLUR == 0, "off by default (live check 2026-11-25: it didn't reduce the halo)"
+segments.clear()
+models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1)
+assert not softened, "blur 0: nothing softened"
+real_blur = models.CONDITION_BLUR
+models.CONDITION_BLUR = 0.8  # the mechanism, when switched on
 segments.clear(), captured.clear()
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1)
 assert segments[0][2] is None and all(str(s[2]).startswith("soft:img:") for s in segments[1:]), segments[:3]
-assert len(softened) == 9 and all(r == models.CONDITION_BLUR == 0.8 for _, r in softened)
+assert len(softened) == 9 and all(r == 0.8 for _, r in softened)
 assert not any(str(f).startswith("soft:") for f in captured[-1]), "the frames you see are never softened"
 segments.clear(), softened.clear()
 models.generate_video("/o.mp4", "x", seconds=5, fps=16, seed=1, image="key")
@@ -268,15 +274,15 @@ assert segments[0][2] == "key" and not softened, "5 s: one segment, nothing soft
 wdb = tempfile.mkdtemp()
 segments.clear()
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, work_dir=wdb)
-real_blur = models.CONDITION_BLUR
 models.CONDITION_BLUR = 1.2
 segments.clear()
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, work_dir=wdb)
 assert len(segments) == 10, "new blur: rendered again"
-models.CONDITION_BLUR = real_blur
 softened.clear(), segments.clear()
+models.CONDITION_BLUR = 0.8
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, anchor_every=3, reanchor=lambda frame, n=0: f"a:{frame}")
 assert len(softened) == 6 and all(not str(img).startswith("a:") for img, _ in softened), "re-anchored frames aren't softened"
+models.CONDITION_BLUR = real_blur
 models.soften = lambda image, radius=None: image
 models.write_video = real_write_video
 models._render_segment = real_fake

@@ -97,3 +97,10 @@
 **Decision**: Single takes make the first frame before planning and give it to the planner with a keep-to-the-frame rule; `plan_only` returns that plan as beats (";" turned into "," so the API's beat parser accepts them back), the seed and the frame, and a planner failure fails the job instead of falling back.
 **Reason**: Live: the text-only planner invented strangers on the water and glitter; users only saw the plan after an hour. A plan-only job that silently fell back to the prompt would give the user nothing to review.
 **Alternatives considered**: Planning after the first segment (too late to change the plan); a separate `plan` job type (duplicates video validation; `video` + `plan_only` reuses it).
+
+## D15 — [2026-11-25] — Long-take quality: halo blur off
+
+**Status**: Accepted (supersedes D13's default)
+**Decision**: `CONDITION_BLUR` is 0 (off); the softening code stays, switchable, while the halo's cause is investigated.
+**Reason**: Live check: with 0.8 px the halo at 47.5 s was as strong as without, and faces/coats showed over-sharpened texture; the edge-amplification explanation was wrong or incomplete.
+**Alternatives considered**: A stronger blur (would soften detail further without evidence it addresses the cause).

@@ -441,12 +441,13 @@ def _load_segments(work_dir, key):
     return parts
 
 
-CONDITION_BLUR = 0.8  # px: the frame each later segment starts from is softened (stops the halo compounding)
+# px: soften the frame each later segment starts from. Off: live check 2026-11-25 showed 0.8 px didn't reduce the
+# halo and over-sharpened textures; kept switchable while the halo's cause is investigated.
+CONDITION_BLUR = 0
 
 
 def soften(image, radius=CONDITION_BLUR):
-    """A lightly blurred copy of a PIL image. Wan I2V reproduces and slightly strengthens the edge contrast of the
-    frame it starts from; over ten seams that becomes a bright halo around the subject."""
+    """A lightly blurred copy of a PIL image (for the frame a segment starts from; see CONDITION_BLUR)."""
     from PIL import ImageFilter
 
     return image.filter(ImageFilter.GaussianBlur(radius)) if radius else image
