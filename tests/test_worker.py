@@ -163,6 +163,7 @@ written = []
 models._render_segment = fake_segment
 models._to_uint8_frames = lambda f: f
 models.Image = mock.MagicMock(fromarray=lambda f: f"img:{f}")
+models.soften = lambda image, radius=None: image  # identity here; the halo test below marks it
 models.write_video = lambda frames, path, fps=16, grain=None: written.append((path, len(frames), fps, grain))
 sys.modules["enhance"] = types.SimpleNamespace(
     interpolate=lambda frames, check: [x for f in frames for x in (f, f)][:-1],
@@ -252,6 +253,28 @@ assert transfers == [("stats", "img:s2_80~"), ("stats", "img:s5_80~"), ("stats",
 anchored.clear(), segments.clear()
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1)
 assert anchored == [], "no anchoring without anchor_every"
+# halo: segments 2+ of a long take start from a softened copy of the previous last frame
+softened = []
+models.soften = lambda image, radius=None: softened.append((image, radius)) or f"soft:{image}"
+segments.clear(), captured.clear()
+models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1)
+assert segments[0][2] is None and all(str(s[2]).startswith("soft:img:") for s in segments[1:]), segments[:3]
+assert len(softened) == 9 and all(r == models.CONDITION_BLUR == 0.8 for _, r in softened)
+assert not any(str(f).startswith("soft:") for f in captured[-1]), "the frames you see are never softened"
+segments.clear(), softened.clear()
+models.generate_video("/o.mp4", "x", seconds=5, fps=16, seed=1, image="key")
+assert segments[0][2] == "key" and not softened, "5 s: one segment, nothing softened"
+# the blur is part of the resume key: segments saved with another radius are not reused
+wdb = tempfile.mkdtemp()
+segments.clear()
+models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, work_dir=wdb)
+real_blur = models.CONDITION_BLUR
+models.CONDITION_BLUR = 1.2
+segments.clear()
+models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, work_dir=wdb)
+assert len(segments) == 10, "new blur: rendered again"
+models.CONDITION_BLUR = real_blur
+models.soften = lambda image, radius=None: image
 models.write_video = real_write_video
 models._render_segment = real_fake
 segments.clear()
@@ -315,12 +338,12 @@ plans = []
 real_plan_segments = models.plan_segments
 
 
-def good_plan(prompt, n, cast=(), seconds=None):
+def good_plan(prompt, n, cast=(), seconds=None, image=None):
     plans.append((prompt, n, list(cast), seconds))
     return [f"step {i}" for i in range(n)]
 
 
-def boom(prompt, n, cast=(), seconds=None):
+def boom(prompt, n, cast=(), seconds=None, image=None):
     raise ValueError("model did not return JSON")
 
 
@@ -330,10 +353,10 @@ worker.WORK_ROOT = tempfile.mkdtemp()
 res = worker.run_video({"client": "m", "job_id": "j"}, dict(base, seed=1, seconds=50), tempfile.mkdtemp())
 assert plans == [("p", 10, [], 50)] and res["segment_prompts"] == [f"step {i}" for i in range(10)], (plans, res)
 assert takes[0]["segment_prompts"] == [f"step {i}" for i in range(10)]
-for bad in (lambda p, n, cast=(), seconds=None: ["a"] * (n - 1),
-            lambda p, n, cast=(), seconds=None: ["a"] * (n - 1) + ["  "],
-            lambda p, n, cast=(), seconds=None: ["a"] * (n - 1) + ["x" * 501],
-            lambda p, n, cast=(), seconds=None: "a" * n, boom):
+for bad in (lambda p, n, cast=(), seconds=None, image=None: ["a"] * (n - 1),
+            lambda p, n, cast=(), seconds=None, image=None: ["a"] * (n - 1) + ["  "],
+            lambda p, n, cast=(), seconds=None, image=None: ["a"] * (n - 1) + ["x" * 501],
+            lambda p, n, cast=(), seconds=None, image=None: "a" * n, boom):
     models.plan_segments = bad
     takes.clear()
     worker.WORK_ROOT = tempfile.mkdtemp()
@@ -356,9 +379,41 @@ plans.clear()
 worker.run_video({"client": "m", "job_id": "j"}, dict(base, seed=1, seconds=15), tempfile.mkdtemp())
 worker.run_video({"client": "m", "job_id": "j"}, dict(base, seed=1, seconds=50, beats=BEATS3), tempfile.mkdtemp())
 assert plans == [], "no planner for takes of up to 15 s or with the user's beats"
-models.plan_segments = lambda p, n, cast=(), seconds=None: (_ for _ in ()).throw(models.JobCancelled("stop"))
+models.plan_segments = lambda p, n, cast=(), seconds=None, image=None: (_ for _ in ()).throw(models.JobCancelled("stop"))
 _stubs.expect_error(worker.run_video, {"client": "m", "job_id": "j"}, dict(base, seed=1, seconds=50),
                     tempfile.mkdtemp(), exc=models.JobCancelled)
+# the first frame is made before the planner, which sees it; the render reuses it (one keyframe)
+events, plan_images = [], []
+models.plan_segments = lambda p, n, cast=(), seconds=None, image=None: events.append("plan") or plan_images.append(image) \
+    or [f"s{i}" for i in range(n)]
+worker.load_cast = lambda params, workdir: [("dana", [Img(0)], "d")]
+real_mk = models.make_keyframe
+models.make_keyframe = lambda cast, scene, w, h, seed, best=False: events.append("kf") or Out("kf")
+real_gv = models.generate_video
+models.generate_video = lambda out, **kw: events.append("video") or takes.append(kw) or out
+takes.clear()
+worker.WORK_ROOT = tempfile.mkdtemp()
+res = worker.run_video({"client": "m", "job_id": "ff1"}, dict(base, seed=1, seconds=50, sound=False), tempfile.mkdtemp())
+assert events == ["kf", "plan", "video"], events
+assert plan_images[-1] and plan_images[-1].endswith("first_frame.png") and takes[0]["image"].n == "kf"
+assert "keyframe_key" in res and res["segment_prompts"] == [f"s{i}" for i in range(10)]
+worker.load_cast = lambda params, workdir: []
+events.clear()
+worker.run_video({"client": "m", "job_id": "ff2"}, dict(base, seed=1, seconds=50, sound=False, image_model="wan"),
+                 tempfile.mkdtemp())
+assert events == ["plan", "video"] and plan_images[-1] is None, "no first frame: the planner works from text"
+# plan only: the first frame and the plan, no video or sound; beats every 5 s and the seed to render them with
+events.clear(), takes.clear()
+worker.load_cast = lambda params, workdir: [("dana", [Img(0)], "d")]
+res = worker.run_video({"client": "m", "job_id": "pl1"}, dict(base, seed=4, seconds=50, plan_only=True), tempfile.mkdtemp())
+assert events == ["kf", "plan"] and not takes, events
+assert res["plan_only"] is True and res["seed"] == 4 and res["segment_prompts"] == [f"s{i}" for i in range(10)]
+assert res["beats"].splitlines() == [f"{5 * i}: s{i}" for i in range(10)] and res["keyframe_key"] == "outputs/keyframe.png"
+models.plan_segments = lambda p, n, cast=(), seconds=None, image=None: (_ for _ in ()).throw(ValueError("no JSON"))
+_stubs.expect_error(worker.run_video, {"client": "m", "job_id": "pl2"}, dict(base, seed=4, seconds=50, plan_only=True),
+                    tempfile.mkdtemp(), contains="could not write a timeline", exc=RuntimeError)
+worker.load_cast = lambda params, workdir: []
+models.make_keyframe, models.generate_video = real_mk, real_gv
 models.plan_segments = real_plan_segments
 # plan_segments itself: asks the VLM for n prompts, refuses a wrong count
 real_chat = models._chat
@@ -372,6 +427,15 @@ models._chat = lambda messages, max_new_tokens=1024, **k: asked.append(messages[
     'Sure {here}: {"segments": ["a", "b", "c", "d"]} Note: {done}'
 assert models.plan_segments("a dog runs", 4, seconds=18) == ["a", "b", "c", "d"], "first JSON object, prose around it"
 assert "18-second" in asked[-1] and "last segment" in asked[-1]
+# with the first frame: the image comes first, with the keep-to-the-frame rule
+asked_full = []
+models._chat = lambda messages, max_new_tokens=1024, **k: asked_full.append(messages) or '{"segments": ["a", "b", "c", "d"]}'
+models.plan_segments("a dog runs", 4, image="/w/first_frame.png")
+content = asked_full[-1][0]["content"]
+assert content[0] == {"type": "image", "image": "file:///w/first_frame.png"}, content[0]
+assert "opening frame" in content[1]["text"] and "no one else appears" in content[1]["text"]
+models.plan_segments("a dog runs", 4)
+assert asked_full[-1][0]["content"][0]["type"] == "text", "no first frame: text only"
 models._chat = real_chat
 # realism: look/candid on the Wan prompt and the keyframe scene, best keyframe, grain
 takes.clear()

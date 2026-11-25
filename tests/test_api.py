@@ -102,6 +102,12 @@ assert v["beats"] == BEATS3, v.get("beats")
 _, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "beats": BEATS3})
 assert v["beats"] == BEATS3
 assert h._summary("video", v)[1]["beats"] == 3 and "beats" not in h._summary("video", {"seconds": 5})[1]
+_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "plan_only": True})
+assert v["plan_only"] is True and h._summary("video", v)[1]["plan"] is True
+assert "plan_only" not in h._validate("m", {"type": "video", "prompt": "x", "seconds": 50})[1]
+for bad, msg in [({"seconds": 15}, "over 15 s"), ({"beats": "0: a; 10: b"}, "beats"), ({"seconds": 5, "variations": 2}, "over 15 s")]:
+    _stubs.expect_error(h._validate, "m", dict({"type": "video", "prompt": "x", "seconds": 50, "plan_only": True}, **bad),
+                        contains=msg)
 _, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "anchor_every": 3})
 assert v["anchor_every"] == 3 and h._summary("video", v)[1]["anchor_every"] == 3
 assert "anchor_every" not in h._validate("m", {"type": "video", "prompt": "x", "seconds": 50})[1]

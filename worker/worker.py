@@ -301,9 +301,11 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
         params["_first_frame"].save(keyframe_path)
         args["image"] = params["_first_frame"]
     elif cast:
-        progress(job_id, f"placing avatar in scene{tag}")
-        keyframe = models.make_keyframe(cast, styled, params["width"], params["height"], seed,
-                                        best=params.get("quality") == "best")
+        keyframe = params.get("_keyframe")  # made before the planner (single takes)
+        if keyframe is None:
+            progress(job_id, f"placing avatar in scene{tag}")
+            keyframe = models.make_keyframe(cast, styled, params["width"], params["height"], seed,
+                                            best=params.get("quality") == "best")
         keyframe_path = os.path.join(workdir, f"keyframe{suffix}.png")
         keyframe.save(keyframe_path)
         args["image"] = keyframe
@@ -333,12 +335,16 @@ def run_video(job, params, workdir):
     # No seed given: one derived from the job id, so a re-delivered take matches its saved segments.
     base = params["seed"] if params.get("seed") is not None else \
         int.from_bytes(hashlib.sha256(job_id.encode()).digest()[:4], "big")
-    timeline = take_timeline(job, params, cast) if count == 1 else None
     work_dir = take_work_dir(job_id) if count == 1 and models.segment_count(params["seconds"]) > 1 else None
     frames = krea_first_frames(job, params, cast, [base + i for i in range(count)])
     if count == 1:
-        path, keyframe = render_take(job, dict(params, _first_frame=frames[0], _segment_prompts=timeline,
-                                               _work_dir=work_dir), workdir, cast, base)
+        # The first frame comes first, so the planner can see the scene it is planning.
+        keyframe_img, first_path = make_first_frame(job, params, cast, base, workdir, frames[0])
+        if params.get("plan_only"):
+            return plan_only_result(job, params, cast, base, first_path)
+        timeline = take_timeline(job, params, cast, image=first_path)
+        path, keyframe = render_take(job, dict(params, _first_frame=frames[0], _keyframe=keyframe_img,
+                                               _segment_prompts=timeline, _work_dir=work_dir), workdir, cast, base)
         result = {"video_key": upload(path, client, job_id, "video.mp4", "video/mp4")}
         if timeline:
             result["segment_prompts"] = timeline
@@ -355,7 +361,45 @@ def run_video(job, params, workdir):
     return result
 
 
-def take_timeline(job, params, cast=()):
+def make_first_frame(job, params, cast, seed, workdir, krea_frame=None):
+    """A single take's first frame before anything else: the Krea frame when there is one, else the Qwen avatar
+    keyframe when there is a cast, else none (text to video). Returns (keyframe image or None, saved path or None);
+    the keyframe image is what render_take then animates (it isn't made twice)."""
+    image, keyframe = krea_frame, None
+    if image is None and cast:
+        progress(job["job_id"], "placing avatar in scene")
+        keyframe = image = models.make_keyframe(cast, realism.with_style(params["prompt"], params), params["width"],
+                                                params["height"], seed, best=params.get("quality") == "best")
+    if image is None:
+        return None, None
+    path = os.path.join(workdir, "first_frame.png")
+    image.save(path)
+    return keyframe, path
+
+
+def plan_only_result(job, params, cast, seed, first_path):
+    """A plan-only job: the planner's prompts (seeing the first frame) as editable beats every 5 s, the seed that
+    makes the same first frame, and the frame itself; no video. A planner failure fails the job."""
+    n = models.segment_count(params["seconds"])
+    progress(job["job_id"], f"planning {n} segments")
+    try:
+        plan = models.plan_segments(params["prompt"], n, [(name, desc) for name, _, desc in cast],
+                                    seconds=int(params["seconds"]), image=first_path)
+    except models.JobCancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 - shown to the user with what to do
+        raise RuntimeError(f"the planner could not write a timeline ({type(e).__name__}); try again or write "
+                           "beats yourself") from e
+    if not models.valid_segment_plan(plan, n):
+        raise RuntimeError("the planner could not write a timeline; try again or write beats yourself")
+    beats = "\n".join(f"{models.SEGMENT_SECONDS * i}: {' '.join(p.split())}" for i, p in enumerate(plan))
+    result = {"plan_only": True, "segment_prompts": plan, "beats": beats, "seed": seed}
+    if first_path:
+        result["keyframe_key"] = upload(first_path, job["client"], job["job_id"], "keyframe.png", "image/png")
+    return result
+
+
+def take_timeline(job, params, cast=(), image=None):
     """A long take's prompt per 5 s segment, or None when every segment just repeats the prompt.
     From the user's beats; else, for takes of more than 3 segments, from the planner (VLM, before the
     video model loads). A planner failure is logged and the take keeps the user's prompt."""
@@ -377,7 +421,7 @@ def take_timeline(job, params, cast=()):
     progress(job["job_id"], f"planning {n} segments")
     try:
         plan = models.plan_segments(params["prompt"], n, [(name, desc) for name, _, desc in cast],
-                                    seconds=int(params["seconds"]))
+                                    seconds=int(params["seconds"]), image=image)
     except models.JobCancelled:
         raise
     except Exception as e:  # noqa: BLE001 - any planner failure: the take goes on with one prompt

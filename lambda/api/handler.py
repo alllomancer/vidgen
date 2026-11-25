@@ -413,6 +413,12 @@ def _validate(client, body):
         if variations > 1 and seconds > MAX_CLIP_SECONDS:
             raise ValueError(f"variations work with clips up to {MAX_CLIP_SECONDS} s")
         beats = _parse_beats(body.get("beats"), seconds)
+        plan_only = body.get("plan_only") is True
+        if plan_only:  # the first frame and the planner's beats, to review before rendering
+            if seconds <= 15:
+                raise ValueError("plan_only works for takes over 15 s (shorter takes keep one prompt)")
+            if beats:
+                raise ValueError("plan_only writes the beats; leave beats out")
         anchor = body.get("anchor_every")
         if anchor is not None:  # re-anchor the avatar's face every N segments (one avatar; checked in create_job)
             if not isinstance(anchor, int) or isinstance(anchor, bool) or not 2 <= anchor <= 6:
@@ -422,6 +428,7 @@ def _validate(client, body):
         return job_type, {
             **({"beats": beats} if beats else {}),
             **({"anchor_every": anchor} if anchor is not None else {}),
+            **({"plan_only": True} if plan_only else {}),
             "prompt": prompt,
             "negative_prompt": body.get("negative_prompt", ""),
             "seconds": seconds,
@@ -2034,7 +2041,8 @@ def _summary(job_type, params):
                                           "quality": params.get("quality", "standard"), **_realism_summary(params),
                                           **({"beats": len(params["beats"])} if params.get("beats") else {}),
                                           **({"anchor_every": params["anchor_every"]}
-                                             if params.get("anchor_every") else {})}
+                                             if params.get("anchor_every") else {}),
+                                          **({"plan": True} if params.get("plan_only") else {})}
     if job_type == "story":
         return " ".join(params.get("story", "").split())[:120], {
             "shots": params.get("max_shots"), "seconds_per_shot": params.get("seconds_per_shot"),

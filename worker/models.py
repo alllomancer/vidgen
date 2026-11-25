@@ -441,6 +441,17 @@ def _load_segments(work_dir, key):
     return parts
 
 
+CONDITION_BLUR = 0.8  # px: the frame each later segment starts from is softened (stops the halo compounding)
+
+
+def soften(image, radius=CONDITION_BLUR):
+    """A lightly blurred copy of a PIL image. Wan I2V reproduces and slightly strengthens the edge contrast of the
+    frame it starts from; over ten seams that becomes a bright halo around the subject."""
+    from PIL import ImageFilter
+
+    return image.filter(ImageFilter.GaussianBlur(radius)) if radius else image
+
+
 def transfer_colours(frame, reference):
     """One uint8 frame moved fully onto `reference` LAB stats (gain clamped). Used on a re-anchored frame, so
     the image edit's colour shift doesn't start the next segment off the take's colours."""
@@ -505,7 +516,8 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
     key = {"v": RESUME_VERSION, "seed": seed, "total": total, "width": width, "height": height,
            "image": image is not None, "prompts": [p for p, _ in styled], "negatives": [g for _, g in styled],
            "loras": [[l.get("adapter"), l.get("weight")] for l in _JOB_LORAS],
-           "colour": [COLOUR_STRENGTH, COLOUR_MIN_GAIN, COLOUR_MAX_GAIN] if colour else None, "anchor_every": anchor_every if reanchor else None}
+           "colour": [COLOUR_STRENGTH, COLOUR_MIN_GAIN, COLOUR_MAX_GAIN] if colour else None,
+           "blur": CONDITION_BLUR if seconds > SEGMENT_SECONDS else 0, "anchor_every": anchor_every if reanchor else None}
     parts = _load_segments(work_dir, key) if work_dir else []
     cond, reference = image, None
     if parts:
@@ -520,6 +532,8 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
             cond = reanchor(cond, n)
             if colour:  # keep the take's colours across the edit
                 cond = Image.fromarray(transfer_colours(np_frame(cond), colour_stats([before])))
+        if n and seconds > SEGMENT_SECONDS and CONDITION_BLUR:  # the halo: soften what the next segment starts from
+            cond = soften(cond, CONDITION_BLUR)
         seg_prompt, seg_negative = styled[min(n, len(styled) - 1)]
         frames = _render_segment(seg_prompt, seg_negative, num, width, height,
                                  None if seed is None else int(seed) + n, cond)
@@ -1002,7 +1016,7 @@ def _first_json_object(text):
     raise ValueError(f"model did not return JSON: {text[:300]}")
 
 
-def plan_segments(prompt, n, cast=(), seconds=None):
+def plan_segments(prompt, n, cast=(), seconds=None, image=None):
     """A long take's timeline: n prompts, one per continuous 5 s segment, written by the VLM from the
     user's prompt. Same subject, place, light and camera style; only the action moves on.
     cast: (name, description) pairs, referred to by name. Raises ValueError on unusable output."""
@@ -1021,8 +1035,13 @@ Each prompt is one or two sentences, at most 400 characters.
 Respond with JSON only: {{"segments": [str, ...]}} with exactly {n} strings.
 
 TAKE: {prompt}"""
-    out = _first_json_object(_chat([{"role": "user", "content": [{"type": "text", "text": ask}]}],
-                                   min(4096, 160 * n + 200)))
+    content = [{"type": "text", "text": ask}]
+    if image:  # the take's opening frame: the plan keeps to what is in it
+        content = [{"type": "image", "image": f"file://{image}"},
+                   {"type": "text", "text": "This is the opening frame of the take. Every prompt must keep to what is "
+                                            "in this frame: the same people (no one else appears), place, light and "
+                                            "camera; no new animals, objects, crowds or effects.\n\n" + ask}]
+    out = _first_json_object(_chat([{"role": "user", "content": content}], min(4096, 160 * n + 200)))
     plan = [p.strip() if isinstance(p, str) else p for p in out.get("segments") or []]
     if not valid_segment_plan(plan, n):
         raise ValueError(f"planner returned {len(plan)} usable segment prompts, wanted {n}")
