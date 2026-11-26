@@ -151,6 +151,12 @@ class Switch:
                                  f"Name=tag:Visibility,Values={self.vars.get('subnet_visibility_tag', 'private')}",
                                  "--query", "Subnets[].[SubnetId,AvailabilityZone]")
         self.subnets = {line.split()[1]: line.split()[0] for line in subnets.splitlines() if line.strip()}
+        # The project's own security group (no inbound): in a shared VPC there is no default one to launch into.
+        _, self.group, _ = self.aws("ec2", "describe-security-groups", "--filters", f"Name=vpc-id,Values={vpc}",
+                                    f"Name=group-name,Values={self.vars.get('project', 'ai-video')}-worker",
+                                    "--query", "SecurityGroups[0].GroupId")
+        if not self.group.startswith("sg-"):
+            raise Stop("the project's security group (<project>-worker) was not found: has `make apply` run once?")
 
     def zones(self, itype):
         _, out, _ = self.aws("ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
@@ -161,7 +167,8 @@ class Switch:
     def probe(self, itype, zone, market):
         """Launch one instance of that kind and terminate it. True when it reached "running"."""
         cmd = ["ec2", "run-instances", "--image-id", self.ami, "--instance-type", itype, "--subnet-id",
-               self.subnets[zone], "--count", "1", "--instance-initiated-shutdown-behavior", "terminate",
+               self.subnets[zone], "--security-group-ids", self.group, "--count", "1",
+               "--instance-initiated-shutdown-behavior", "terminate",
                "--tag-specifications", f"ResourceType=instance,{PROBE_TAGS}", f"ResourceType=volume,{PROBE_TAGS}",
                "--query", "Instances[0].InstanceId"]
         if market == "spot":
@@ -171,6 +178,10 @@ class Switch:
         if code or not iid.startswith("i-"):
             reason = (re.search(r"\((\w+)\)", err) or [None, "failed"])[1]
             self.say(f"  {market} {itype} in {zone}: no ({reason})")
+            if "Capacity" not in reason and "SpotMaxPrice" not in reason and "InstanceLimit" not in reason \
+                    and "MaxSpotInstanceCount" not in reason:
+                # not "no capacity": something is wrong with the request itself, and it would be for every probe
+                raise Stop(f"the probe launch was refused for another reason than capacity: {err.strip()[-300:]}")
             return False
         self.probes.append(iid)
         try:

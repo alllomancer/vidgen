@@ -79,6 +79,9 @@ class Cloud:
         if "describe-vpcs" in a:
             assert "the-vpc" in a
             return 0, "vpc-1\n", ""
+        if "describe-security-groups" in a:
+            assert "ai-video-worker" in a and "vpc-1" in a
+            return 0, "sg-worker\n", ""
         if "describe-subnets" in a:
             return 0, "subnet-a\tus-east-1a\nsubnet-b\tus-east-1b\nsubnet-d\tus-east-1d\nsubnet-c\tus-east-1c\n", ""
         if "describe-instance-type-offerings" in a:
@@ -88,6 +91,8 @@ class Cloud:
             zone = {"subnet-a": "us-east-1a", "subnet-b": "us-east-1b", "subnet-d": "us-east-1d"}[cmd[cmd.index("--subnet-id") + 1]]
             market = "spot" if "--instance-market-options" in cmd else "on-demand"
             assert "ai-video-probe" in a and "terminate" in a and "--iam-instance-profile" not in cmd
+            # the VPC is shared: there is no default security group to fall back on, so the project's own is named
+            assert cmd[cmd.index("--security-group-ids") + 1] == "sg-worker", cmd
             if (itype, zone, market) not in self.capacity:
                 return 254, "", "An error occurred (InsufficientInstanceCapacity) when calling the RunInstances operation"
             iid = f"i-{len(self.launched)}"
@@ -216,6 +221,14 @@ real2 = c.run
 c.run = lambda cmd: (0, "pending\n", "") if "describe-instances" in " ".join(cmd) else real2(cmd)
 code, out = go(c)
 assert code != 0 and set(c.terminated) == {"i-0", "i-1"} and not c.applied, (out, c.terminated)
+
+# ---- a probe refused for another reason than capacity (a bad request): stop at once and say why
+c = Cloud(capacity={("g7e.4xlarge", "us-east-1a", "on-demand")})
+real3 = c.run
+c.run = lambda cmd: (254, "", "An error occurred (InvalidParameterCombination) when calling the RunInstances operation: "
+                              "You do not have access to a default security group") if "run-instances" in " ".join(cmd) else real3(cmd)
+code, out = go(c)
+assert code != 0 and "default security group" in out and out.count("no (") == 1 and tfvars(c) == TFVARS, out
 
 # ---- tfvars helpers
 assert sw.read_tfvars(c.tfvars) == {"region": "us-east-1", "availability_zone": "us-east-1a", "instance_type": "g6e.4xlarge",
