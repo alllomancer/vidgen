@@ -6,12 +6,12 @@ Jira: N/A
 
 ## Progress
 
-- [ ] Task 1: API accepts and defaults `video_model`
-- [ ] Task 2: `worker/helios.py` (environment, weights, generate)
-- [ ] Task 3: Worker video jobs route to Helios
-- [ ] Task 4: CLI flag and dashboard select
-- [ ] Task 5: Deployment: g7e only, pins, first boot, IAM, switch order
-- [ ] Task 6: Docs
+- [x] Task 1: API accepts and defaults `video_model` — `30430a2`
+- [x] Task 2: `worker/helios.py` (environment, weights, generate) — `30430a2`
+- [x] Task 3: Worker video jobs route to Helios — `30430a2` (phone look on its frames: `461277c`)
+- [x] Task 4: CLI flag and dashboard select — `30430a2` (CLI), `8a3e723` (dashboard, smoke test)
+- [x] Task 5: Deployment: g7e only, pins, first boot, IAM, switch order — `8a3e723`
+- [x] Task 6: Docs — `8185077`
 - [ ] Task 7: End-to-end on a g7e
 
 ## Tasks
