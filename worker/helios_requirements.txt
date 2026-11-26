@@ -1,0 +1,32 @@
+# Helios venv (/opt/helios-venv), separate from the Wan/Qwen venv: Helios needs torch 2.10, diffusers 0.38 and
+# transformers 5.x. From PKU-YuanGroup/Helios requirements.txt at the pinned commit (worker/helios.py
+# REPO_COMMIT), with the CUDA 12.8 torch build (the one that has kernels for the g7e's GPU), without its
+# training-only packages (deepspeed, mpi4py, wandb, gradio, spaces, tf_keras). Ran on a g7e 2026-11-26.
+# Changing this file rebuilds the venv on the next Helios job.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+torchaudio==2.10.0+cu128
+triton==3.6.0
+kernels==0.13.0
+diffusers==0.38.0
+transformers==5.3.0
+sentence-transformers==5.2.3
+accelerate==1.12.0
+peft==0.18.1
+huggingface-hub==1.4.1
+hf_transfer
+zstandard==0.25.0
+video-reader-rs==0.4.1
+numpy<2.0.0
+opencv-python
+moviepy
+imageio-ffmpeg
+ftfy
+Jinja2
+einops
+packaging
+ninja
+omegaconf
+torchdata
+loguru

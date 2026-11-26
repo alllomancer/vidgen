@@ -25,6 +25,7 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 import models
+import helios
 import krea
 import mirror
 import photos
@@ -301,6 +302,28 @@ def sound_for_clip(path, prompt, seconds, seed, workdir, tag="sound"):
     return out
 
 
+# Helios videos (params["video_model"] == "helios", docs/specs/2026-11-26-helios-default.md): the first frame
+# is made in Helios's 5:3 shape at twice its size, so the image models work at a size they are good at.
+HELIOS_FRAME = (1280, 768)
+
+
+def render_helios(job_id, params, args, seed, out, tag=""):
+    """One Helios take written to `out`: the whole length in one run from one prompt (the same look, shot and
+    natural-style wording as Wan), from the first frame when there is one, with the job's Wan LoRA through
+    its low-noise file. Grain and the 2x upscale work on the result; there are no segments to chain."""
+    lora = next((l["low"] for l in models._JOB_LORAS if l.get("low")), None)
+    prompt, _ = models.natural_prompts(models.with_triggers(args["prompt"]))
+    frames = helios.generate(prompt, params["seconds"], seed=seed, image=args.get("image"), lora=lora,
+                             progress=lambda msg: progress(job_id, msg + tag))
+    if params.get("upscale"):
+        import enhance
+
+        progress(job_id, f"upscaling{tag}")
+        frames = enhance.upscale(frames, models.check_cancel)
+    models.write_video(frames, out, fps=helios.FPS, grain=realism.Grain(seed or 0) if params.get("grain") else None)
+    return out
+
+
 def render_take(job, params, workdir, cast, seed, index=None, count=1):
     """One video (keyframe if there is a cast, then Wan, then optional sound). Returns
     (video path, keyframe path or None). `index` numbers the files of a variation."""
@@ -347,7 +370,10 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
         args["segment_prompts"][0] = realism.with_style(f"{params['prompt']} {timeline[0]}", params)
     progress(job_id, f"rendering video{tag}")
     name = f"video{suffix}"
-    path = models.generate_video(os.path.join(workdir, f"{name}.mp4"), **args)
+    if params.get("video_model") == "helios":
+        path = render_helios(job_id, params, args, seed, os.path.join(workdir, f"{name}.mp4"), tag)
+    else:
+        path = models.generate_video(os.path.join(workdir, f"{name}.mp4"), **args)
     if params.get("sound", True):
         progress(job_id, f"adding sound{tag}")
         sound = sound_for_clip(path, params["prompt"], params["seconds"], seed, workdir, f"sound_{name}")
@@ -362,24 +388,29 @@ def run_video(job, params, workdir):
     # No seed given: one derived from the job id, so a re-delivered take matches its saved segments.
     base = params["seed"] if params.get("seed") is not None else \
         int.from_bytes(hashlib.sha256(job_id.encode()).digest()[:4], "big")
-    work_dir = take_work_dir(job_id) if count == 1 and models.segment_count(params["seconds"]) > 1 else None
+    helios_job = params.get("video_model") == "helios"  # one run, one prompt: no segments, planner or resume
+    if helios_job:
+        params = dict(params, width=HELIOS_FRAME[0], height=HELIOS_FRAME[1])  # the size of the first frame
+    work_dir = take_work_dir(job_id) if count == 1 and not helios_job and models.segment_count(params["seconds"]) > 1 \
+        else None
     frames = krea_first_frames(job, params, cast, [base + i for i in range(count)])
     if count == 1:
         # The first frame comes first, so the planner can see the scene it is planning.
         keyframe_img, first_path = make_first_frame(job, params, cast, base, workdir, frames[0])
         if params.get("plan_only"):
             return plan_only_result(job, params, cast, base, first_path)
-        timeline = take_timeline(job, params, cast, image=first_path)
+        timeline = None if helios_job else take_timeline(job, params, cast, image=first_path)
         path, keyframe = render_take(job, dict(params, _first_frame=frames[0], _keyframe=keyframe_img,
                                                _segment_prompts=timeline, _work_dir=work_dir), workdir, cast, base)
-        result = {"video_key": upload(path, client, job_id, "video.mp4", "video/mp4")}
+        result = {"video_key": upload(path, client, job_id, "video.mp4", "video/mp4"),
+                  **({"video_model": "helios"} if helios_job else {})}
         if timeline:
             result["segment_prompts"] = timeline
         if keyframe:
             result["keyframe_key"] = upload(keyframe, client, job_id, "keyframe.png", "image/png")
         return result
     # Variations: same prompt, seeds base, base+1, ...; models stay loaded between takes.
-    result = {"seeds": [base + i for i in range(count)]}
+    result = {"seeds": [base + i for i in range(count)], **({"video_model": "helios"} if helios_job else {})}
     for i in range(count):
         path, keyframe = render_take(job, dict(params, _first_frame=frames[i]), workdir, cast, base + i, i + 1, count)
         result[f"video_{i + 1}_key"] = upload(path, client, job_id, f"video_{i + 1}.mp4", "video/mp4")
@@ -1375,7 +1406,8 @@ def mirror_backfill(hf_home=None):
             units.append((f"hub/{name}", folder))
         if os.path.isdir(models.MMAUDIO_DIR) and mirror.local_files(models.MMAUDIO_DIR)[0]:
             units.append(("mmaudio", models.MMAUDIO_DIR))
-        for unit, folder in ((krea.MODEL_UNIT, krea.MODEL_DIR), (krea.FILTER_UNIT, krea.FILTER_DIR)):
+        for unit, folder in ((krea.MODEL_UNIT, krea.MODEL_DIR), (krea.FILTER_UNIT, krea.FILTER_DIR),
+                             (helios.MODEL_UNIT, helios.MODEL_DIR)):
             if os.path.exists(os.path.join(folder, ".complete")):
                 units.append((unit, folder))
         for unit, folder in units:

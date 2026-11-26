@@ -38,17 +38,17 @@ p, _ = models.natural_prompts(realism.with_style("she waves", {}))
 assert p.startswith(models.TRIPOD)
 
 # ---------------------------------------------------------------- API: one validated setting, videos only
-_, v = h._validate("m", {"type": "video", "prompt": "x", "shot": "stream"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "shot": "stream"})
 assert v["shot"] == "stream"
-_, v = h._validate("m", {"type": "video", "prompt": "x", "shot": "pov", "look": "film"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "shot": "pov", "look": "film"})
 assert v["shot"] == "pov" and v["look"] == "film"
 for none in ({}, {"shot": None}, {"shot": ""}):
-    _, v = h._validate("m", {"type": "video", "prompt": "x", **none})
+    _, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", **none})
     assert "shot" not in v, v
 for bad in ("both", "stream,pov", ["stream", "pov"], True, "phone"):
-    _stubs.expect_error(h._validate, "m", {"type": "video", "prompt": "x", "shot": bad}, contains="shot")
+    _stubs.expect_error(h._validate, "m", {"type": "video", "video_model": "wan", "prompt": "x", "shot": bad}, contains="shot")
 # a plan carries it, so the first frame and the render match
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 30, "plan_only": True, "shot": "pov"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 30, "plan_only": True, "shot": "pov"})
 assert v["shot"] == "pov" and v["plan_only"] is True
 # stories and photos don't take it (it would be ignored silently otherwise)
 _stubs.expect_error(h._validate, "m", {"type": "story", "story": "once", "shot": "stream"}, contains="shot")

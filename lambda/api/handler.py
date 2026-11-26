@@ -306,6 +306,10 @@ DRAFT_SIZE = (832, 480)  # draft quality: render small, then RIFE + 2x upscale -
 
 REALISM_LOOKS = ("pro", "phone", "candid", "portrait", "film")
 SHOTS = ("stream", "pov")  # videos: a fixed webcam with a ring light | a handheld phone seen by its holder
+# Video models (docs/specs/2026-11-26-helios-default.md). helios (the default): one take of any length in one
+# run, one prompt, at 640x384 and 24 fps. wan: 5 s segments chained, with beats, plans and face re-anchoring.
+VIDEO_MODELS = ("helios", "wan")
+HELIOS_SIZE, HELIOS_FPS, HELIOS_SECONDS = (640, 384), 24, 30
 # Krea 2 Turbo (text-to-image, own venv on the render box, content filter on every image).
 AVATAR_MODELS = ("wan", "krea2")      # avatar candidates
 PHOTO_MODELS = ("qwen", "krea2")      # qwen = Qwen-Image-Edit with the person; krea2 = no person
@@ -318,6 +322,28 @@ def _realism_params(body):
     if look not in REALISM_LOOKS:
         raise ValueError(f"look must be one of: {', '.join(REALISM_LOOKS)}")
     return {"look": look, **{k: body.get(k) is True for k in ("natural_skin", "candid", "grain")}}
+
+
+def _video_model(body, allowed=True):
+    """The video model of a `video` job: helios unless wan is asked for. Other job types refuse the key."""
+    model = body.get("video_model")
+    if not allowed:
+        if model not in (None, ""):
+            raise ValueError("video_model (helios, wan) is for videos; stories render with wan")
+        return None
+    model = "helios" if model in (None, "") else model
+    if not isinstance(model, str) or model not in VIDEO_MODELS:
+        raise ValueError(f"video_model must be one of: {', '.join(VIDEO_MODELS)}")
+    return model
+
+
+def _check_helios_loras(params):
+    """Helios takes one Wan LoRA (the avatar's own counts). Krea LoRAs are for the first frame."""
+    loras = params.get("loras") or []
+    if params.get("video_model") == "helios" and len(loras) > 1:
+        raise ValueError("the helios video model takes one Wan LoRA, and this job has "
+                         f"{len(loras)} ({', '.join(l['name'] for l in loras)}): leave one out (avatar_lora: false / "
+                         "--no-avatar-lora drops the avatar's own), or use video model wan")
 
 
 def _shot_param(body, allowed=True):
@@ -419,14 +445,20 @@ def _validate(client, body):
         prompt = (body.get("prompt") or "").strip()
         if not prompt or len(prompt) > MAX_PROMPT_CHARS:
             raise ValueError(f"prompt is required and must be <= {MAX_PROMPT_CHARS} chars")
-        seconds = int(body.get("seconds", 5))
+        video_model = _video_model(body)
+        helios = video_model == "helios"
+        seconds = int(body["seconds"]) if body.get("seconds") is not None else (HELIOS_SECONDS if helios else 5)
         if not 1 <= seconds <= MAX_TAKE_SECONDS:
             raise ValueError(f"seconds must be 1-{MAX_TAKE_SECONDS} (over {MAX_CLIP_SECONDS} s is made of chained segments)")
         variations = int(body.get("variations") or 1)
         if not 1 <= variations <= MAX_VARIATIONS:
             raise ValueError(f"variations must be 2-{MAX_VARIATIONS}")
-        if variations > 1 and seconds > MAX_CLIP_SECONDS:
+        if variations > 1 and seconds > MAX_CLIP_SECONDS and not helios:  # a Wan take over 5 s is a chain
             raise ValueError(f"variations work with clips up to {MAX_CLIP_SECONDS} s")
+        if helios:  # one prompt, one take: nothing to plan, time or re-anchor
+            for key, what in (("beats", "beats"), ("plan_only", "plan_only (planning)"), ("anchor_every", "anchor_every")):
+                if body.get(key) not in (None, "", False):
+                    raise ValueError(f"{what} needs video model wan (helios renders the whole take from one prompt)")
         beats = _parse_beats(body.get("beats"), seconds)
         plan_only = body.get("plan_only") is True
         if plan_only:  # the first frame and the planner's beats, to review before rendering
@@ -454,6 +486,11 @@ def _validate(client, body):
             "variations": variations,
             **_enhance_params(body),
             **_shot_param(body),
+            "video_model": video_model,
+            # Helios renders at one size and speed, whatever was sent (a CLI always sends its Wan defaults).
+            **({"width": HELIOS_SIZE[0], "height": HELIOS_SIZE[1], "fps": HELIOS_FPS, "quality": "standard"
+                if (body.get("quality") or "standard") == "draft" else (body.get("quality") or "standard"),
+                "upscale": bool(body.get("upscale", False))} if helios else {}),
         }
 
     if job_type == "describe":
@@ -464,6 +501,7 @@ def _validate(client, body):
 
     if job_type == "story":
         _shot_param(body, allowed=False)
+        _video_model(body, allowed=False)
         story = (body.get("story") or "").strip()
         if not story or len(story) > MAX_STORY_CHARS:
             raise ValueError(f"story is required and must be <= {MAX_STORY_CHARS} chars")
@@ -623,6 +661,7 @@ def _series(series, scenes):
 
 def _validate_photos(client, body):
     _shot_param(body, allowed=False)
+    _video_model(body, allowed=False)
     scenes = body.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) > MAX_PHOTOS:
         raise ValueError(f"scenes must be a list of at most {MAX_PHOTOS}")
@@ -2036,6 +2075,8 @@ def create_job(client, body):
             _job_loras(client, job_type, params, body.get("loras"))
         if job_type == "video" and body.get("avatar_lora") is not False:
             _with_avatar_wan_lora(client, params)
+        if job_type == "video":
+            _check_helios_loras(params)
         if job_type in ("video", "story"):
             _avatar_first_frame(client, job_type, params)
     except (ValueError, TypeError) as e:
@@ -2126,7 +2167,8 @@ def _summary(job_type, params):
                                           **({"beats": len(params["beats"])} if params.get("beats") else {}),
                                           **({"anchor_every": params["anchor_every"]}
                                              if params.get("anchor_every") else {}),
-                                          **({"plan": True} if params.get("plan_only") else {})}
+                                          **({"plan": True} if params.get("plan_only") else {}),
+                                          **({"video_model": params["video_model"]} if params.get("video_model") else {})}
     if job_type == "story":
         return " ".join(params.get("story", "").split())[:120], {
             "shots": params.get("max_shots"), "seconds_per_shot": params.get("seconds_per_shot"),

@@ -470,7 +470,7 @@ def plan_render_command(args, seed, beats_path):
 
     if seed is None:
         raise ApiError("the plan has no seed; render with --beats-file only (the first frame may differ)")
-    parts = ["vidgen", "video", args.prompt, "--seconds", str(args.seconds), "--seed", str(seed),
+    parts = ["vidgen", "video", args.prompt, "--video-model", "wan", "--seconds", str(args.seconds), "--seed", str(seed),
              "--beats-file", beats_path]
     if getattr(args, "no_avatar", False):
         parts.append("--no-avatar")
@@ -1539,6 +1539,33 @@ def shot_flag(parser):
                              "its camera light is the main light). Adds wording to the prompt")
 
 
+VIDEO_MODELS = ("helios", "wan")
+HELIOS_SECONDS, WAN_SECONDS = 30, 5  # the server's default lengths
+
+
+def video_model_flag(parser):
+    """--video-model on video: helios (the server's default) or wan."""
+    parser.add_argument("--video-model", choices=VIDEO_MODELS,
+                        help="helios (default): the whole clip in one take from one prompt, 640x384 at 24 fps, "
+                             "30 s unless --seconds says otherwise, one Wan LoRA. wan: 5 s segments chained, "
+                             "1280x704, with --beats, plans, --anchor-every and several LoRAs")
+
+
+def video_model_body(args, planning=False):
+    """What the job says about the model and length: only what was asked for (the server has the defaults).
+    A plan writes beats, which are wan's."""
+    model = "wan" if planning else getattr(args, "video_model", None)
+    seconds = getattr(args, "seconds", None)
+    return {**({"video_model": model} if model else {}), **({"seconds": seconds} if seconds is not None else {})}
+
+
+def video_seconds(args, planning=False):
+    """The length this job will have: --seconds, else the model's default."""
+    if getattr(args, "seconds", None) is not None:
+        return args.seconds
+    return WAN_SECONDS if planning or getattr(args, "video_model", None) == "wan" else HELIOS_SECONDS
+
+
 def shot_body(args):
     return {"shot": args.shot} if getattr(args, "shot", None) else {}
 
@@ -1714,7 +1741,8 @@ def main():
                        help="text to video; `plan` (same options, takes over 15 s): first frame + editable beats, no video")
     v.add_argument("prompt")
     v.add_argument("--negative", default="")
-    v.add_argument("--seconds", type=int, default=5, help="clip length, 1-60 s (over 5 s chains 5 s segments; ~5 min per 5 s segment)")
+    v.add_argument("--seconds", type=int, help="clip length, 1-60 s (default 30 with helios, 5 with wan; "
+                                                "a wan take over 5 s chains 5 s segments, ~5 min each)")
     v.add_argument("--variations", type=int, default=1, help="2-4 takes of the same prompt (seeds N, N+1, ...); up to 5 s")
     v.add_argument("--width", type=int, default=1280)
     v.add_argument("--height", type=int, default=704)
@@ -1731,6 +1759,7 @@ def main():
     avatar_flags(v, "video")
     realism_flags(v, "video")
     shot_flag(v)
+    video_model_flag(v)
 
     d = sub.add_parser("describe", help="title/description/tags for a video file")
     d.add_argument("file")
@@ -1925,14 +1954,16 @@ def main():
         elif args.cmd in ("video", "plan"):
             beats = video_beats(args)
             planning = args.cmd == "plan"
-            if planning and (args.seconds <= 15 or beats or args.variations > 1):
+            seconds = video_seconds(args, planning)
+            wan = planning or args.video_model == "wan"
+            if planning and (seconds <= 15 or beats or args.variations > 1):
                 raise ApiError("plan: a take over 15 s, without --beats or --variations (it writes the beats)")
-            if args.seconds > 15 and not planning:
-                print(take_estimate(args.seconds), flush=True)
+            if wan and seconds > 15 and not planning:
+                print(take_estimate(seconds), flush=True)
             if ensure_avatar(args):
                 body = {
                     "type": "video", "prompt": args.prompt, "negative_prompt": args.negative,
-                    "seconds": args.seconds, "width": args.width, "height": args.height, "seed": args.seed,
+                    **video_model_body(args, planning), "width": args.width, "height": args.height, "seed": args.seed,
                     "variations": args.variations,
                     "avatar": "none" if args.no_avatar else args.avatar, "sound": not args.no_sound,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,

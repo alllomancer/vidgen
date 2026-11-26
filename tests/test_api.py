@@ -87,35 +87,35 @@ text, info = h._summary("photos", h._validate_photos("m", {"avatar": "dana", "se
 assert text == "series of 3 at a pier" and info["series"] and info["candid"] and "look" not in info, (text, info)
 
 # ---------------------------------------------------------------- video and story params
-_, v = h._validate("m", {"type": "video", "prompt": "a lighthouse"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "a lighthouse"})
 assert v["fps"] == 32 and v["upscale"] is False and v["variations"] == 1 and v["seconds"] == 5
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 15, "fps": 16, "upscale": True})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 15, "fps": 16, "upscale": True})
 assert (v["seconds"], v["fps"], v["upscale"]) == (15, 16, True)
-_, v = h._validate("m", {"type": "video", "prompt": "x", "variations": 4, "seconds": 5})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "variations": 4, "seconds": 5})
 assert v["variations"] == 4
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50})
 assert v["seconds"] == 50 and "beats" not in v, "long single takes up to 60 s"
 # beats: "SECONDS: text" separated by ; or newlines, or a list of {at, prompt}
 BEATS3 = [{"at": 0, "prompt": "walks in"}, {"at": 10, "prompt": "sits down"}, {"at": 30, "prompt": "looks up"}]
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "beats": "0: walks in; 10: sits down\n30: looks up"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "beats": "0: walks in; 10: sits down\n30: looks up"})
 assert v["beats"] == BEATS3, v.get("beats")
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "beats": BEATS3})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "beats": BEATS3})
 assert v["beats"] == BEATS3
 assert h._summary("video", v)[1]["beats"] == 3 and "beats" not in h._summary("video", {"seconds": 5})[1]
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "plan_only": True})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "plan_only": True})
 assert v["plan_only"] is True and h._summary("video", v)[1]["plan"] is True
-assert "plan_only" not in h._validate("m", {"type": "video", "prompt": "x", "seconds": 50})[1]
+assert "plan_only" not in h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50})[1]
 for bad, msg in [({"seconds": 15}, "over 15 s"), ({"beats": "0: a; 10: b"}, "beats"), ({"seconds": 5, "variations": 2}, "over 15 s")]:
-    _stubs.expect_error(h._validate, "m", dict({"type": "video", "prompt": "x", "seconds": 50, "plan_only": True}, **bad),
+    _stubs.expect_error(h._validate, "m", dict({"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "plan_only": True}, **bad),
                         contains=msg)
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "anchor_every": 3})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "anchor_every": 3})
 assert v["anchor_every"] == 3 and h._summary("video", v)[1]["anchor_every"] == 3
-assert "anchor_every" not in h._validate("m", {"type": "video", "prompt": "x", "seconds": 50})[1]
+assert "anchor_every" not in h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50})[1]
 for bad, msg in [({"anchor_every": 1}, "anchor_every must be 2-6"), ({"anchor_every": 7}, "2-6"),
                  ({"anchor_every": "x"}, "2-6"), ({"anchor_every": True}, "2-6"),
                  ({"anchor_every": 3, "seconds": 10}, "over 10 s")]:
-    _stubs.expect_error(h._validate, "m", dict({"type": "video", "prompt": "x", "seconds": 50}, **bad), contains=msg)
-_, v = h._validate("m", {"type": "video", "prompt": "x", "seconds": 50, "beats": "  "})
+    _stubs.expect_error(h._validate, "m", dict({"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50}, **bad), contains=msg)
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "beats": "  "})
 assert "beats" not in v, "empty beats are no beats"
 for beats, secs, msg in [("5: a; 10: b", 50, "first beat must be at 0"),
                          ("0: a; 10: b; 10: c", 50, "increasing"),
@@ -129,24 +129,24 @@ for beats, secs, msg in [("5: a; 10: b", 50, "first beat must be at 0"),
                          ("walks in", 50, "SECONDS: text"),
                          ([{"at": "soon", "prompt": "a"}], 50, "SECONDS: text"),
                          (7, 50, "string or a list")]:
-    _stubs.expect_error(h._validate, "m", {"type": "video", "prompt": "x", "seconds": secs, "beats": beats}, contains=msg)
+    _stubs.expect_error(h._validate, "m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": secs, "beats": beats}, contains=msg)
 for bad, msg in [({"seconds": 61}, "seconds must be 1-60"), ({"seconds": 0}, "1-60"), ({"variations": 5}, "variations"),
                  ({"variations": 2, "seconds": 6}, "up to 5"), ({"fps": 24}, "fps")]:
-    _stubs.expect_error(h._validate, "m", dict({"type": "video", "prompt": "x"}, **bad), contains=msg)
+    _stubs.expect_error(h._validate, "m", dict({"type": "video", "video_model": "wan", "prompt": "x"}, **bad), contains=msg)
 _, st = h._validate("m", {"type": "story", "story": "once", "upscale": True})
 assert st["fps"] == 32 and st["upscale"] is True and "width" not in st
-_, v = h._validate("m", {"type": "video", "prompt": "x", "quality": "draft", "width": 1280})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "quality": "draft", "width": 1280})
 assert (v["width"], v["height"], v["upscale"], v["quality"]) == (832, 480, True, "draft")
 _, st = h._validate("m", {"type": "story", "story": "once", "quality": "draft"})
 assert (st["width"], st["height"], st["upscale"]) == (832, 480, True)
-_stubs.expect_error(h._validate, "m", {"type": "video", "prompt": "x", "quality": "ultra"}, contains="quality")
-_, v = h._validate("m", {"type": "video", "prompt": "x", "quality": "best", "look": "film", "natural_skin": True})
+_stubs.expect_error(h._validate, "m", {"type": "video", "video_model": "wan", "prompt": "x", "quality": "ultra"}, contains="quality")
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "quality": "best", "look": "film", "natural_skin": True})
 assert (v["quality"], v["look"], v["natural_skin"], v["candid"], v["grain"]) == ("best", "film", True, False, False)
 assert "width" not in v or v["width"] != 832, "best keeps full size"
 _, st = h._validate("m", {"type": "story", "story": "once", "grain": True, "look": "phone"})
 assert st["grain"] is True and st["look"] == "phone"
 _stubs.expect_error(h._validate, "m", {"type": "story", "story": "once", "look": "anime"}, contains="look")
-assert h._summary("video", v)[1]["look"] == "film" and "look" not in h._summary("video", h._validate("m", {"type": "video", "prompt": "x"})[1])[1]
+assert h._summary("video", v)[1]["look"] == "film" and "look" not in h._summary("video", h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x"})[1])[1]
 
 # ---------------------------------------------------------------- Krea 2: where it can be chosen
 _, a = h._validate("m", {"type": "avatar", "description": "a sailor", "model": "krea2"})
@@ -161,9 +161,9 @@ for bad, msg in [({"model": "krea2", "avatar": "dana"}, "no Krea 2 LoRA"), ({"mo
                  ({"model": "krea2", "quality": "best"}, "one speed"), ({"model": "sd15"}, "model"),
                  ({"model": "qwen", "avatar": "none"}, "need a person")]:
     _stubs.expect_error(h._validate_photos, "m", bad, contains=msg)
-_, v = h._validate("m", {"type": "video", "prompt": "x", "image_model": "krea2"})
+_, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "image_model": "krea2"})
 assert v["image_model"] == "krea2" and h._summary("video", v)[1]["first_frame"] == "krea2"
-assert h._validate("m", {"type": "video", "prompt": "x"})[1]["image_model"] == "auto", "default: Krea first frame when possible"
+assert h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x"})[1]["image_model"] == "auto", "default: Krea first frame when possible"
 # auto: a Krea first frame when it can be made (no avatar, or one avatar with a ready Krea LoRA; stories always), else Wan
 saved_auto = (h._queue_job, h._resolve_avatars, h._avatar_first_frame)
 seen_auto = []
@@ -172,13 +172,13 @@ h._avatar_first_frame = lambda client, job_type, params: None
 ready_av = {"name": "kr", "krea_lora": {"state": "ready", "ready": {"lora": "avatar-kr", "version": 1}}}
 avs = {"none": [], "dana": [{"name": "dana"}], "kr": [ready_av], "two": [ready_av, {"name": "dana"}]}
 h._resolve_avatars = lambda client, req: avs[req or "dana"]
-for kind_body, avatar, want in [({"type": "video", "prompt": "x"}, "none", "krea2"),
-                                ({"type": "video", "prompt": "x"}, "kr", "krea2"),
-                                ({"type": "video", "prompt": "x"}, "dana", "wan"),
-                                ({"type": "video", "prompt": "x"}, None, "wan"),
-                                ({"type": "video", "prompt": "x"}, "two", "wan"),
+for kind_body, avatar, want in [({"type": "video", "video_model": "wan", "prompt": "x"}, "none", "krea2"),
+                                ({"type": "video", "video_model": "wan", "prompt": "x"}, "kr", "krea2"),
+                                ({"type": "video", "video_model": "wan", "prompt": "x"}, "dana", "wan"),
+                                ({"type": "video", "video_model": "wan", "prompt": "x"}, None, "wan"),
+                                ({"type": "video", "video_model": "wan", "prompt": "x"}, "two", "wan"),
                                 ({"type": "story", "story": "once"}, "dana", "krea2"),
-                                ({"type": "video", "prompt": "x", "image_model": "wan"}, "none", "wan")]:
+                                ({"type": "video", "video_model": "wan", "prompt": "x", "image_model": "wan"}, "none", "wan")]:
     r = h.create_job("m", dict(kind_body, **({"avatar": avatar} if avatar else {})))
     assert r["statusCode"] == 202 and seen_auto[-1]["image_model"] == want, (kind_body, avatar, seen_auto[-1].get("image_model"), r)
 h._queue_job, h._resolve_avatars, h._avatar_first_frame = saved_auto
@@ -187,14 +187,14 @@ saved = (h._queue_job, h._resolve_loras, h._resolve_avatars)
 h._queue_job = lambda client, job_type, params, rerun_of=None: {"statusCode": 202, "body": "{}"}
 h._resolve_loras = lambda client, req: []
 h._resolve_avatars = lambda client, req: [{"name": "dana"}] if req not in ("none",) else []
-assert h.create_job("m", {"type": "video", "prompt": "x", "image_model": "krea2", "avatar": "dana"})["statusCode"] == 400
-assert h.create_job("m", {"type": "video", "prompt": "x", "image_model": "krea2", "avatar": "none"})["statusCode"] == 202
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "image_model": "krea2", "avatar": "dana"})["statusCode"] == 400
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "image_model": "krea2", "avatar": "none"})["statusCode"] == 202
 assert h.create_job("m", {"type": "story", "story": "x", "image_model": "krea2", "avatar": "dana"})["statusCode"] == 202
 # anchor_every: re-anchor the one avatar's face every N segments of a long take
 h._resolve_avatars = lambda client, req: [] if req == "none" else [{"name": n} for n in str(req or "dana").split(",")]
-assert h.create_job("m", {"type": "video", "prompt": "x", "seconds": 50, "anchor_every": 3, "avatar": "dana"})["statusCode"] == 202
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "anchor_every": 3, "avatar": "dana"})["statusCode"] == 202
 for avatar in ("none", "dana,lee"):
-    r = h.create_job("m", {"type": "video", "prompt": "x", "seconds": 50, "anchor_every": 3, "avatar": avatar})
+    r = h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "seconds": 50, "anchor_every": 3, "avatar": avatar})
     assert r["statusCode"] == 400 and "exactly one avatar" in r["body"], r
 h._queue_job, h._resolve_loras, h._resolve_avatars = saved
 
@@ -233,23 +233,23 @@ got_params = []
 h._queue_job = lambda client, job_type, params, rerun_of=None: got_params.append(params) or {"statusCode": 202, "body": "{}"}
 dana_wan = {"name": "dana", "wan_lora": {"state": "ready", "ready": {"lora": "avatar-dana-wan", "version": 2}}}
 h._resolve_avatars = lambda client, req: [] if req == "none" else [dict(dana_wan)]
-assert h.create_job("m", {"type": "video", "prompt": "x"})["statusCode"] == 202
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x"})["statusCode"] == 202
 pl = got_params[-1]["loras"]
 assert pl[0]["name"] == "avatar-dana-wan" and pl[0]["version"] == 2 and pl[0]["weight"] == 1.0 and pl[0]["step"] is None, pl
 assert pl[0]["high_key"] == "loras/m/avatar-dana-wan/v2/t2v_high.safetensors"
 assert h._summary("video", got_params[-1])[1]["loras"][0].startswith("avatar-dana-wan")
-h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk:0.5"})
+h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "loras": "jerk:0.5"})
 assert [l["name"] for l in got_params[-1]["loras"]] == ["avatar-dana-wan", "jerk"], "one user LoRA beside it"
-r = h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk, style"})
+r = h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "loras": "jerk, style"})
 assert r["statusCode"] == 400 and "avatar" in body(r)["error"], "two user LoRAs plus the avatar's: limit named"
-h.create_job("m", {"type": "video", "prompt": "x", "loras": "jerk", "avatar_lora": False})
+h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "loras": "jerk", "avatar_lora": False})
 assert [l["name"] for l in got_params[-1]["loras"]] == ["jerk"], "avatar_lora false: not attached"
-h.create_job("m", {"type": "video", "prompt": "x", "loras": "avatar-dana-wan:0.7"})
+h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "loras": "avatar-dana-wan:0.7"})
 assert [(l["name"], l["weight"]) for l in got_params[-1]["loras"]] == [("avatar-dana-wan", 0.7)], "named by the user: theirs"
 h.create_job("m", {"type": "story", "story": "once upon a time"})
 assert not got_params[-1].get("loras"), "stories don't get it"
 h._resolve_avatars = lambda client, req: [dict(dana_wan, wan_lora={"state": "ready", "ready": {"lora": "avatar-dana-wan", "version": 9}})]
-assert h.create_job("m", {"type": "video", "prompt": "x"})["statusCode"] == 202 and not got_params[-1].get("loras"), \
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x"})["statusCode"] == 202 and not got_params[-1].get("loras"), \
     "a broken link never fails the job"
 h._queue_job, h._resolve_avatars = saved_aw
 assert h.set_lora_current("m", "jerk", {"version": 1, "step": 750})["statusCode"] == 200
@@ -725,9 +725,9 @@ assert [l["name"] for l in vp3["krea_loras"]] == ["avatar-ready1"] and vp3["krea
 r = h.create_job("m", {"type": "photos", "model": "krea2", "avatar": "nolora", "scenes": [{"prompt": "x"}], "count": 1})
 assert r["statusCode"] == 400 and "no Krea 2 LoRA" in body(r)["error"], body(r)
 # video: one avatar with a ready LoRA -> a Krea first frame with it; otherwise the old rules
-r = h.create_job("m", {"type": "video", "prompt": "walking", "image_model": "krea2", "avatar": "ready1"})
+r = h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "walking", "image_model": "krea2", "avatar": "ready1"})
 assert r["statusCode"] == 202, body(r)
-assert h.create_job("m", {"type": "video", "prompt": "x", "image_model": "krea2", "avatar": "dana"})["statusCode"] == 400
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "image_model": "krea2", "avatar": "dana"})["statusCode"] == 400
 vp2 = {"image_model": "krea2", "avatars": [{"name": "ready1"}]}
 h._avatar_first_frame("m", "video", vp2)
 assert vp2["krea_avatar"] == "ready1" and [l["name"] for l in vp2["krea_loras"]] == ["avatar-ready1"]
@@ -782,8 +782,8 @@ r = h.create_job("m", {"type": "photos", "model": "krea2", "avatar": "none", "sc
                        "count": 1, "loras": "moody:0.8"})
 assert r["statusCode"] == 202 and body(r)["loras"] == [{"name": "moody", "version": 1, "step": None, "weight": 0.8,
                                                          "trigger": "mdy", "model": "krea2"}], body(r)
-assert h.create_job("m", {"type": "video", "prompt": "x", "avatar": "none", "loras": "moody", "image_model": "wan"})["statusCode"] == 400
-assert h.create_job("m", {"type": "video", "prompt": "x", "avatar": "none", "loras": "moody"})["statusCode"] == 202, \
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "avatar": "none", "loras": "moody", "image_model": "wan"})["statusCode"] == 400
+assert h.create_job("m", {"type": "video", "video_model": "wan", "prompt": "x", "avatar": "none", "loras": "moody"})["statusCode"] == 202, \
     "default (auto) with no avatar is a Krea first frame, so a Krea LoRA fits"
 assert "moody:0.8 (krea2)" in h._summary("photos", pp)[1]["loras"]
 _stubs.expect_error(h._validate, "m", {"type": "lora_preview", "name": "moody"}, contains="Krea 2 LoRA")
