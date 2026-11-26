@@ -239,6 +239,9 @@ vidgen video "a red fox in fresh snow" --no-avatar
 - With an avatar, don't describe their looks; the reference image covers that.
 - For cuts, use `story`.
 
+
+**How it is filmed (`--shot`, videos only; one or none):** `--shot stream` makes it look like a streaming session (a fixed webcam that never moves, the person facing it, a ring light on the face); `--shot pov` makes it look filmed on a handheld phone by the person holding it (the phone moves a little now and then, the phone's camera light is the main light). Each adds wording to the prompt and to the first frame; with `pov` the usual "static tripod" sentence is left out. Dashboard: Create → Video → Realism → **Streaming session** / **Phone camera POV** (ticking one unticks the other). Plans carry it (`vidgen plan ... --shot pov`), and the "render with" command repeats it. Stories and photos refuse it.
+
 ### Long single takes (up to 60 s)
 
 ```bash
@@ -693,6 +696,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | `vidgen photos [--avatar NAME \| --image FILE] [-o FOLDER]` | photorealistic photos of one person (default: your default avatar) |
 | `  --series --where … [--wearing …] [--doing … ×N] [--no-anchor] --count 2-8` | a series in one place and outfit, pose and camera varied |
 | `  --look pro\|phone\|candid\|portrait\|film --natural-skin --candid --grain --best` | realism options (also on `video` and `story`) |
+| `  --shot stream\|pov` (video, plan) | filmed as a streaming session (fixed webcam, ring light) or on a handheld phone from its holder's point of view (phone light); one or none |
 | `  --prompt "TEXT"` (repeatable) | one photo per free-form scene |
 | `  --location "PLACE"` (repeatable) | one photo per place |
 | `  --where "..." --wearing "..." --doing "..." --camera "..."` | one photo built from fields; `--wearing` replaces the outfit |

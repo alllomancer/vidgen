@@ -1,7 +1,8 @@
 """Realism options for `video` and `story` (photos have their own wording in photos.py).
 
 Options (job params): look (pro | phone | candid | portrait | film), natural_skin, candid, grain,
-quality "best" (the avatar keyframe uses the full 40-step edit model; Wan keeps Lightning).
+quality "best" (the avatar keyframe uses the full 40-step edit model; Wan keeps Lightning), and for videos
+shot (stream | pov): how the clip is filmed and lit.
 With no options the prompts are unchanged. numpy only, so it can be checked anywhere:
     python3 worker/realism.py
 """
@@ -20,6 +21,16 @@ VIDEO_LOOKS = {
     "film": ("Shot on 35mm film, Kodak Portra look, gentle film grain, slightly muted warm colors, "
              "organic tones."),
 }
+# How a video is filmed and lit (job param `shot`, videos only; one or none). "pov" names a handheld camera,
+# so models.natural_prompts leaves its tripod sentence out; "stream" names no camera move and keeps it.
+SHOTS = {
+    "stream": ("Livestream webcam footage: a fixed webcam at eye level that never moves, the person sits facing "
+               "the camera and talks to it, lit from the front by a ring light, soft even light on the face with "
+               "round ring-light reflections in the eyes, a room behind them."),
+    "pov": ("First-person point of view footage filmed on a handheld smartphone by the person holding it: we see "
+            "what they see, the phone moves and shakes a little now and then, the main light is the phone's "
+            "camera light, bright on what is close to the phone and falling off into a darker background."),
+}
 NATURAL_SKIN = "Natural skin with visible pores and fine texture, no retouching, no beauty filter."
 CANDID = "Unposed, natural movement; people do not look at the camera."
 GRAIN_STRENGTH = 3.0  # luminance noise sigma, in 0-255 levels
@@ -27,7 +38,7 @@ GRAIN_STRENGTH = 3.0  # luminance noise sigma, in 0-255 levels
 
 def style_text(params):
     """The sentences to append to a video/story prompt (and keyframe scene); '' with no options."""
-    parts = [VIDEO_LOOKS[params.get("look") or "pro"]]
+    parts = [SHOTS.get(params.get("shot") or "", ""), VIDEO_LOOKS[params.get("look") or "pro"]]
     if params.get("candid"):
         parts.append(CANDID)
     if params.get("natural_skin"):

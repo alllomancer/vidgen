@@ -276,6 +276,10 @@ form:not(.krea) .krea-text { display: none !important; }
                 <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
                 <label><input type="checkbox" name="best"> Best keyframe (full model for the avatar frame, ~+1.5 min)</label>
               </div>
+              <div class="checks shot-options" role="group" aria-label="How it is filmed (one or none)">
+                <label title="A fixed webcam that never moves, the person facing it, lit from the front by a ring (halo) light"><input type="checkbox" name="shot" value="stream"> Streaming session (static webcam, ring light)</label>
+                <label title="Filmed on a handheld phone from the point of view of the person holding it; the phone moves a little, its camera light is the main light"><input type="checkbox" name="shot" value="pov"> Phone camera POV (handheld, phone light)</label>
+              </div>
             </fieldset>
             <label class="wide">File name (optional)<input name="out" placeholder="market.mp4" autocomplete="off"></label>
           </div>
@@ -668,6 +672,7 @@ function details(j) {
   if (d.subject) bits.push(d.subject === "upload" ? "uploaded photo" : `avatar ${d.subject}`);
   if (d.avatars && d.avatars.length) bits.push(`starring ${d.avatars.join(", ")}`);
   if (d.candidates) bits.push(`${d.candidates} candidates`);
+  if (d.shot) bits.push(SHOT_LABELS[d.shot] || d.shot);
   if (d.steps) bits.push(`${d.steps} steps per expert`);
   if (j.rerun_of) bits.push(`re-run of ${j.rerun_of.slice(0, 8)}`);
   return bits.join(" · ");
@@ -1480,6 +1485,17 @@ for (const b of document.querySelectorAll(".seg button")) {
   };
 }
 function num(v) { return v === "" || v === undefined ? undefined : Number(v); }
+// Streaming session / Phone camera POV: two checkboxes, at most one ticked (ticking one unticks the other).
+const SHOT_LABELS = {stream: "streaming session", pov: "phone POV"};
+function shotChoice(f) {
+  const box = [...f.querySelectorAll('input[name="shot"]')].find(b => b.checked);
+  return box ? box.value : undefined;
+}
+document.addEventListener("change", e => {
+  const b = e.target;
+  if (!b.matches || !b.matches('input[name="shot"]') || !b.checked) return;
+  for (const other of b.form.querySelectorAll('input[name="shot"]')) if (other !== b) other.checked = false;
+});
 function createBody(kind, f) {
   const d = Object.fromEntries(new FormData(f).entries());
   const on = name => f.elements[name] && f.elements[name].checked;
@@ -1495,6 +1511,7 @@ function createBody(kind, f) {
     return {type: "video", prompt: d.prompt, seconds: num(d.seconds), variations: secs > 5 ? 1 : num(d.variations),
       seed: num(d.seed), avatar: d.avatar || undefined, loras: lora, fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
       quality: vq, sound: on("sound"), image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real,
+      shot: shotChoice(f),
       beats: long.beats && (d.beats || "").trim() ? d.beats.trim() : undefined,
       anchor_every: long.anchor && d.anchor_every ? num(d.anchor_every) : undefined,
       avatar_lora: on("avatar_lora") ? undefined : false};

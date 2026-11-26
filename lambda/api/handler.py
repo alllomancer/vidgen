@@ -19,6 +19,7 @@ Every route requires a request signed with an authorized SSH ed25519 key
   PUT  /avatars/{name}/main      make image n the main image (position 1)
   GET  /avatars/{name}/history   earlier versions of an avatar
   POST /avatars/{name}/restore   bring back an earlier version
+  DELETE /avatars/{name}         {loras?}: delete an avatar (images, history, media); loras: its LoRAs too
   GET  /datasets                 your learning datasets (from their manifests)
   GET  /datasets/{name}          one dataset's manifest
   POST /datasets/{name}/uploads  presigned PUT URLs for dataset files (max 100 per call)
@@ -304,6 +305,7 @@ DRAFT_SIZE = (832, 480)  # draft quality: render small, then RIFE + 2x upscale -
 
 
 REALISM_LOOKS = ("pro", "phone", "candid", "portrait", "film")
+SHOTS = ("stream", "pov")  # videos: a fixed webcam with a ring light | a handheld phone seen by its holder
 # Krea 2 Turbo (text-to-image, own venv on the render box, content filter on every image).
 AVATAR_MODELS = ("wan", "krea2")      # avatar candidates
 PHOTO_MODELS = ("qwen", "krea2")      # qwen = Qwen-Image-Edit with the person; krea2 = no person
@@ -316,6 +318,19 @@ def _realism_params(body):
     if look not in REALISM_LOOKS:
         raise ValueError(f"look must be one of: {', '.join(REALISM_LOOKS)}")
     return {"look": look, **{k: body.get(k) is True for k in ("natural_skin", "candid", "grain")}}
+
+
+def _shot_param(body, allowed=True):
+    """{"shot": "stream" | "pov"} for a video, {} when none is asked for. One setting, so the two can't be
+    combined. Other job types refuse it instead of ignoring it."""
+    shot = body.get("shot")
+    if shot in (None, ""):
+        return {}
+    if not allowed:
+        raise ValueError("shot (stream, pov) is for videos")
+    if not isinstance(shot, str) or shot not in SHOTS:
+        raise ValueError(f"shot must be one of: {', '.join(SHOTS)} (one at a time), or left out")
+    return {"shot": shot}
 
 
 def _enhance_params(body):
@@ -438,6 +453,7 @@ def _validate(client, body):
             "sound": bool(body.get("sound", True)),
             "variations": variations,
             **_enhance_params(body),
+            **_shot_param(body),
         }
 
     if job_type == "describe":
@@ -447,6 +463,7 @@ def _validate(client, body):
         }
 
     if job_type == "story":
+        _shot_param(body, allowed=False)
         story = (body.get("story") or "").strip()
         if not story or len(story) > MAX_STORY_CHARS:
             raise ValueError(f"story is required and must be <= {MAX_STORY_CHARS} chars")
@@ -605,6 +622,7 @@ def _series(series, scenes):
 
 
 def _validate_photos(client, body):
+    _shot_param(body, allowed=False)
     scenes = body.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) > MAX_PHOTOS:
         raise ValueError(f"scenes must be a list of at most {MAX_PHOTOS}")
@@ -697,8 +715,8 @@ def _validate_photos(client, body):
 #   avatars/<client>/<name>/history/<created_at>/...   earlier versions, same layout
 #   avatars/<client>/_default.json           {name}
 # Avatars saved before multi-image support have no `images`: they read as a one-image set
-# [reference_key] (avatars/<client>/<name>/reference.<ext>). The API role cannot delete
-# objects, so images dropped from the set stay in S3 (history keeps a copy anyway).
+# [reference_key] (avatars/<client>/<name>/reference.<ext>). Images dropped from the set stay
+# in S3 (history keeps a copy anyway); DELETE /avatars/{name} removes the whole folder.
 
 def _s3_json(key):
     try:
@@ -1206,6 +1224,67 @@ def set_default_avatar(client, body):
     return _resp(200, {"default": name})
 
 
+def _avatar_live_job(client, name, avatar):
+    """The id of a queued or running job that needs the avatar (builds its LoRAs or media, or renders with its
+    images), or None."""
+    kl, wl, media = (avatar.get(k) or {} for k in ("krea_lora", "wan_lora", "media"))
+    for job_id in (kl.get("job_ids") or []) + (wl.get("job_ids") or []) + [media.get("job_id")]:
+        if _job_live(job_id):
+            return job_id
+    items = jobs.query(IndexName=JOBS_INDEX, KeyConditionExpression=Key("client").eq(client),
+                       ScanIndexForward=False, Limit=JOB_HISTORY_LIMIT).get("Items", [])
+    for item in items:
+        raw = item.get("params") or "{}"
+        if item.get("status") in ("queued", "running") and (
+                f'"avatars/{client}/{name}/' in raw or json.loads(raw).get("avatar") == name):
+            return item["job_id"]
+    return None
+
+
+def _avatar_lora_names(client, name, avatar):
+    """The LoRA names that belong to this avatar: avatar-<name> and avatar-<name>-wan, when their files
+    (or training set) say they were made for it. Avatar 'x-wan' and avatar 'x' can meet on one name."""
+    names = {_avatar_lora_name(name), _avatar_wan_lora_name(name)}
+    names.update(l for l in ((avatar.get(k) or {}).get("lora") for k in ("krea_lora", "wan_lora")) if l)
+    owned = []
+    for lora in sorted(n for n in names if n.startswith("avatar-") and DATASET_NAME.match(n)):
+        docs = [_s3_json(f"datasets/{client}/{lora}/manifest.json")]
+        docs += [_s3_json(f"loras/{client}/{lora}/v{v}/lora.json") for v in _lora_versions(client, lora)]
+        if any(d and d.get("avatar") == name for d in docs):
+            owned.append(lora)
+    return owned
+
+
+def delete_avatar(client, name, body):
+    """DELETE /avatars/{name} {loras?}: remove the avatar with its images, history and media; with
+    loras: true also its Krea 2 and Wan LoRAs and their training photos. There is no undo."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    with_loras = body.get("loras", False)
+    if not isinstance(with_loras, bool):
+        return _resp(400, {"error": "loras must be true or false"})
+    live = _avatar_live_job(client, name, avatar)
+    if live:
+        return _resp(409, {"error": f"avatar '{name}' is in use by job {live} (queued or running); "
+                                    "wait for it or cancel it, then delete"})
+    loras = _avatar_lora_names(client, name, avatar) if with_loras else []
+    keys = []
+    for lora in loras:
+        keys += list(_list_keys(f"loras/{client}/{lora}/")) + list(_list_keys(f"datasets/{client}/{lora}/"))
+    doc = f"avatars/{client}/{name}/avatar.json"
+    keys += [k for k in _list_keys(f"avatars/{client}/{name}/") if k != doc]
+    was_default = _default_avatar_name(client) == name
+    # avatar.json (and the default marker) go last: if S3 refuses anything the avatar is still listed, still
+    # the default, and the delete can be repeated.
+    last = [doc] + ([f"avatars/{client}/_default.json"] if was_default else [])
+    failed = _delete_keys(keys) or _delete_keys(last)
+    if failed:
+        return _resp(502, {"error": f"could not delete {failed} of the files of avatar '{name}'; try again"})
+    return _resp(200, {"name": name, "deleted": len(keys) + len(last), "loras": loras, "was_default": was_default})
+
+
 # ---------------------------------------------------------------- datasets
 #
 #   datasets/<client>/<name>/raw/<relative path>   the files, uploaded straight from the client
@@ -1246,9 +1325,12 @@ def _list_keys(prefix):
 
 
 def _delete_keys(keys):
-    keys = list(keys)
+    """Delete the keys; returns how many S3 refused."""
+    keys, failed = list(keys), 0
     for i in range(0, len(keys), 1000):
-        s3.delete_objects(Bucket=BUCKET, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]], "Quiet": True})
+        r = s3.delete_objects(Bucket=BUCKET, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]], "Quiet": True})
+        failed += len(r.get("Errors") or [])
+    return failed
 
 
 def dataset_uploads(client, name, body):
@@ -2021,6 +2103,8 @@ def _realism_summary(params):
     out = {k: True for k in ("natural_skin", "candid", "grain") if params.get(k)}
     if params.get("look", "pro") != "pro":
         out["look"] = params["look"]
+    if params.get("shot"):
+        out["shot"] = params["shot"]
     if params.get("image_model") == "krea2":
         out["first_frame"] = "krea2"
     if params.get("model") == "krea2":
@@ -2266,6 +2350,8 @@ def handler(event, context):
         return set_default_avatar(client, body)
     if route == "GET /avatars/{name}":
         return get_avatar(client, params["name"].lower())
+    if route == "DELETE /avatars/{name}":
+        return delete_avatar(client, params["name"], body)
     if route == "POST /avatars/{name}/images":
         return add_avatar_images(client, params["name"].lower(), body)
     if route == "DELETE /avatars/{name}/images/{n}":

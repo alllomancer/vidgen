@@ -478,6 +478,8 @@ def plan_render_command(args, seed, beats_path):
         parts += ["--avatar", args.avatar]
     if getattr(args, "image_model", "auto") not in (None, "auto"):
         parts += ["--image-model", args.image_model]
+    if getattr(args, "shot", None):
+        parts += ["--shot", args.shot]
     # the options that shape the first frame or the look, when not the defaults
     if getattr(args, "negative", ""):
         parts += ["--negative", args.negative]
@@ -986,6 +988,19 @@ def avatar_command(args):
         else:
             api("PUT", f"/avatars/{name}/main", {"index": int(a[0])})
             print(f"image {a[0]} is now the main image of '{name}'")
+    elif args.action == "delete":
+        name = (args.name or (a[0] if a else "")).lower()
+        if not name:  # never the default by omission: deleting can't be undone
+            raise ApiError("usage: vidgen.py avatar delete --name <avatar> [--with-loras] [--yes]")
+        what = "images, earlier versions and media" + (", and its LoRAs with their training photos"
+                                                       if args.with_loras else "")
+        if not args.yes and not _ask(f"Delete avatar '{name}' from the server ({what})? This can't be undone."):
+            print("nothing deleted")
+            return
+        r = api("DELETE", f"/avatars/{name}", {"loras": args.with_loras})
+        print(f"avatar '{name}' deleted ({r['deleted']} files"
+              + (f"; LoRAs: {', '.join(r['loras'])}" if r.get("loras") else "") + ")"
+              + ("; it was the default: pick another with vidgen.py avatar use --name N" if r.get("was_default") else ""))
     elif args.action == "restore":
         if len(a) != 1:
             raise ApiError("usage: vidgen.py avatar restore <version> [--name NAME]   (versions: avatar history)")
@@ -1513,6 +1528,19 @@ def avatar_flags(parser, what):
 
 
 LOOKS = ("pro", "phone", "candid", "portrait", "film")
+SHOTS = ("stream", "pov")
+
+
+def shot_flag(parser):
+    """--shot on video: how the clip is filmed and lit (one or none)."""
+    parser.add_argument("--shot", choices=SHOTS,
+                        help="stream: a streaming session (fixed webcam, ring light on the face); "
+                             "pov: filmed on a handheld phone by the person holding it (the phone moves a little, "
+                             "its camera light is the main light). Adds wording to the prompt")
+
+
+def shot_body(args):
+    return {"shot": args.shot} if getattr(args, "shot", None) else {}
 
 
 def realism_flags(parser, what):
@@ -1702,6 +1730,7 @@ def main():
     v.add_argument("-o", "--out", help="file name inside the download folder (default <job_id>.mp4)")
     avatar_flags(v, "video")
     realism_flags(v, "video")
+    shot_flag(v)
 
     d = sub.add_parser("describe", help="title/description/tags for a video file")
     d.add_argument("file")
@@ -1773,11 +1802,15 @@ def main():
                        description="list | refresh | add FILE... | images | remove <n> | main <n> | "
                                    "pick <job_id> <n> | use --name N | history | restore <version> | "
                                    "krea-train --name N | media --name N (photos + 2 s clips) | "
-                                   "wan-train --name N (Wan LoRA from its media). "
+                                   "wan-train --name N (Wan LoRA from its media) | "
+                                   "delete --name N [--with-loras] (no undo). "
                                    "An avatar holds up to 12 images of the same person; photos and "
                                    "keyframes use the first 3 (best: full-length, face close-up, another angle).")
     a.add_argument("action", choices=["list", "refresh", "add", "images", "remove", "main", "pick", "use",
-                                      "history", "restore", "krea-train", "media", "wan-train"])
+                                      "history", "restore", "krea-train", "media", "wan-train", "delete"])
+    a.add_argument("--with-loras", action="store_true",
+                   help="delete: also delete the avatar's own LoRAs and their training photos")
+    a.add_argument("--yes", action="store_true", help="delete: don't ask")
     a.add_argument("--no-krea-lora", action="store_true",
                    help="refresh/pick: don't build this avatar's Krea 2 LoRA (it is built by default, ~1.5 h GPU)")
     a.add_argument("args", nargs="*", help="add: image files; remove/main: image number; "
@@ -1904,6 +1937,7 @@ def main():
                     "avatar": "none" if args.no_avatar else args.avatar, "sound": not args.no_sound,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,
                     "quality": video_quality(args), "image_model": None if args.image_model == "auto" else args.image_model, **realism_body(args),
+                    **shot_body(args),
                     **({"beats": beats} if beats else {}),
                     **({"anchor_every": args.anchor_every} if args.anchor_every else {}),
                     **({"avatar_lora": False} if args.no_avatar_lora else {}),
