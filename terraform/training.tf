@@ -49,6 +49,16 @@ resource "aws_s3_object" "trainer_code" {
   etag   = filemd5("${path.module}/../trainer/${each.value}")
 }
 
+# The model mirror module is the render worker's file: one source, shipped to both machines.
+resource "aws_s3_object" "trainer_mirror" {
+  count = local.training
+
+  bucket = aws_s3_bucket.data.id
+  key    = "code/trainer/mirror.py"
+  source = "${path.module}/../worker/mirror.py"
+  etag   = filemd5("${path.module}/../worker/mirror.py")
+}
+
 # Where the trainer queues the checkpoint previews when a training finishes. A file rather
 # than the env: the trainer's env file is only written at first boot.
 resource "aws_s3_object" "trainer_render_config" {
@@ -134,8 +144,16 @@ data "aws_iam_policy_document" "trainer" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["code/trainer/*", "loras/*"]
+      values   = ["code/trainer/*", "loras/*", "models/trainer/*"]
     }
+  }
+
+  # Model mirror (docs/specs/2026-11-25-model-mirror.md): the trainer restores its weights from the bucket
+  # and uploads what the mirror lacks. Only its own folders: neither machine restores what the other wrote.
+  statement {
+    sid       = "ModelMirror"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = ["${aws_s3_bucket.data.arn}/models/trainer/*"]
   }
 
   statement {
@@ -174,7 +192,7 @@ resource "aws_instance" "trainer" {
   count                       = local.training
   ami                         = data.aws_ami.dlami.id
   instance_type               = var.train_instance_type
-  subnet_id                   = data.aws_subnet.gpu.id
+  subnet_id                   = data.aws_subnet.trainer.id
   vpc_security_group_ids      = [aws_security_group.worker.id]
   associate_public_ip_address = false # private subnet; the org SCP denies public IPs
   iam_instance_profile        = aws_iam_instance_profile.trainer[0].name
@@ -216,11 +234,11 @@ resource "aws_instance" "trainer" {
   })
 
   tags = {
-    Name = "${var.project}-trainer"
+    Name = var.trainer_instance_name
     Role = "lora-trainer"
   }
 
-  depends_on = [aws_s3_object.trainer_code]
+  depends_on = [aws_s3_object.trainer_code, aws_s3_object.trainer_mirror]
 
   lifecycle {
     # user_data only runs on first boot; a template change must not stop/start a running trainer.

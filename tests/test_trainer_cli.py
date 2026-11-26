@@ -1,4 +1,6 @@
 """Trainer (captions, speed, auto-preview) and CLI (parsers, downloads, captions edit) tests."""
+import contextlib
+import io
 import json
 import os
 import sys
@@ -8,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _stubs  # noqa: E402
 
-_stubs.install("trainer", "cli")
+_stubs.install("trainer", "cli", "worker")  # worker: mirror.py, shipped to the trainer too
 import trainer  # noqa: E402
 import vidgen  # noqa: E402
 
@@ -196,9 +198,86 @@ trainer.krea_failed({"job_id": "train1", "client": "m", "params": json.dumps(KP)
 kl = json.loads(store["avatars/m/ava/avatar.json"])["krea_lora"]
 assert kl["state"] == "failed" and kl["error"] == "boom" and kl["ready"]["version"] == 1, kl
 trainer.krea_failed({"job_id": "w1", "client": "m", "params": json.dumps({"dataset": "moves"})}, "x")  # Wan: no-op
+# ---------------------------------------------------------------- trainer: avatar Wan LoRAs
+WP = dict(model="t2v", dataset="avatar-ava-wan/v1", lora="avatar-ava-wan", version=1, trigger="ava", avatar="ava",
+          steps=1000, avatar_created_at=77)
+wj, wjd = make_job(**WP)
+ran = []
+for phase in ("prepare", "caption", "cache", "upload", "wan_link", "queue_preview"):
+    setattr(wj, phase, (lambda name: lambda *a: ran.append(name))(phase))
+wj.train = lambda expert: ran.append(expert)
+wj.state.update(result={"lora": "avatar-ava-wan", "version": 1})
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["pw", "train1"]}}).encode()
+wj.run_all()
+assert ran == ["prepare", "caption", "cache", "t2v_low", "t2v_high", "upload", "wan_link"], "no auto previews for avatar builds"
+ran.clear()
+wj2, _ = make_job(**WP)
+for phase in ("prepare", "caption", "cache", "upload", "wan_link"):
+    setattr(wj2, phase, (lambda name: lambda *a: ran.append(name))(phase))
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+assert "skipped" in wj2.run_all() and ran == [], "a replaced build is skipped before any GPU work"
+# upload: under the avatar's LoRA name and version (not the dataset name)
+uj, ujd = make_job(**WP)
+os.makedirs(os.path.join(ujd, "out"), exist_ok=True)
+for e in trainer.plan.EXPERTS:
+    open(os.path.join(ujd, "out", f"{e}.safetensors"), "wb").write(b"w")
+    uj.state[e] = {"final": f"{e}.safetensors", "runs": []}
+uj.state.update(manifest={"kind": "character", "trigger": "ava", "file_count": 28, "total_bytes": 1, "updated_at": 1},
+                segments=4, photos=24)
+uj.convert = lambda src, dst: open(dst, "wb").write(b"c")
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+uploaded.clear()
+uj.upload()
+assert "loras/m/avatar-ava-wan/v1/t2v_high.safetensors" in uploaded and "loras/m/avatar-ava-wan/v1/t2v_low.safetensors" in uploaded
+lj = json.loads(store["loras/m/avatar-ava-wan/v1/lora.json"])
+assert lj["name"] == "avatar-ava-wan" and lj["version"] == 1 and lj["models"] == ["t2v"] and lj["avatar"] == "ava"
+assert json.loads(store["loras/m/avatar-ava-wan/current.json"]) == {"version": 1}
+assert uj.state["result"]["lora"] == "avatar-ava-wan" and not any(k.startswith("loras/m/avatar-ava-wan/v1/v") for k in uploaded)
+# a build replaced while it trained uploads nothing (it could otherwise overwrite a newer build's files)
+sj, sjd = make_job(**WP)
+os.makedirs(os.path.join(sjd, "out"), exist_ok=True)
+sj.state.update(uj.state)
+sj.convert = uj.convert
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+uploaded.clear()
+sj.upload()
+assert not uploaded and sj.state["result"].get("skipped"), sj.state.get("result")
+ran = []
+sj3, _ = make_job(**WP)
+for phase in ("prepare", "caption", "cache", "upload", "wan_link"):
+    setattr(sj3, phase, (lambda name: lambda *a: ran.append(name))(phase))
+
+
+def low_then_replaced(expert):
+    ran.append(expert)
+    store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+
+
+sj3.train = low_then_replaced
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+assert "skipped" in sj3.run_all() and ran == ["prepare", "caption", "cache", "t2v_low"], ran
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "created_at": 77,
+                                                 "wan_lora": {"state": "training", "job_ids": ["train1"]}}).encode()
+# link: ready with this version; a stale job never overwrites; failure marks the Wan build failed
+uj.wan_link()
+wl = json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]
+assert wl["state"] == "ready" and wl["ready"] == {"lora": "avatar-ava-wan", "version": 1} and "error" not in wl, wl
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "queued", "job_ids": ["newer"]}}).encode()
+uj.wan_link()
+assert json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]["state"] == "queued"
+store["avatars/m/ava/avatar.json"] = json.dumps({"name": "ava", "wan_lora": {"state": "training", "job_ids": ["train1"],
+                                                                            "ready": {"lora": "avatar-ava-wan", "version": 1}}}).encode()
+trainer.krea_failed({"job_id": "train1", "client": "m", "params": json.dumps(WP)}, "out of memory")
+wl = json.loads(store["avatars/m/ava/avatar.json"])["wan_lora"]
+assert wl["state"] == "failed" and wl["error"] == "out of memory" and wl["ready"]["version"] == 1, wl
 # models: a token without Krea 2 RAW access fails with the licence message
 trainer._hf_token = lambda: "t"
-trainer._hf_download = lambda repo, filename, local_dir, token: (_ for _ in ()).throw(PermissionError("403 gated"))
+trainer._hf_download = lambda repo, filename, local_dir, token, revision: (_ for _ in ()).throw(PermissionError("403 gated"))
 kj3, _ = make_job(**KP)
 try:
     kj3.krea_models()
@@ -263,10 +342,12 @@ assert vidgen.local_out("video", "j1", "m1").endswith("/m1.mp4") and vidgen.loca
 assert vidgen.permanent_download_error(IsADirectoryError(21, "Is a directory"))
 assert not vidgen.permanent_download_error(TimeoutError("The read operation timed out"))
 jobs_store = {"t" * 32: {"type": "video", "out": "/dl/test", "status": "running", "submitted_at": 0}}
-real = (vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked)
+real = (vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked,
+        vidgen.maybe_sync_avatar_media)
 vidgen.load_jobs = lambda: jobs_store
 vidgen.save_jobs = lambda j: None
 vidgen.maybe_sync_loras = lambda: None
+vidgen.maybe_sync_avatar_media = lambda: None
 vidgen.locked = __import__("contextlib").nullcontext
 vidgen.api = lambda m, p, b=None: {"status": "done", "downloads": {"video": "https://x/v.mp4"}}
 vidgen.fetch_results = lambda local, remote: (_ for _ in ()).throw(IsADirectoryError(21, "Is a directory"))
@@ -279,7 +360,8 @@ vidgen.fetch_results = lambda local, remote: (_ for _ in ()).throw(TimeoutError(
 for _ in range(5):
     vidgen.check_once()
 assert jobs_store["u" * 32]["status"] == "running", "network errors keep retrying"
-(vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked) = real
+(vidgen.load_jobs, vidgen.save_jobs, vidgen.api, vidgen.fetch_results, vidgen.maybe_sync_loras, vidgen.locked,
+ vidgen.maybe_sync_avatar_media) = real
 
 # parallel transfers: multipart uploads (parts in parallel, completed in order; aborted on failure) and
 # ranged parallel downloads (pieces reassembled exactly; servers without ranges get one stream)
@@ -636,6 +718,72 @@ gets.clear()
 assert vidgen.lora_sync() == 0 and gets == [], gets
 fcntl.flock(held, fcntl.LOCK_UN)
 held.close()
+# avatar media: ready media is copied to <download dir>/avatars/<name>/, changed files only, bad names refused
+media_files = {"photo_01.png": b"P" * 7, "clip_1.mp4": b"V" * 9}
+AV = {"default": "mira", "avatars": [{"name": "mira", "media": {"state": "ready", "updated_at": 5}},
+                                     {"name": "bob", "media": {"state": "clips"}},
+                                     {"name": "Bad/../x", "media": {"state": "ready", "updated_at": 1}}]}
+mgets, mfetched = [], []
+
+
+def media_api(m, p, b=None):
+    mgets.append(p)
+    if p == "/avatars":
+        return AV
+    assert p == "/avatars/mira/media", p
+    return {"state": "ready", "files": [{"name": n, "size": len(d), "url": f"https://m/{n}"} for n, d in media_files.items()]
+            + [{"name": "media.json", "size": None, "url": "https://m/media.json"},
+               {"name": "../evil.sh", "size": 1, "url": "https://m/evil"}]}
+
+
+def media_download(url, path):
+    mfetched.append(url)
+    name = url.rsplit("/", 1)[1]
+    with open(path + ".part", "wb") as f:
+        f.write(media_files.get(name, b"{}"))
+    os.replace(path + ".part", path)
+
+
+vidgen.api, vidgen.download = media_api, media_download
+assert vidgen.avatar_media_sync() == 1
+md = os.path.join(dl_root, "avatars", "mira")
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"V" * 9 and os.path.exists(os.path.join(md, "media.json"))
+assert "https://m/evil" not in mfetched and not os.path.exists(os.path.join(dl_root, "avatars", "evil.sh"))
+assert not os.path.exists(os.path.join(dl_root, "avatars", "bob")), "media not ready: nothing copied"
+mgets.clear(), mfetched.clear()
+assert vidgen.avatar_media_sync() == 0 and mgets == ["/avatars"] and not mfetched, "complete copy: no links asked"
+AV["avatars"][0]["media"]["updated_at"] = 6  # new media: fetched in full
+media_files["clip_1.mp4"] = b"W" * 11
+assert vidgen.avatar_media_sync() == 1 and "https://m/clip_1.mp4" in mfetched and "https://m/photo_01.png" in mfetched
+os.remove(os.path.join(md, "clip_1.mp4"))  # same media, a file deleted here: only that file is fetched again
+mfetched.clear()
+assert vidgen.avatar_media_sync() == 1 and mfetched == ["https://m/clip_1.mp4"], mfetched
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"W" * 11
+AV["avatars"][0]["media"]["updated_at"] = 7  # a remake: same sizes are fetched again, removed files go
+media_files.pop("photo_01.png")
+media_files["clip_1.mp4"] = b"X" * 11
+mfetched.clear()
+vidgen.avatar_media_sync()
+assert open(os.path.join(md, "clip_1.mp4"), "rb").read() == b"X" * 11, "same size, new media: fetched again"
+assert not os.path.exists(os.path.join(md, "photo_01.png")), "a file the server no longer lists is removed"
+real_ams = vidgen.avatar_media_sync
+calls_ams = []
+vidgen.avatar_media_sync = lambda: calls_ams.append(1) or 0
+vidgen.maybe_sync_avatar_media()
+vidgen.maybe_sync_avatar_media()
+assert calls_ams == [1], "at most every LORA_SYNC_EVERY seconds"
+vidgen.avatar_media_sync = lambda: (_ for _ in ()).throw(vidgen.ApiError("network error: down"))
+os.remove(os.path.join(vidgen.STATE_DIR, "avatar_media_sync.json"))
+vidgen.maybe_sync_avatar_media()  # logged, never breaks the watcher
+vidgen.avatar_media_sync = real_ams
+vidgen.download = real_dl
+posted_m = []
+vidgen.api = lambda m, p, b=None: posted_m.append((m, p)) or {"name": "mira", "media": {"state": "queued"}}
+vidgen.avatar_command(NS(action="media", args=[], name="Mira"))
+assert posted_m == [("POST", "/avatars/mira/media")]
+vidgen.api = lambda m, p, b=None: posted_m.append((m, p)) or {"name": "mira", "wan_lora": {"state": "queued", "lora": "avatar-mira-wan", "version": 1}}
+vidgen.avatar_command(NS(action="wan-train", args=[], name="mira"))
+assert posted_m[-1] == ("POST", "/avatars/mira/wan-lora")
 vidgen.download_dir, vidgen.STATE_DIR = real_download_dir, real_state
 # avatars: --no-krea-lora, krea-train, and the Krea LoRA state in avatar list
 sent = []
@@ -714,7 +862,58 @@ assert vb["seconds"] == 50 and vb["anchor_every"] == 3 and vb["beats"] == [{"at"
                                                                           {"at": 10, "prompt": "sits"}], vb
 with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog"]):
     vidgen.main()
-assert "anchor_every" not in sub[-1][0] and "beats" not in sub[-1][0]
+assert "anchor_every" not in sub[-1][0] and "beats" not in sub[-1][0] and "avatar_lora" not in sub[-1][0]
+with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--no-avatar-lora"]):
+    vidgen.main()
+assert sub[-1][0]["avatar_lora"] is False
+assert sub[-1][0]["image_model"] is None, "auto (default) leaves the choice to the API: Krea when possible, else Wan"
+with mock.patch.object(sys, "argv", ["vidgen", "video", "a dog", "--image-model", "wan"]):
+    vidgen.main()
+assert sub[-1][0]["image_model"] == "wan"
+# vidgen plan: a plan-only job; waits, saves <name>.beats.txt and the first frame, prints the render command
+plan_dl = tempfile.mkdtemp()
+real_api_p, real_dd_p, real_dl_p, real_reg_p = vidgen.api, vidgen.download_dir, vidgen.download, vidgen.register_job
+real_sub_p, real_sleep_p, real_lj_p, real_sj_p = vidgen.submit, vidgen.time.sleep, vidgen.load_jobs, vidgen.save_jobs
+plan_jobs, plan_posts = {}, []
+vidgen.submit = lambda body, out, extra=None, quiet=False: plan_posts.append(body) or plan_jobs.__setitem__(
+    "p" * 32, {"type": "video", "out": os.path.join(plan_dl, out + ".mp4"), "status": "queued"}) or "p" * 32
+vidgen.load_jobs, vidgen.save_jobs = (lambda: plan_jobs), (lambda j: None)
+vidgen.download_dir = lambda: plan_dl
+polls = []
+
+
+def plan_api(m, p, b=None):
+    polls.append(p)
+    if len(polls) < 2:
+        return {"status": "running", "progress": "planning 10 segments"}
+    return {"status": "done", "result": {"plan_only": True, "seed": 4, "beats": "0: she walks\n5: she stops"},
+            "downloads": {"keyframe": "https://d/keyframe.png"}}
+
+
+vidgen.api = plan_api
+vidgen.download = lambda url, path: open(path, "w").write("png")
+vidgen.time.sleep = lambda s: None
+out_buf = io.StringIO()
+with mock.patch.object(sys, "argv", ["vidgen", "plan", "mirabel on a pier", "--seconds", "50", "--avatar", "mirabel",
+                                     "-o", "pier"]), contextlib.redirect_stdout(out_buf):
+    vidgen.main()
+assert plan_posts[-1]["plan_only"] is True and plan_posts[-1]["seconds"] == 50 and plan_posts[-1]["type"] == "video"
+bf_p = os.path.join(plan_dl, "pier.beats.txt")
+assert open(bf_p).read() == "0: she walks\n5: she stops\n" and os.path.exists(os.path.join(plan_dl, "pier.keyframe.png"))
+printed = out_buf.getvalue()
+assert "--seed 4" in printed and f"--beats-file {bf_p}" in printed and "--seconds 50" in printed and "0: she walks" in printed
+assert plan_jobs["p" * 32]["status"] == "downloaded"
+# the printed command is safe to paste: shell-quoted values, the options that shape the first frame, a real seed
+pa = NS(prompt='café $HOME `id` "x"', seconds=50, no_avatar=False, avatar="mirabel", image_model="krea2", negative="",
+        width=1280, height=704, best=False, draft=True, upscale=False, fps=32)
+cmd = vidgen.plan_render_command(pa, 7, "/dl/my plans/pier.beats.txt")
+import shlex  # noqa: E402
+toks = shlex.split(cmd)
+assert toks[:3] == ["vidgen", "video", 'café $HOME `id` "x"'], toks
+assert toks[toks.index("--beats-file") + 1] == "/dl/my plans/pier.beats.txt" and "--draft" in toks and "--seed" in toks
+_stubs.expect_error(vidgen.plan_render_command, pa, None, "/x.txt", contains="seed", exc=vidgen.ApiError)
+vidgen.api, vidgen.download_dir, vidgen.download, vidgen.register_job = real_api_p, real_dd_p, real_dl_p, real_reg_p
+vidgen.submit, vidgen.time.sleep, vidgen.load_jobs, vidgen.save_jobs = real_sub_p, real_sleep_p, real_lj_p, real_sj_p
 vidgen.ensure_avatar = real_ensure
 vidgen.avatar_generate("mira", "a sailor", 4, "krea2")
 assert sub[-1][0] == {"type": "avatar", "description": "a sailor", "candidates": 4, "model": "krea2"}
@@ -738,10 +937,86 @@ assert posted[-1][2]["krea_lora"] is False, "the choice made when generating"
 ui.avatar_krea_lora("mira")
 assert posted[-1][:2] == ("POST", "/avatars/mira/krea-lora")
 _stubs.expect_error(ui.avatar_krea_lora, "Bad Name", contains="avatar name")
+ui.avatar_media("mira", "POST")
+assert posted[-1][:2] == ("POST", "/avatars/mira/media")
+ui.avatar_media("Mira", "GET")
+assert posted[-1][:2] == ("GET", "/avatars/mira/media")
+_stubs.expect_error(ui.avatar_media, "../x", "GET", contains="avatar name")
+ui.avatar_wan_lora("mira")
+assert posted[-1][:2] == ("POST", "/avatars/mira/wan-lora")
+ui.get_job("a" * 32)
+assert posted[-1][:2] == ("GET", "/jobs/" + "a" * 32)
+_stubs.expect_error(ui.get_job, "../x", contains="job id")
+_stubs.expect_error(ui.avatar_wan_lora, "Bad Name", contains="avatar name")
 # the LoRA list marks versions copied to this computer
 vidgen.api = lambda m, p, b=None: {"loras": [{"name": "moody", "current": 1, "versions": [{"version": 1}, {"version": 2}]}]}
 vidgen.local_lora_versions = lambda: {("moody", 1): 40}
 ll = ui.list_loras()
 assert [v.get("local") for v in ll["loras"][0]["versions"]] == [True, False], ll
 _stubs.expect_error(ui.pick_candidate, {"job_id": "0" * 32, "candidate": 1}, exc=KeyError)
+
+# dashboard: cancel, avatar details, and the History previews of downloaded files
+posted.clear()
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"status": "cancelled"}
+assert ui.cancel_job("c" * 32) == {"status": "cancelled"} and posted[-1][:2] == ("POST", "/jobs/" + "c" * 32 + "/cancel")
+_stubs.expect_error(ui.cancel_job, "../status", contains="job id")
+ui.get_avatar(" Mira ")
+assert posted[-1][:2] == ("GET", "/avatars/mira")
+ui.delete_avatar(" Mira ")
+assert posted[-1] == ("DELETE", "/avatars/mira", {"loras": False})
+ui.delete_avatar("mira", loras=True)
+assert posted[-1] == ("DELETE", "/avatars/mira", {"loras": True})
+_stubs.expect_error(ui.delete_avatar, "mira/images/1", contains="avatar name")
+ui.set_default_avatar({"name": "Mira"})
+assert posted[-1] == ("PUT", "/avatars/default", {"name": "mira"})
+_stubs.expect_error(ui.set_default_avatar, {"name": "../x"}, contains="avatar name")
+_stubs.expect_error(ui.get_avatar, "mira/media", contains="avatar name")
+pv = tempfile.mkdtemp()
+for fname, data in (("photo_1.png", b"\x89PNG-bytes"), ("prompts.txt", b"a prompt"), ("clip.MP4", b"mp4-bytes")):
+    with open(os.path.join(pv, fname), "wb") as fh:
+        fh.write(data)
+saved = [os.path.join(pv, n) for n in ("photo_1.png", "prompts.txt", "clip.MP4", "deleted.png")]
+vidgen.load_jobs = lambda: {"d" * 32: {"type": "photos", "status": "downloaded", "out": pv, "files": saved},
+                            "e" * 32: {"type": "photos", "status": "waiting", "out": pv, "files": saved}}
+assert ui.job_file("d" * 32, 0) == (saved[0], "image/png")
+assert ui.job_file("d" * 32, 2) == (saved[2], "video/mp4"), "the extension's case does not matter"
+for jid_, n in (("d" * 32, 1),    # not an image or a video
+                ("d" * 32, 3),    # listed by the watcher, deleted since
+                ("d" * 32, 4), ("d" * 32, -1),  # outside the job's list
+                ("e" * 32, 0),    # not downloaded yet
+                ("0" * 32, 0)):   # not a job of this computer
+    _stubs.expect_error(ui.job_file, jid_, n, exc=KeyError)
+
+# ...and the same through the server: the token is needed, files stream with their type, cancel answers 200 or 202
+from http.server import ThreadingHTTPServer  # noqa: E402
+srv = ThreadingHTTPServer(("127.0.0.1", 0), None)
+srv.RequestHandlerClass = ui.make_handler(srv.server_port, "tok")
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+
+def ui_request(method, path, token="tok"):
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=10)
+    conn.request(method, path, headers={"X-UI-Token": token} if token else {})
+    r = conn.getresponse()
+    got = (r.status, r.getheader("Content-Type"), r.read())
+    conn.close()
+    return got
+
+
+files_url = "/api/jobs/" + "d" * 32 + "/files/"
+assert ui_request("GET", files_url + "0") == (200, "image/png", b"\x89PNG-bytes")
+assert ui_request("GET", files_url + "2")[:2] == (200, "video/mp4")
+assert ui_request("GET", files_url + "0", token=None)[0] == 403, "files need the page's token"
+assert ui_request("GET", files_url + "1")[0] == 404 and ui_request("GET", files_url + "3")[0] == 404
+assert ui_request("GET", files_url + "x")[0] == 404 and ui_request("GET", "/api/jobs/zz/files/0")[0] == 404
+assert ui_request("POST", "/api/jobs/" + "c" * 32 + "/cancel")[0] == 200
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"status": "running", "cancel_requested": True}
+assert ui_request("POST", "/api/jobs/" + "c" * 32 + "/cancel")[0] == 202, "a running job stops a little later"
+vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"name": "mira", "images": [{"n": 1, "preview": "https://s3/x"}]}
+status, _, body = ui_request("GET", "/api/avatars/mira")
+assert status == 200 and json.loads(body)["images"][0]["preview"] == "https://s3/x" and posted[-1][:2] == ("GET", "/avatars/mira")
+page_status, page_type, page = ui_request("GET", "/", token=None)
+assert page_status == 200 and b"__UI_TOKEN__" not in page and b'const TOKEN = "tok"' in page
+srv.shutdown()
+srv.server_close()
 print("trainer and cli tests passed")

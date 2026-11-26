@@ -440,6 +440,8 @@ def fetch_results(local, remote):
     # "video" goes to the requested path; everything else (subtitles, plan,
     # narration, keyframe, avatar candidates) lands next to it as <base>.<name><ext>.
     saved = []
+    result = remote.get("result") or {}
+    result = json.loads(result) if isinstance(result, str) else result
     video_url = (remote.get("downloads") or {}).get("video")
     if video_url:
         out = video_target(out, os.path.splitext(urllib.parse.urlparse(video_url).path)[1])
@@ -453,7 +455,82 @@ def fetch_results(local, remote):
             path = out if name == "video" else f"{base}.{name}{ext}"
         download(url, path)
         saved.append(path)
+    if result.get("plan_only") and result.get("beats"):  # a reviewed plan: one "SECONDS: text" per line
+        path = f"{base}.beats.txt"
+        with open(path, "w") as f:
+            f.write(result["beats"].rstrip("\n") + "\n")
+        saved.append(path)
     return saved
+
+
+def plan_render_command(args, seed, beats_path):
+    """The `vidgen video` command that renders a reviewed plan: same prompt, length and avatar, its seed (the same
+    first frame) and the beats file."""
+    import shlex
+
+    if seed is None:
+        raise ApiError("the plan has no seed; render with --beats-file only (the first frame may differ)")
+    parts = ["vidgen", "video", args.prompt, "--video-model", "wan", "--seconds", str(args.seconds), "--seed", str(seed),
+             "--beats-file", beats_path]
+    if getattr(args, "no_avatar", False):
+        parts.append("--no-avatar")
+    elif getattr(args, "avatar", None):
+        parts += ["--avatar", args.avatar]
+    if getattr(args, "image_model", "auto") not in (None, "auto"):
+        parts += ["--image-model", args.image_model]
+    if getattr(args, "shot", None):
+        parts += ["--shot", args.shot]
+    # the options that shape the first frame or the look, when not the defaults
+    if getattr(args, "negative", ""):
+        parts += ["--negative", args.negative]
+    if (getattr(args, "width", 1280), getattr(args, "height", 704)) != (1280, 704):
+        parts += ["--width", str(args.width), "--height", str(args.height)]
+    parts += [flag for flag, on in (("--best", getattr(args, "best", False)), ("--draft", getattr(args, "draft", False)),
+                                    ("--upscale", getattr(args, "upscale", False))) if on]
+    if getattr(args, "fps", 32) != 32:
+        parts += ["--fps", str(args.fps)]
+    if os.name == "nt":
+        import subprocess
+        return subprocess.list2cmdline(parts)
+    return " ".join(shlex.quote(p) for p in parts)
+
+
+PLAN_POLL_SECONDS = 15
+
+
+def wait_for_plan(job_id, args):
+    """`vidgen plan`: wait for the plan-only job (Ctrl-C leaves it to the watcher), save <name>.beats.txt and the
+    first frame, print the beats and the command that renders them."""
+    last = None
+    try:
+        while True:
+            job = api("GET", f"/jobs/{job_id}")
+            status, prog = job.get("status"), job.get("progress")
+            if (status, prog) != last:
+                print(f"  {status}{': ' + prog if prog else ''}", flush=True)
+                last = (status, prog)
+            if status in ("done", "failed", "cancelled"):
+                break
+            time.sleep(PLAN_POLL_SECONDS)
+    except KeyboardInterrupt:
+        print("\nleft to the watcher: the beats and first frame will be saved to the download folder")
+        return
+    if status != "done":
+        raise ApiError(f"plan {status}: {job.get('error') or ''}".strip())
+    with locked():
+        jobs = load_jobs()
+        local = jobs.get(job_id) or {"type": "video", "out": local_out("video", job_id, args.out)}
+        saved = fetch_results(local, job)
+        if job_id in jobs:
+            jobs[job_id]["status"] = "downloaded"
+            save_jobs(jobs)
+    result = job.get("result") or {}
+    result = json.loads(result) if isinstance(result, str) else result
+    beats_path = next((p for p in saved if p.endswith(".beats.txt")), "")
+    print("\nbeats (edit the file, then render):\n" + result.get("beats", ""))
+    for p in saved:
+        print(f"saved {p}")
+    print("\nrender with:\n  " + plan_render_command(args, result.get("seed"), beats_path))
 
 
 def fetch_photos(folder, remote):
@@ -607,6 +684,7 @@ def check_once():
         save_jobs(jobs)
         pending = sum(1 for j in jobs.values() if j["status"] in PENDING)
     maybe_sync_loras()  # outside the jobs lock: a big LoRA download never blocks job bookkeeping
+    maybe_sync_avatar_media()
     return pending
 
 
@@ -830,8 +908,10 @@ def avatar_command(args):
             mark = "*" if av["name"] == r["default"] else " "
             count = av.get("images", 1)
             kl = (av.get("krea_lora") or {}).get("state", "none")
+            md = (av.get("media") or {}).get("state", "none")
+            wl = (av.get("wan_lora") or {}).get("state", "none")
             print(f"{mark} {av['name']:16} {count:2} image{'s' if count != 1 else ' '}  Krea LoRA: {kl:9} "
-                  f"{av['description']}")
+                  f"Wan LoRA: {wl:9} media: {md:7} {av['description']}")
     elif args.action == "refresh":
         name = args.name or api("GET", "/avatars")["default"] or DEFAULT_AVATAR_NAME
         avatar_setup(name, args.image, args.describe, args.candidates, args.model,
@@ -853,6 +933,22 @@ def avatar_command(args):
         kl = r["krea_lora"]
         print(f"Krea 2 LoRA for '{r['name']}' {kl['state']}: {kl['lora']} v{kl.get('version')} "
               f"(~1.5 h; trigger word '{r['name']}'); see vidgen.py avatar list")
+    elif args.action == "wan-train":
+        name = args.name or (a[0] if a else None)
+        if not name:
+            raise ApiError("usage: vidgen.py avatar wan-train --name <avatar>")
+        r = api("POST", f"/avatars/{name.lower()}/wan-lora", {})
+        wl = r["wan_lora"]
+        print(f"Wan LoRA for '{r['name']}' {wl['state']}: {wl.get('lora')} v{wl.get('version')} from its media "
+              f"(~1 h on the trainer; added to its videos automatically when ready); see vidgen.py avatar list")
+    elif args.action == "media":
+        name = args.name or (a[0] if a else None)
+        if not name:
+            raise ApiError("usage: vidgen.py avatar media --name <avatar>")
+        r = api("POST", f"/avatars/{name.lower()}/media", {})
+        print(f"media for '{r['name']}' {r['media']['state']}: photos and four 2 s clips (~6-8 min when the "
+              f"avatar has a Krea photo set, ~25 min otherwise); copied to "
+              f"{os.path.join(download_dir(), 'avatars', r['name'])} by the watcher")
     elif args.action == "use":
         if not args.name:
             raise ApiError("usage: vidgen.py avatar use --name <avatar>")
@@ -892,6 +988,19 @@ def avatar_command(args):
         else:
             api("PUT", f"/avatars/{name}/main", {"index": int(a[0])})
             print(f"image {a[0]} is now the main image of '{name}'")
+    elif args.action == "delete":
+        name = (args.name or (a[0] if a else "")).lower()
+        if not name:  # never the default by omission: deleting can't be undone
+            raise ApiError("usage: vidgen.py avatar delete --name <avatar> [--with-loras] [--yes]")
+        what = "images, earlier versions and media" + (", and its LoRAs with their training photos"
+                                                       if args.with_loras else "")
+        if not args.yes and not _ask(f"Delete avatar '{name}' from the server ({what})? This can't be undone."):
+            print("nothing deleted")
+            return
+        r = api("DELETE", f"/avatars/{name}", {"loras": args.with_loras})
+        print(f"avatar '{name}' deleted ({r['deleted']} files"
+              + (f"; LoRAs: {', '.join(r['loras'])}" if r.get("loras") else "") + ")"
+              + ("; it was the default: pick another with vidgen.py avatar use --name N" if r.get("was_default") else ""))
     elif args.action == "restore":
         if len(a) != 1:
             raise ApiError("usage: vidgen.py avatar restore <version> [--name NAME]   (versions: avatar history)")
@@ -1219,6 +1328,104 @@ def maybe_sync_loras():
         log(f"LoRA sync failed, will retry: {type(e).__name__}: {e}")
 
 
+# ---------------------------------------------------------------- avatar media copies
+# Every avatar's photos and 2 s clips are copied to <download dir>/avatars/<name>/ by the watcher.
+# docs/specs/2026-11-24-avatar-media.md
+AVATAR_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+AVATAR_MEDIA_FILE = re.compile(r"(photo_\d{2}\.png|clip_\d\.mp4|media\.json)")  # same rule as the API
+
+
+def avatar_media_sync():
+    """Copy every avatar's ready media not yet here (or changed: new media, or a file of another size).
+    Returns how many avatars got new files. One sync at a time; an avatar that fails is retried next time."""
+    import fcntl
+
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "avatar_media_sync.lock"), "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("another avatar media sync is running; skipping")
+            return 0
+        changed = 0
+        for av in api("GET", "/avatars")["avatars"]:
+            media = av.get("media") or {}
+            if media.get("state") != "ready":
+                continue
+            if not AVATAR_NAME_RE.fullmatch(str(av.get("name"))):
+                log(f"avatar name {av.get('name')!r} from the server is not valid; skipped")
+                continue
+            try:
+                changed += _sync_avatar_media(av["name"], media.get("updated_at"))
+            except Exception as e:  # noqa: BLE001 - network, disk, server: retried next sync
+                log(f"avatar {av['name']} media: copy failed, will retry: {type(e).__name__}: {e}")
+        return changed
+
+
+def _sync_avatar_media(name, updated_at):
+    """Copy one avatar's media. New media (another updated_at, or none given) is fetched in full; the
+    same media only fills in missing or wrong-sized files. Files the server no longer lists are removed."""
+    d = os.path.join(download_dir(), "avatars", name)
+    record_path = os.path.join(d, LORA_RECORD)
+    try:
+        with open(record_path) as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        record = {}
+    files = record.get("files") or {}
+    same = updated_at is not None and record.get("updated_at") == updated_at
+    if same and files and all(os.path.isfile(os.path.join(d, n)) and
+                              (s is None or os.path.getsize(os.path.join(d, n)) == s) for n, s in files.items()):
+        return 0
+    info = api("GET", f"/avatars/{name}/media")
+    os.makedirs(d, exist_ok=True)
+    got, new = {}, False
+    for f in info.get("files") or []:
+        fname, size = str(f.get("name")), f.get("size")
+        if not AVATAR_MEDIA_FILE.fullmatch(fname):
+            log(f"avatar {name} media: file name {fname!r} from the server is not allowed; skipped")
+            continue
+        path = os.path.join(d, fname)
+        if same and os.path.isfile(path) and (size is None or os.path.getsize(path) == size):
+            got[fname] = size
+            continue
+        try:
+            download(f["url"], path)
+        except BaseException:
+            if os.path.exists(path + ".part"):
+                os.remove(path + ".part")
+            raise
+        got[fname], new = size, True
+    for old in os.listdir(d):  # e.g. clip_4.mp4 after a remake that kept 3 clips
+        if AVATAR_MEDIA_FILE.fullmatch(old) and old not in got:
+            os.remove(os.path.join(d, old))
+            new = True
+    with open(record_path, "w") as f:  # only after every file is here
+        json.dump({"updated_at": updated_at, "files": got}, f)
+    if new:
+        log(f"avatar {name}: media copied to {d}")
+    return int(new)
+
+
+def maybe_sync_avatar_media():
+    """From the watcher: sync avatar media at most every LORA_SYNC_EVERY seconds; failures are logged."""
+    stamp = os.path.join(STATE_DIR, "avatar_media_sync.json")
+    try:
+        with open(stamp) as f:
+            last = json.load(f).get("at", 0)
+    except (OSError, ValueError):
+        last = 0
+    if time.time() - last < LORA_SYNC_EVERY:
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(stamp, "w") as f:
+        json.dump({"at": time.time()}, f)
+    try:
+        avatar_media_sync()
+    except Exception as e:  # noqa: BLE001 - the watcher must keep running whatever the sync hits
+        log(f"avatar media sync failed, will retry: {type(e).__name__}: {e}")
+
+
 def local_lora_versions():
     """{(name, version): bytes on disk} for the complete local LoRA copies (lora.json and .part files not
     counted)."""
@@ -1288,7 +1495,8 @@ def lora_command(args):
             cps = ",".join(f"[{c}]" if c == pick else str(c) for c in v["checkpoints"]) or "-"
             using = f"  using step {pick}" if pick else ("  using final" if current else "")
             if v.get("source") in ("upload", "avatar"):
-                kind = "krea2" if "krea2" in (v.get("models") or []) else "uploaded"
+                kind = "krea2" if "krea2" in (v.get("models") or []) else \
+                    ("wan" if v.get("source") == "avatar" else "uploaded")
                 note = (f"  avatar {v.get('trigger') or l['name']}" if v.get("source") == "avatar"
                         else ("  " + v["description"] if v.get("description") else ""))
                 print(f"{mark} {l['name']:16} v{v['version']:<3} {kind:10} {when}  "
@@ -1308,9 +1516,10 @@ def avatar_flags(parser, what):
     parser.add_argument("--fps", type=int, choices=[16, 32], default=32,
                         help="32 (default) doubles the frames with RIFE for smoother motion; 16 = as rendered")
     parser.add_argument("--upscale", action="store_true", help="2x Real-ESRGAN upscale (2560x1408, slower, ~3x bigger files)")
-    parser.add_argument("--image-model", choices=["wan", "krea2"], default="wan",
-                        help=f"krea2: Krea 2 Turbo makes the first frame of {what} shots without an avatar, then Wan "
-                             "animates it (sharper scenes, ~1-2 min more); its content filter can refuse a frame")
+    parser.add_argument("--image-model", choices=["auto", "wan", "krea2"], default="auto",
+                        help=f"first frame of {what} shots: auto (default) = Krea 2 Turbo when it can be made (no avatar, "
+                             "or the avatar's ready Krea LoRA), else Wan; krea2 = always Krea (sharper scenes, ~1-2 min "
+                             "more; its content filter can refuse a frame); wan = as rendered")
     parser.add_argument("--draft", action="store_true",
                         help="faster draft: render at 832x480, then 32 fps + 2x upscale to 1664x960 (softer detail)")
     parser.add_argument("--lora", action="append", default=[], metavar="NAME[@[vN][-]STEP][:WEIGHT]",
@@ -1319,6 +1528,47 @@ def avatar_flags(parser, what):
 
 
 LOOKS = ("pro", "phone", "candid", "portrait", "film")
+SHOTS = ("stream", "pov")
+
+
+def shot_flag(parser):
+    """--shot on video: how the clip is filmed and lit (one or none)."""
+    parser.add_argument("--shot", choices=SHOTS,
+                        help="stream: a streaming session (fixed webcam, ring light on the face); "
+                             "pov: looks shot on a handheld phone (shaky, soft low resolution, grainy, the phone's "
+                             "light; the phone and the person filming are not in the picture). Adds wording to "
+                             "the prompt; pov also shakes, softens and grains the finished frames")
+
+
+VIDEO_MODELS = ("helios", "wan")
+HELIOS_SECONDS, WAN_SECONDS = 30, 5  # the server's default lengths
+
+
+def video_model_flag(parser):
+    """--video-model on video: helios (the server's default) or wan."""
+    parser.add_argument("--video-model", choices=VIDEO_MODELS,
+                        help="helios (default): the whole clip in one take from one prompt, 640x384 at 24 fps, "
+                             "30 s unless --seconds says otherwise. wan: 5 s segments chained, 1280x704, "
+                             "with --beats, plans and --anchor-every")
+
+
+def video_model_body(args, planning=False):
+    """What the job says about the model and length: only what was asked for (the server has the defaults).
+    A plan writes beats, which are wan's."""
+    model = "wan" if planning else getattr(args, "video_model", None)
+    seconds = getattr(args, "seconds", None)
+    return {**({"video_model": model} if model else {}), **({"seconds": seconds} if seconds is not None else {})}
+
+
+def video_seconds(args, planning=False):
+    """The length this job will have: --seconds, else the model's default."""
+    if getattr(args, "seconds", None) is not None:
+        return args.seconds
+    return WAN_SECONDS if planning or getattr(args, "video_model", None) == "wan" else HELIOS_SECONDS
+
+
+def shot_body(args):
+    return {"shot": args.shot} if getattr(args, "shot", None) else {}
 
 
 def realism_flags(parser, what):
@@ -1472,6 +1722,8 @@ def main():
 
     sub.add_parser("status", help="GPU instance state, queue depth, uptime hold")
     sub.add_parser("wake", help="start the GPU instance ahead of a batch")
+    sub.add_parser("restart-worker", help="ask the render worker to restart between jobs (it pulls the latest "
+                                          "worker code); the render machine must be running")
     sub.add_parser("jobs", help="list local jobs and where their files went")
     ch = sub.add_parser("check", help="one pass: download any finished jobs (what the watcher runs)")
     ch.add_argument("--log", help=argparse.SUPPRESS)
@@ -1488,10 +1740,12 @@ def main():
     k = sub.add_parser("cancel", help="cancel a queued or running job")
     k.add_argument("job_id", help="job id or unique prefix")
 
-    v = sub.add_parser("video", help="text to short video")
+    v = sub.add_parser("video", aliases=["plan"],
+                       help="text to video; `plan` (same options, takes over 15 s): first frame + editable beats, no video")
     v.add_argument("prompt")
     v.add_argument("--negative", default="")
-    v.add_argument("--seconds", type=int, default=5, help="clip length, 1-60 s (over 5 s chains 5 s segments; ~5 min per 5 s segment)")
+    v.add_argument("--seconds", type=int, help="clip length, 1-60 s (default 30 with helios, 5 with wan; "
+                                                "a wan take over 5 s chains 5 s segments, ~5 min each)")
     v.add_argument("--variations", type=int, default=1, help="2-4 takes of the same prompt (seeds N, N+1, ...); up to 5 s")
     v.add_argument("--width", type=int, default=1280)
     v.add_argument("--height", type=int, default=704)
@@ -1500,11 +1754,15 @@ def main():
                                    '10: he sits down at the table" - each beat a full description, times in '
                                    "multiples of 5 (segments start every 5 s)")
     v.add_argument("--beats-file", help="the beats from a file, one 'SECONDS: text' per line")
+    v.add_argument("--no-avatar-lora", action="store_true",
+                   help="don't add the avatar's own Wan LoRA (added by default when it has a ready one)")
     v.add_argument("--anchor-every", type=int, metavar="N",
                    help="takes over 10 s with one avatar: restore the avatar's face every N segments (2-6)")
     v.add_argument("-o", "--out", help="file name inside the download folder (default <job_id>.mp4)")
     avatar_flags(v, "video")
     realism_flags(v, "video")
+    shot_flag(v)
+    video_model_flag(v)
 
     d = sub.add_parser("describe", help="title/description/tags for a video file")
     d.add_argument("file")
@@ -1574,11 +1832,17 @@ def main():
 
     a = sub.add_parser("avatar", help="the characters who star in your videos",
                        description="list | refresh | add FILE... | images | remove <n> | main <n> | "
-                                   "pick <job_id> <n> | use --name N | history | restore <version>. "
+                                   "pick <job_id> <n> | use --name N | history | restore <version> | "
+                                   "krea-train --name N | media --name N (photos + 2 s clips) | "
+                                   "wan-train --name N (Wan LoRA from its media) | "
+                                   "delete --name N [--with-loras] (no undo). "
                                    "An avatar holds up to 12 images of the same person; photos and "
                                    "keyframes use the first 3 (best: full-length, face close-up, another angle).")
     a.add_argument("action", choices=["list", "refresh", "add", "images", "remove", "main", "pick", "use",
-                                      "history", "restore", "krea-train"])
+                                      "history", "restore", "krea-train", "media", "wan-train", "delete"])
+    a.add_argument("--with-loras", action="store_true",
+                   help="delete: also delete the avatar's own LoRAs and their training photos")
+    a.add_argument("--yes", action="store_true", help="delete: don't ask")
     a.add_argument("--no-krea-lora", action="store_true",
                    help="refresh/pick: don't build this avatar's Krea 2 LoRA (it is built by default, ~1.5 h GPU)")
     a.add_argument("args", nargs="*", help="add: image files; remove/main: image number; "
@@ -1651,6 +1915,8 @@ def main():
             print(json.dumps(api("GET", "/status"), indent=2))
         elif args.cmd == "wake":
             print(json.dumps(api("POST", "/wake"), indent=2))
+        elif args.cmd == "restart-worker":
+            print(api("POST", "/worker/restart")["note"])
         elif args.cmd == "jobs":
             show_jobs()
         elif args.cmd == "check":
@@ -1690,21 +1956,32 @@ def main():
         elif args.cmd == "smoke":
             import smoke
             sys.exit(smoke.run(skip_cancel=args.skip_cancel))
-        elif args.cmd == "video":
+        elif args.cmd in ("video", "plan"):
             beats = video_beats(args)
-            if args.seconds > 15:
-                print(take_estimate(args.seconds), flush=True)
+            planning = args.cmd == "plan"
+            seconds = video_seconds(args, planning)
+            wan = planning or args.video_model == "wan"
+            if planning and (seconds <= 15 or beats or args.variations > 1):
+                raise ApiError("plan: a take over 15 s, without --beats or --variations (it writes the beats)")
+            if wan and seconds > 15 and not planning:
+                print(take_estimate(seconds), flush=True)
             if ensure_avatar(args):
-                submit({
+                body = {
                     "type": "video", "prompt": args.prompt, "negative_prompt": args.negative,
-                    "seconds": args.seconds, "width": args.width, "height": args.height, "seed": args.seed,
+                    **video_model_body(args, planning), "width": args.width, "height": args.height, "seed": args.seed,
                     "variations": args.variations,
                     "avatar": "none" if args.no_avatar else args.avatar, "sound": not args.no_sound,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,
-                    "quality": video_quality(args), "image_model": args.image_model, **realism_body(args),
+                    "quality": video_quality(args), "image_model": None if args.image_model == "auto" else args.image_model, **realism_body(args),
+                    **shot_body(args),
                     **({"beats": beats} if beats else {}),
                     **({"anchor_every": args.anchor_every} if args.anchor_every else {}),
-                }, args.out)
+                    **({"avatar_lora": False} if args.no_avatar_lora else {}),
+                    **({"plan_only": True} if planning else {}),
+                }
+                job_id = submit(body, args.out)
+                if planning:
+                    wait_for_plan(job_id, args)
         elif args.cmd == "photos":
             if args.image and args.avatar:
                 raise ApiError("give --image or --avatar, not both")
@@ -1739,7 +2016,7 @@ def main():
                     "subtitles": not args.no_subtitles, "narration": not args.no_narration,
                     "sound": not args.no_sound, "voice": args.voice, "avatar": "none" if args.no_avatar else args.avatar,
                     "loras": parse_loras(args.lora), "fps": args.fps, "upscale": args.upscale,
-                    "quality": video_quality(args), "image_model": args.image_model, **realism_body(args),
+                    "quality": video_quality(args), "image_model": None if args.image_model == "auto" else args.image_model, **realism_body(args),
                 }, args.out)
     except ApiError as e:
         sys.exit(str(e))

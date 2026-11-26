@@ -140,3 +140,34 @@ Job d7f73dd940b04d06858cf3fed5128133: `vidgen video "mirabel walks slowly along 
   ends much closer than the prompt suggests. A bright halo around the coat builds up in the last segments.
   `--anchor-every` (off in this run) is the intended fix; it needs its own live check.
 - Not measured: host RAM for a 60 s take with upscale (this run had no upscale).
+
+## Live check 2: re-anchoring (2026-11-24)
+
+Job 537dde61b4f3464c9de390ba7a37baa2: same prompt and avatar, `--anchor-every 3 --seed 7` (anchors before
+segments 3, 6, 9 = at 10, 25 and 40 s).
+
+- Result: 50.03 s, 32 fps, sound; render 72 min (vs 54 min without anchoring: ~6 min per anchor on the g6e.4xlarge).
+- Likeness: held. Segment 10 still shows her short red curls and face (the run without anchoring had drifted to
+  auburn hair and a different face); the coat halo is much weaker.
+- Colour: held (luma 145-150, saturation 21.1-22.1; no colour step at the anchored seams).
+- Anchored seams: a visible head-pose jump at 10 s and 25 s (profile in the last frame of the previous segment,
+  facing the camera 0.2 s later): the edit restores the face but also turns it towards the camera like the
+  reference photos. The 40 s seam is continuous (she was already facing the camera). Follow-up: tell the edit to
+  keep the head angle, or anchor only when the face is near-frontal.
+- Unrelated: two strangers and glitter particles appear near 40 s, from planner prompts ("ripples in the air");
+  the planner improvements (first frame to the planner, plan review) address this.
+
+## Live check 3: avatar Wan LoRA spike (2026-11-24)
+
+Spike LoRA `mirabel-wan-spike` v1: T2V Wan LoRA trained on mirabel's 24 Krea-dataset photos only (no clips), 1000
+steps per expert, standard speed; trained in 54 min for both experts (~1.3 s/step on photos vs 12-17 s on video
+clips; the CLI's 10.1 h estimate assumes video). Job 09b87304ca01426aa318103948ffc571: same prompt, `--seed 7`,
+`--lora mirabel-wan-spike:1.0`, no re-anchoring.
+
+- Result: 50.03 s, 32 fps, sound; render 57 min (no meaningful cost over 54 min without a LoRA).
+- Likeness: held to the end (short red curls and her face; hair a little darker by 47.5 s), close to the anchored run
+  and far better than the run without either.
+- Seams: no pose jumps at 5, 25 or 45 s (anchoring jumped at 10 and 25 s); motion more varied and natural.
+- Colour: held (luma 144-150, saturation 20.7-22.4). A faint halo late in the take remains (improvement 1).
+- Conclusion: the T2V LoRA carries over to I2V well enough; build the automatic per-avatar Wan LoRA (Part B), with a
+  one-person check on photo sets first (see the avatar media live check).

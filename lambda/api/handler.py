@@ -10,6 +10,7 @@ Every route requires a request signed with an authorized SSH ed25519 key
   POST /uploads                  presigned PUT URL for an input video (describe) or image (avatar, photos)
   GET  /status                   GPU instance state, queue depth, uptime hold, deployed models
   POST /wake                     start the GPU instance ahead of a batch (clears an uptime hold)
+  POST /worker/restart           ask the render worker to restart between jobs (pulls the latest worker code)
   GET  /avatars                  your avatars and which one is the default
   POST /avatars                  save an avatar from an uploaded image or a generated candidate
   PUT  /avatars/default          make an existing avatar the default
@@ -19,6 +20,7 @@ Every route requires a request signed with an authorized SSH ed25519 key
   PUT  /avatars/{name}/main      make image n the main image (position 1)
   GET  /avatars/{name}/history   earlier versions of an avatar
   POST /avatars/{name}/restore   bring back an earlier version
+  DELETE /avatars/{name}         {loras?}: delete an avatar (images, history, media); loras: its LoRAs too
   GET  /datasets                 your learning datasets (from their manifests)
   GET  /datasets/{name}          one dataset's manifest
   POST /datasets/{name}/uploads  presigned PUT URLs for dataset files (max 100 per call)
@@ -304,10 +306,15 @@ DRAFT_SIZE = (832, 480)  # draft quality: render small, then RIFE + 2x upscale -
 
 
 REALISM_LOOKS = ("pro", "phone", "candid", "portrait", "film")
+SHOTS = ("stream", "pov")  # videos: a fixed webcam with a ring light | a handheld phone seen by its holder
+# Video models (docs/specs/2026-11-26-helios-default.md). helios (the default): one take of any length in one
+# run, one prompt, at 640x384 and 24 fps. wan: 5 s segments chained, with beats, plans and face re-anchoring.
+VIDEO_MODELS = ("helios", "wan")
+HELIOS_SIZE, HELIOS_FPS, HELIOS_SECONDS = (640, 384), 24, 30
 # Krea 2 Turbo (text-to-image, own venv on the render box, content filter on every image).
 AVATAR_MODELS = ("wan", "krea2")      # avatar candidates
 PHOTO_MODELS = ("qwen", "krea2")      # qwen = Qwen-Image-Edit with the person; krea2 = no person
-IMAGE_MODELS = ("wan", "krea2")       # first frame of no-avatar video / story shots
+IMAGE_MODELS = ("auto", "wan", "krea2")  # first frame; auto = krea2 when it can be made, else wan
 
 
 def _realism_params(body):
@@ -316,6 +323,32 @@ def _realism_params(body):
     if look not in REALISM_LOOKS:
         raise ValueError(f"look must be one of: {', '.join(REALISM_LOOKS)}")
     return {"look": look, **{k: body.get(k) is True for k in ("natural_skin", "candid", "grain")}}
+
+
+def _video_model(body, allowed=True):
+    """The video model of a `video` job: helios unless wan is asked for. Other job types refuse the key."""
+    model = body.get("video_model")
+    if not allowed:
+        if model not in (None, ""):
+            raise ValueError("video_model (helios, wan) is for videos; stories render with wan")
+        return None
+    model = "helios" if model in (None, "") else model
+    if not isinstance(model, str) or model not in VIDEO_MODELS:
+        raise ValueError(f"video_model must be one of: {', '.join(VIDEO_MODELS)}")
+    return model
+
+
+def _shot_param(body, allowed=True):
+    """{"shot": "stream" | "pov"} for a video, {} when none is asked for. One setting, so the two can't be
+    combined. Other job types refuse it instead of ignoring it."""
+    shot = body.get("shot")
+    if shot in (None, ""):
+        return {}
+    if not allowed:
+        raise ValueError("shot (stream, pov) is for videos")
+    if not isinstance(shot, str) or shot not in SHOTS:
+        raise ValueError(f"shot must be one of: {', '.join(SHOTS)} (one at a time), or left out")
+    return {"shot": shot}
 
 
 def _enhance_params(body):
@@ -328,7 +361,7 @@ def _enhance_params(body):
     quality = body.get("quality") or "standard"
     if quality not in ("standard", "draft", "best"):
         raise ValueError("quality must be standard, draft or best")
-    image_model = body.get("image_model") or "wan"
+    image_model = body.get("image_model") or "auto"
     if image_model not in IMAGE_MODELS:
         raise ValueError(f"image_model must be one of: {', '.join(IMAGE_MODELS)}")
     out = {"fps": fps, "upscale": bool(body.get("upscale", False)), "quality": quality, "image_model": image_model,
@@ -404,15 +437,27 @@ def _validate(client, body):
         prompt = (body.get("prompt") or "").strip()
         if not prompt or len(prompt) > MAX_PROMPT_CHARS:
             raise ValueError(f"prompt is required and must be <= {MAX_PROMPT_CHARS} chars")
-        seconds = int(body.get("seconds", 5))
+        video_model = _video_model(body)
+        helios = video_model == "helios"
+        seconds = int(body["seconds"]) if body.get("seconds") is not None else (HELIOS_SECONDS if helios else 5)
         if not 1 <= seconds <= MAX_TAKE_SECONDS:
             raise ValueError(f"seconds must be 1-{MAX_TAKE_SECONDS} (over {MAX_CLIP_SECONDS} s is made of chained segments)")
         variations = int(body.get("variations") or 1)
         if not 1 <= variations <= MAX_VARIATIONS:
             raise ValueError(f"variations must be 2-{MAX_VARIATIONS}")
-        if variations > 1 and seconds > MAX_CLIP_SECONDS:
+        if variations > 1 and seconds > MAX_CLIP_SECONDS and not helios:  # a Wan take over 5 s is a chain
             raise ValueError(f"variations work with clips up to {MAX_CLIP_SECONDS} s")
+        if helios:  # one prompt, one take: nothing to plan, time or re-anchor
+            for key, what in (("beats", "beats"), ("plan_only", "plan_only (planning)"), ("anchor_every", "anchor_every")):
+                if body.get(key) not in (None, "", False):
+                    raise ValueError(f"{what} needs video model wan (helios renders the whole take from one prompt)")
         beats = _parse_beats(body.get("beats"), seconds)
+        plan_only = body.get("plan_only") is True
+        if plan_only:  # the first frame and the planner's beats, to review before rendering
+            if seconds <= 15:
+                raise ValueError("plan_only works for takes over 15 s (shorter takes keep one prompt)")
+            if beats:
+                raise ValueError("plan_only writes the beats; leave beats out")
         anchor = body.get("anchor_every")
         if anchor is not None:  # re-anchor the avatar's face every N segments (one avatar; checked in create_job)
             if not isinstance(anchor, int) or isinstance(anchor, bool) or not 2 <= anchor <= 6:
@@ -422,6 +467,7 @@ def _validate(client, body):
         return job_type, {
             **({"beats": beats} if beats else {}),
             **({"anchor_every": anchor} if anchor is not None else {}),
+            **({"plan_only": True} if plan_only else {}),
             "prompt": prompt,
             "negative_prompt": body.get("negative_prompt", ""),
             "seconds": seconds,
@@ -431,6 +477,12 @@ def _validate(client, body):
             "sound": bool(body.get("sound", True)),
             "variations": variations,
             **_enhance_params(body),
+            **_shot_param(body),
+            "video_model": video_model,
+            # Helios renders at one size and speed, whatever was sent (a CLI always sends its Wan defaults).
+            **({"width": HELIOS_SIZE[0], "height": HELIOS_SIZE[1], "fps": HELIOS_FPS, "quality": "standard"
+                if (body.get("quality") or "standard") == "draft" else (body.get("quality") or "standard"),
+                "upscale": bool(body.get("upscale", False))} if helios else {}),
         }
 
     if job_type == "describe":
@@ -440,6 +492,8 @@ def _validate(client, body):
         }
 
     if job_type == "story":
+        _shot_param(body, allowed=False)
+        _video_model(body, allowed=False)
         story = (body.get("story") or "").strip()
         if not story or len(story) > MAX_STORY_CHARS:
             raise ValueError(f"story is required and must be <= {MAX_STORY_CHARS} chars")
@@ -598,6 +652,8 @@ def _series(series, scenes):
 
 
 def _validate_photos(client, body):
+    _shot_param(body, allowed=False)
+    _video_model(body, allowed=False)
     scenes = body.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) > MAX_PHOTOS:
         raise ValueError(f"scenes must be a list of at most {MAX_PHOTOS}")
@@ -690,8 +746,8 @@ def _validate_photos(client, body):
 #   avatars/<client>/<name>/history/<created_at>/...   earlier versions, same layout
 #   avatars/<client>/_default.json           {name}
 # Avatars saved before multi-image support have no `images`: they read as a one-image set
-# [reference_key] (avatars/<client>/<name>/reference.<ext>). The API role cannot delete
-# objects, so images dropped from the set stay in S3 (history keeps a copy anyway).
+# [reference_key] (avatars/<client>/<name>/reference.<ext>). Images dropped from the set stay
+# in S3 (history keeps a copy anyway); DELETE /avatars/{name} removes the whole folder.
 
 def _s3_json(key):
     try:
@@ -761,7 +817,9 @@ def list_avatars(client):
         a = _s3_json(p["Prefix"] + "avatar.json")
         if a:
             avatars.append(dict({k: a[k] for k in ("name", "description", "created_at")},
-                                images=len(_image_keys(a)), krea_lora=a.get("krea_lora") or {"state": "none"}))
+                                images=len(_image_keys(a)), krea_lora=a.get("krea_lora") or {"state": "none"},
+                                media=a.get("media") or {"state": "none"},
+                                wan_lora=a.get("wan_lora") or {"state": "none"}))
     return _resp(200, {"default": _default_avatar_name(client), "avatars": avatars})
 
 
@@ -795,24 +853,45 @@ def create_avatar(client, body):
     krea_lora = body.get("krea_lora", True)
     if not isinstance(krea_lora, bool):
         return _resp(400, {"error": "krea_lora must be true or false"})
+    wan_lora = body.get("wan_lora", True)
+    if not isinstance(wan_lora, bool):
+        return _resp(400, {"error": "wan_lora must be true or false"})
 
     _archive_avatar(client, name)
     _write_avatar(client, name, sources, description)
+    av = _get_avatar(client, name)
+    if (av or {}).get("wan_lora"):  # a new or replaced avatar: never the previous person's Wan LoRA
+        _set_wan_lora(client, name, {k: v for k, v in av["wan_lora"].items() if k != "ready"})  # version stays: monotonic
+    if not wan_lora:
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="skipped"))
     if krea_lora:
         try:
-            kl = _queue_krea_lora(client, name)
+            kl = _queue_krea_lora(client, name, wan=wan_lora)
         except (ClientError, ValueError) as e:  # the avatar is saved either way
             kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
                                                    error=f"could not queue the Krea LoRA build: {e}"))
+            _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+            if wan_lora:
+                _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                                 error=f"could not queue the Wan LoRA build: {e}"))
     else:
         kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="skipped"))
+        try:  # no Krea LoRA, but every avatar gets its photos and clips (and, by default, a Wan LoRA)
+            _queue_avatar_media(client, name, wan=wan_lora)
+        except (ClientError, ValueError) as e:
+            _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+            if wan_lora:
+                _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                                 error=f"could not queue the Wan LoRA build: {e}"))
 
     # make_default: true/false as asked; omitted = only if there is no default yet.
     make_default = body.get("make_default")
     is_default = bool(make_default) if make_default is not None else not _default_avatar_name(client)
     if is_default:
         _put_json(f"avatars/{client}/_default.json", {"name": name})
-    return _resp(200, {"name": name, "default": is_default, "images": len(sources), "krea_lora": kl})
+    saved = _get_avatar(client, name) or {}
+    return _resp(200, {"name": name, "default": is_default, "images": len(sources), "krea_lora": kl,
+                       "media": saved.get("media"), "wan_lora": saved.get("wan_lora")})
 
 
 # ---------------------------------------------------------------- Krea 2 LoRA per avatar
@@ -847,7 +926,74 @@ def _set_krea_lora(client, name, krea_lora):
     return krea_lora
 
 
-def _queue_krea_lora(client, name):
+# ---------------------------------------------------------------- Wan LoRA per avatar
+# The avatar_photoset job also writes a Wan dataset (photos + clips) and queues a Wan train job; the trainer
+# registers it as avatar-<name>-wan and marks wan_lora ready. docs/specs/2026-11-24-avatar-wan-lora.md
+
+WAN_LORA_BUSY = ("queued", "photos", "training")
+
+
+def _avatar_wan_lora_name(name):
+    """avatar-<name>-wan, shortened with a hash when it would pass 32 characters."""
+    full = f"avatar-{name}-wan"
+    return full if len(full) <= 32 else f"avatar-{name[:12]}-{hashlib.sha1(name.encode()).hexdigest()[:6]}-wan"
+
+
+def _wan_lora_of(client, name):
+    """The avatar's wan_lora record without the per-build fields (keeps the last ready link)."""
+    wl = (_get_avatar(client, name) or {}).get("wan_lora") or {}
+    return {k: wl[k] for k in ("ready", "lora", "trigger", "version") if k in wl}  # version: stays monotonic
+
+
+def _set_wan_lora(client, name, wan_lora):
+    avatar = _get_avatar(client, name)
+    avatar["wan_lora"] = wan_lora
+    _put_json(f"avatars/{client}/{name}/avatar.json", avatar)
+    return wan_lora
+
+
+def _wan_build(client, name, job_id):
+    """Photoset-job params for a Wan LoRA build by job_id, with the avatar's wan_lora marked queued; {} (and
+    wan_lora failed) when the name already holds a Krea LoRA."""
+    lora = _avatar_wan_lora_name(name)
+    kind = _lora_name_model(client, lora)
+    if kind and kind != "t2v":
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                         error=f"LoRA name '{lora}' already holds a {kind} LoRA"))
+        return {}
+    prev = (_get_avatar(client, name) or {}).get("wan_lora") or {}
+    version = max(_lora_versions(client, lora) + [int(prev.get("version") or 0)] + [0]) + 1
+    _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="queued", lora=lora, version=version,
+                                     trigger=name, job_ids=[job_id]))
+    return {"wan_lora": True, "wan_lora_name": lora, "wan_version": version}
+
+
+def avatar_wan_lora(client, name, body):
+    """POST /avatars/{name}/wan-lora: build (a new version of) the avatar's Wan LoRA from its current media."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    wl = avatar.get("wan_lora") or {}
+    if wl.get("state") in WAN_LORA_BUSY and any(_job_live(j) for j in wl.get("job_ids") or []):
+        return _resp(409, {"error": f"avatar '{name}' already has a Wan LoRA build {wl['state']}; wait for it"})
+    if (avatar.get("media") or {}).get("state") != "ready":
+        return _resp(409, {"error": f"avatar '{name}' has no ready media; make media first (vidgen avatar media)"})
+    job_id = uuid.uuid4().hex
+    try:
+        params = {"avatar": name, "trigger": name, "avatar_created_at": avatar["created_at"], "krea_lora": False,
+                  "wan_only": True, **_wan_build(client, name, job_id)}
+        if not params.get("wan_lora"):
+            return _resp(409, {"error": (_get_avatar(client, name).get("wan_lora") or {}).get("error")})
+        _queue_job(client, "avatar_photoset", params, job_id=job_id)
+    except (ClientError, ValueError) as e:
+        _set_wan_lora(client, name, dict(_wan_lora_of(client, name), state="failed",
+                                         error=f"could not queue the Wan LoRA build: {e}"))
+        return _resp(502, {"error": f"could not queue the Wan LoRA build: {e}"})
+    return _resp(202, {"name": name, "wan_lora": _get_avatar(client, name)["wan_lora"]})
+
+
+def _queue_krea_lora(client, name, wan=False):
     """Queue a photo set + training for (a new version of) the avatar's Krea LoRA. The version counts the
     registered versions and the avatar's last build, so builds started before training finishes don't
     collide; the last ready LoRA stays linked (`ready`) until the new one is ready."""
@@ -856,17 +1002,95 @@ def _queue_krea_lora(client, name):
     lora = _avatar_lora_name(name)
     kind = _lora_name_model(client, lora)
     if kind and kind != "krea2":
-        return _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
-                                                 error=f"LoRA name '{lora}' already holds a Wan LoRA"))
+        kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
+                                               error=f"LoRA name '{lora}' already holds a Wan LoRA"))
+        _queue_avatar_media(client, name, wan=wan)  # no Krea LoRA, but the avatar still gets its media
+        return kl
     version = max(_lora_versions(client, lora) + [int(prev.get("version") or 0)] + [0]) + 1
     params = {"avatar": name, "lora": lora, "version": version, "trigger": name, "count": AVATAR_DATASET_PHOTOS,
-              "avatar_created_at": avatar["created_at"]}
+              "avatar_created_at": avatar["created_at"], "krea_lora": True}
     # The job id is on the avatar before the job is sent: a warm worker reads it as soon as the message lands.
+    # The same job also makes the avatar's media (photos + clips), so the media record names it too.
     job_id = uuid.uuid4().hex
+    params.update(_wan_build(client, name, job_id) if wan else {"wan_lora": False})
     kl = _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="queued", lora=lora,
                                            version=version, trigger=name, job_ids=[job_id]))
+    _set_media(client, name, {"state": "queued", "job_id": job_id, "created_at": avatar["created_at"]})
     _queue_job(client, "avatar_photoset", params, job_id=job_id)
     return kl
+
+
+# ---------------------------------------------------------------- avatar media (photos + 2 s clips)
+# docs/specs/2026-11-24-avatar-media.md
+
+MEDIA_BUSY = ("queued", "photos", "clips")
+
+
+def _set_media(client, name, media):
+    avatar = _get_avatar(client, name)
+    avatar["media"] = media
+    _put_json(f"avatars/{client}/{name}/avatar.json", avatar)
+    return media
+
+
+def _queue_avatar_media(client, name, media_only=False, wan=False):
+    """Queue the avatar's photo set + clips without a Krea LoRA build (krea_lora false, or media for an
+    existing avatar). The job id is on the avatar's media record before the job is sent."""
+    avatar = _get_avatar(client, name)
+    params = {"avatar": name, "trigger": name, "count": AVATAR_DATASET_PHOTOS,
+              "avatar_created_at": avatar["created_at"], "krea_lora": False, "media_only": media_only}
+    job_id = uuid.uuid4().hex
+    params.update(_wan_build(client, name, job_id) if wan and not media_only else {"wan_lora": False})
+    media = _set_media(client, name, {"state": "queued", "job_id": job_id, "created_at": avatar["created_at"]})
+    _queue_job(client, "avatar_photoset", params, job_id=job_id)
+    return media
+
+
+def avatar_media_create(client, name, body):
+    """POST /avatars/{name}/media: make (new) photos + clips for an existing avatar. Reuses the photos of its
+    ready Krea LoRA dataset when there is one, so only the clips are rendered."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    media = avatar.get("media") or {}
+    if media.get("state") in MEDIA_BUSY and _job_live(media.get("job_id")):
+        return _resp(409, {"error": f"avatar '{name}' already has media being made ({media['state']}); wait for it"})
+    try:
+        return _resp(202, {"name": name, "media": _queue_avatar_media(client, name, media_only=True)})
+    except (ClientError, ValueError) as e:
+        _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+        return _resp(502, {"error": f"could not queue the avatar media: {e}"})
+
+
+def _job_live(job_id):
+    """Whether the job is still queued or running (a busy record whose job ended or vanished is stale)."""
+    if not job_id:
+        return False
+    job = jobs.get_item(Key={"job_id": job_id}).get("Item")
+    return bool(job) and job.get("status") in ("queued", "running")
+
+
+MEDIA_FILE = re.compile(r"(photo_\d{2}\.png|clip_\d\.mp4|media\.json)")
+
+
+def avatar_media_get(client, name):
+    """GET /avatars/{name}/media: {state, files: [{name, size, url}]}; files only once the media is ready."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar or not avatar.get("media"):
+        return _resp(404, {"error": f"avatar '{name}' has no media"})
+    media = avatar["media"]
+    if media.get("state") != "ready":
+        return _resp(200, {"state": media.get("state"), "files": []})
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = _s3_json(prefix + "media.json") or {}
+    entries = [(e.get("file"), e.get("size")) for e in (doc.get("photos") or []) + (doc.get("clips") or [])]
+    entries.append(("media.json", None))
+    files = [{"name": f, "size": size, "url": s3.generate_presigned_url(
+                "get_object", Params={"Bucket": BUCKET, "Key": prefix + f}, ExpiresIn=URL_TTL)}
+             for f, size in entries if isinstance(f, str) and MEDIA_FILE.fullmatch(f)]
+    return _resp(200, {"state": "ready", "files": files})
 
 
 def avatar_krea_lora(client, name, body):
@@ -877,7 +1101,13 @@ def avatar_krea_lora(client, name, body):
     state = (_get_avatar(client, name).get("krea_lora") or {}).get("state")
     if state in KREA_LORA_BUSY:
         return _resp(409, {"error": f"avatar '{name}' already has a Krea LoRA build {state}; wait for it to finish"})
-    return _resp(202, {"name": name, "krea_lora": _queue_krea_lora(client, name)})
+    try:
+        return _resp(202, {"name": name, "krea_lora": _queue_krea_lora(client, name)})
+    except (ClientError, ValueError) as e:
+        _set_krea_lora(client, name, dict(_krea_lora_of(client, name), state="failed",
+                                          error=f"could not queue the Krea LoRA build: {e}"))
+        _set_media(client, name, {"state": "failed", "error": f"could not queue the avatar media: {e}"})
+        return _resp(502, {"error": f"could not queue the Krea LoRA build: {e}"})
 
 
 def _write_avatar(client, name, source_keys, description, created_at=None):
@@ -896,6 +1126,10 @@ def _write_avatar(client, name, source_keys, description, created_at=None):
     prev = _get_avatar(client, name) or {}
     if prev.get("krea_lora"):  # image edits and restore keep the Krea LoRA link (create_avatar sets it anew)
         doc["krea_lora"] = prev["krea_lora"]
+    if prev.get("media"):  # and the media record
+        doc["media"] = prev["media"]
+    if prev.get("wan_lora"):  # and the Wan LoRA link
+        doc["wan_lora"] = prev["wan_lora"]
     _put_json(f"avatars/{client}/{name}/avatar.json", doc)
     return images
 
@@ -1021,6 +1255,67 @@ def set_default_avatar(client, body):
     return _resp(200, {"default": name})
 
 
+def _avatar_live_job(client, name, avatar):
+    """The id of a queued or running job that needs the avatar (builds its LoRAs or media, or renders with its
+    images), or None."""
+    kl, wl, media = (avatar.get(k) or {} for k in ("krea_lora", "wan_lora", "media"))
+    for job_id in (kl.get("job_ids") or []) + (wl.get("job_ids") or []) + [media.get("job_id")]:
+        if _job_live(job_id):
+            return job_id
+    items = jobs.query(IndexName=JOBS_INDEX, KeyConditionExpression=Key("client").eq(client),
+                       ScanIndexForward=False, Limit=JOB_HISTORY_LIMIT).get("Items", [])
+    for item in items:
+        raw = item.get("params") or "{}"
+        if item.get("status") in ("queued", "running") and (
+                f'"avatars/{client}/{name}/' in raw or json.loads(raw).get("avatar") == name):
+            return item["job_id"]
+    return None
+
+
+def _avatar_lora_names(client, name, avatar):
+    """The LoRA names that belong to this avatar: avatar-<name> and avatar-<name>-wan, when their files
+    (or training set) say they were made for it. Avatar 'x-wan' and avatar 'x' can meet on one name."""
+    names = {_avatar_lora_name(name), _avatar_wan_lora_name(name)}
+    names.update(l for l in ((avatar.get(k) or {}).get("lora") for k in ("krea_lora", "wan_lora")) if l)
+    owned = []
+    for lora in sorted(n for n in names if n.startswith("avatar-") and DATASET_NAME.match(n)):
+        docs = [_s3_json(f"datasets/{client}/{lora}/manifest.json")]
+        docs += [_s3_json(f"loras/{client}/{lora}/v{v}/lora.json") for v in _lora_versions(client, lora)]
+        if any(d and d.get("avatar") == name for d in docs):
+            owned.append(lora)
+    return owned
+
+
+def delete_avatar(client, name, body):
+    """DELETE /avatars/{name} {loras?}: remove the avatar with its images, history and media; with
+    loras: true also its Krea 2 and Wan LoRAs and their training photos. There is no undo."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return _resp(404, {"error": f"avatar '{name}' not found"})
+    with_loras = body.get("loras", False)
+    if not isinstance(with_loras, bool):
+        return _resp(400, {"error": "loras must be true or false"})
+    live = _avatar_live_job(client, name, avatar)
+    if live:
+        return _resp(409, {"error": f"avatar '{name}' is in use by job {live} (queued or running); "
+                                    "wait for it or cancel it, then delete"})
+    loras = _avatar_lora_names(client, name, avatar) if with_loras else []
+    keys = []
+    for lora in loras:
+        keys += list(_list_keys(f"loras/{client}/{lora}/")) + list(_list_keys(f"datasets/{client}/{lora}/"))
+    doc = f"avatars/{client}/{name}/avatar.json"
+    keys += [k for k in _list_keys(f"avatars/{client}/{name}/") if k != doc]
+    was_default = _default_avatar_name(client) == name
+    # avatar.json (and the default marker) go last: if S3 refuses anything the avatar is still listed, still
+    # the default, and the delete can be repeated.
+    last = [doc] + ([f"avatars/{client}/_default.json"] if was_default else [])
+    failed = _delete_keys(keys) or _delete_keys(last)
+    if failed:
+        return _resp(502, {"error": f"could not delete {failed} of the files of avatar '{name}'; try again"})
+    return _resp(200, {"name": name, "deleted": len(keys) + len(last), "loras": loras, "was_default": was_default})
+
+
 # ---------------------------------------------------------------- datasets
 #
 #   datasets/<client>/<name>/raw/<relative path>   the files, uploaded straight from the client
@@ -1061,9 +1356,12 @@ def _list_keys(prefix):
 
 
 def _delete_keys(keys):
-    keys = list(keys)
+    """Delete the keys; returns how many S3 refused."""
+    keys, failed = list(keys), 0
     for i in range(0, len(keys), 1000):
-        s3.delete_objects(Bucket=BUCKET, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]], "Quiet": True})
+        r = s3.delete_objects(Bucket=BUCKET, Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]], "Quiet": True})
+        failed += len(r.get("Errors") or [])
+    return failed
 
 
 def dataset_uploads(client, name, body):
@@ -1242,6 +1540,15 @@ def _resolve_loras(client, requested):
     return out
 
 
+def _auto_first_frame(job_type, avatars):
+    """The default first frame: Krea 2 whenever it can be made, else Wan. Videos: no avatar, or exactly one
+    avatar with a ready Krea LoRA. Stories: always (shots whose avatars have no Krea LoRA keep the Qwen keyframe)."""
+    if job_type == "story" or not avatars:
+        return "krea2"
+    ready = len(avatars) == 1 and ((avatars[0].get("krea_lora") or {}).get("ready"))
+    return "krea2" if ready else "wan"
+
+
 def _avatar_first_frame(client, job_type, params):
     """With image_model krea2 and avatars: a Krea first frame for an avatar that has a ready Krea LoRA (its
     LoRA added, its name as trigger). Video: exactly one avatar, and it needs the LoRA. Story: the first
@@ -1272,6 +1579,25 @@ def _with_avatar_lora(client, avatar_lora, krea):
     if len(own) > MAX_RENDER_LORAS - 1:
         raise ValueError(f"with an avatar's Krea 2 LoRA, add at most one more Krea 2 LoRA ({len(own)} given)")
     return _resolve_loras(client, [dict(avatar_lora, weight=1.0)]) + own
+
+
+def _with_avatar_wan_lora(client, params):
+    """A video starring an avatar with a ready Wan LoRA gets it first, at 1.0 (its final weights, pinned), within
+    the Wan LoRA limit; not when the user already named it. A broken link is skipped (logged), never a 400."""
+    avatars = params.get("avatars") or []
+    ready = ((avatars[0].get("wan_lora") or {}).get("ready") or {}) if avatars else {}
+    if not ready.get("lora") or any(l["name"] == ready["lora"] for l in params.get("loras") or []):
+        return
+    try:
+        lora = _resolve_loras(client, [{"name": ready["lora"], "version": ready["version"], "weight": 1.0}])
+    except ValueError as e:
+        print(json.dumps({"event": "avatar_wan_lora_skipped", "avatar": avatars[0].get("name"), "error": str(e)}))
+        return
+    loras = lora + list(params.get("loras") or [])
+    if sum(l["model"] == "t2v" for l in loras) > MAX_RENDER_LORAS:
+        raise ValueError(f"at most {MAX_RENDER_LORAS} Wan LoRAs per job, counting the avatar's own Wan LoRA "
+                         f"'{ready['lora']}' (send avatar_lora: false, or --no-avatar-lora, to leave it out)")
+    params["loras"] = loras
 
 
 def _job_loras(client, job_type, params, requested):
@@ -1733,10 +2059,14 @@ def create_job(client, body):
         job_type, params = _validate(client, body)
         if job_type in ("video", "story"):
             params["avatars"] = _resolve_avatars(client, body.get("avatar"))
+            if params.get("image_model") == "auto":
+                params["image_model"] = _auto_first_frame(job_type, params["avatars"])
             if params.get("anchor_every") and len(params["avatars"]) != 1:
                 raise ValueError("anchor_every needs exactly one avatar in the take")
         if job_type != "lora_preview":  # a preview names its LoRA in "name"
             _job_loras(client, job_type, params, body.get("loras"))
+        if job_type == "video" and body.get("avatar_lora") is not False:
+            _with_avatar_wan_lora(client, params)
         if job_type in ("video", "story"):
             _avatar_first_frame(client, job_type, params)
     except (ValueError, TypeError) as e:
@@ -1804,6 +2134,8 @@ def _realism_summary(params):
     out = {k: True for k in ("natural_skin", "candid", "grain") if params.get(k)}
     if params.get("look", "pro") != "pro":
         out["look"] = params["look"]
+    if params.get("shot"):
+        out["shot"] = params["shot"]
     if params.get("image_model") == "krea2":
         out["first_frame"] = "krea2"
     if params.get("model") == "krea2":
@@ -1824,7 +2156,9 @@ def _summary(job_type, params):
                                           "quality": params.get("quality", "standard"), **_realism_summary(params),
                                           **({"beats": len(params["beats"])} if params.get("beats") else {}),
                                           **({"anchor_every": params["anchor_every"]}
-                                             if params.get("anchor_every") else {})}
+                                             if params.get("anchor_every") else {}),
+                                          **({"plan": True} if params.get("plan_only") else {}),
+                                          **({"video_model": params["video_model"]} if params.get("video_model") else {})}
     if job_type == "story":
         return " ".join(params.get("story", "").split())[:120], {
             "shots": params.get("max_shots"), "seconds_per_shot": params.get("seconds_per_shot"),
@@ -1960,10 +2294,48 @@ def _models():
     return out
 
 
+# How far the render machine is from taking a job: the box writes its own percent and line to this object
+# (first boot at each step, the worker when it starts); GET /status adds the instance's state to it.
+READY_KEY = "status/render.json"
+FIRST_BOOT_MINUTES = 45  # a first boot without the model mirror, roughly
+
+
+def _ready_report():
+    try:
+        return json.loads(s3.get_object(Bucket=BUCKET, Key=READY_KEY)["Body"].read())
+    except Exception:  # none yet, or unreadable: the instance's state still says something
+        return None
+
+
+def _readiness(inst, report, now):
+    """{"percent": 0-100, "text": one line} for the render machine."""
+    state = inst["State"]["Name"]
+    if state == "stopped":
+        return {"percent": 0, "text": "Off. It starts when you send a job (or Wake): a few minutes to boot, "
+                                      "then the first job loads its model."}
+    if state == "pending":
+        return {"percent": 5, "text": "Starting the machine."}
+    if state != "running":
+        return {"percent": 0, "text": "Stopping." if state in ("stopping", "shutting-down") else f"Machine is {state}."}
+    launched = inst["LaunchTime"].timestamp()
+    if isinstance(report, dict) and (report.get("updated_at") or 0) >= launched - 5:  # reported since this start
+        percent = report.get("percent")
+        percent = max(0, min(100, int(percent))) if isinstance(percent, (int, float)) and not isinstance(percent, bool) else 50
+        return {"percent": percent, "text": " ".join(str(report.get("text") or "Working").split())[:200]}
+    minutes = int((now - launched) / 60)
+    disks = [d["Ebs"]["AttachTime"].timestamp() for d in inst.get("BlockDeviceMappings") or [] if d.get("Ebs", {}).get("AttachTime")]
+    if disks and abs(launched - min(disks)) < 600:  # the disk is as new as this start: a first boot
+        return {"percent": min(95, 5 + int(90 * minutes / FIRST_BOOT_MINUTES)),
+                "text": f"First boot: installing and downloading the models, about {minutes} of ~{FIRST_BOOT_MINUTES} min "
+                        "(an estimate; the box reports details once its worker starts)."}
+    return {"percent": 50, "text": "Machine is up; starting the worker (about a minute)."}
+
+
 def status():
     inst = _instance()
     out = {"instance": inst["State"]["Name"], "queued_jobs": _queue_depth(), "uptime_hold": _hold(),
-           "instance_type": inst.get("InstanceType"), "models": _models()}
+           "instance_type": inst.get("InstanceType"), "models": _models(),
+           "readiness": _readiness(inst, _ready_report(), time.time())}
     if inst["State"]["Name"] == "running":
         out["running_minutes"] = int((time.time() - inst["LaunchTime"].timestamp()) / 60)
     if TRAINER_INSTANCE_ID:
@@ -1980,6 +2352,21 @@ def status():
 def wake():
     _set_hold(False)
     return _resp(200, {"instance": _ensure_started()})
+
+
+# POST /worker/restart: a request row in the jobs table. The worker looks for it between jobs and exits, and
+# systemd starts it again, which pulls the latest worker code. A render in progress is never cut off.
+RESTART_KEY = "_restart_worker"
+
+
+def restart_worker():
+    state = _instance_state()
+    if state != "running":
+        return _resp(409, {"error": f"the render machine is {state}: its worker starts fresh, with the latest code, "
+                                    "the next time the machine starts"})
+    jobs.put_item(Item={"job_id": RESTART_KEY, "client": "_system", "requested_at": int(time.time())})
+    return _resp(200, {"requested": True, "note": "the worker restarts when it is between jobs (within ~20 s when "
+                                                  "idle, else after the running job) and is back in about a minute"})
 
 
 def waker():
@@ -2040,6 +2427,8 @@ def handler(event, context):
         return status()
     if route == "POST /wake":
         return wake()
+    if route == "POST /worker/restart":
+        return restart_worker()
     if route == "GET /avatars":
         return list_avatars(client)
     if route == "POST /avatars":
@@ -2048,6 +2437,8 @@ def handler(event, context):
         return set_default_avatar(client, body)
     if route == "GET /avatars/{name}":
         return get_avatar(client, params["name"].lower())
+    if route == "DELETE /avatars/{name}":
+        return delete_avatar(client, params["name"], body)
     if route == "POST /avatars/{name}/images":
         return add_avatar_images(client, params["name"].lower(), body)
     if route == "DELETE /avatars/{name}/images/{n}":
@@ -2058,6 +2449,12 @@ def handler(event, context):
         return avatar_history(client, params["name"].lower())
     if route == "POST /avatars/{name}/krea-lora":
         return avatar_krea_lora(client, params["name"], body)
+    if route == "POST /avatars/{name}/wan-lora":
+        return avatar_wan_lora(client, params["name"], body)
+    if route == "POST /avatars/{name}/media":
+        return avatar_media_create(client, params["name"], body)
+    if route == "GET /avatars/{name}/media":
+        return avatar_media_get(client, params["name"])
     if route == "POST /avatars/{name}/restore":
         return restore_avatar(client, params["name"].lower(), body)
     if route == "GET /datasets":

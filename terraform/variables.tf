@@ -30,16 +30,38 @@ variable "subnet_visibility_tag" {
 
 variable "instance_type" {
   description = <<-EOT
-    GPU instance type. g6e.xlarge-16xlarge all have one L40S (48 GB VRAM) and
-    render at the same speed; larger sizes add CPU RAM. 4xlarge (128 GB) holds
-    one big model (~55-65 GB) at a time, so switching between T2V, I2V and the
-    avatar keyframe model reloads ~60 GB (~5 min). 8xlarge/16xlarge (256/512 GB)
-    keep all three loaded, which only pays off when jobs come in batches. See
-    "Choosing the instance" in RUNBOOK.md. Changing this replaces the spot
-    instance and its disk: first boot re-downloads the models (~25 min).
+    GPU instance type of the render box: a g7e (one RTX PRO 6000, 96 GB VRAM). Helios, the default video
+    model, and a whole Wan or image-edit pipeline stay on the GPU there (no moving parts on and off), and the
+    worker's and Krea's torch builds are the ones for that GPU. g7e.4xlarge has 128 GB of RAM, g7e.8xlarge
+    256 GB. `make g7e` finds a size, market and zone with capacity and sets this, on_demand and
+    availability_zone (RUNBOOK "Moving the render box to a g7e"). Changing it replaces the instance and its
+    disk: first boot restores the models from the model mirror, or downloads them (~45 min).
   EOT
   type        = string
-  default     = "g6e.4xlarge"
+  default     = "g7e.4xlarge"
+
+  validation {
+    condition     = startswith(var.instance_type, "g7e.")
+    error_message = "The render box runs on g7e only (g7e.4xlarge, g7e.8xlarge): run `make g7e` to pick one with capacity."
+  }
+}
+
+variable "render_instance_name" {
+  description = "Name tag of the render box (what the EC2 console lists it as). Only a label: permissions and the API go by the Project and Role tags and the instance id."
+  type        = string
+  default     = "console-render"
+}
+
+variable "trainer_instance_name" {
+  description = "Name tag of the trainer machine (what the EC2 console lists it as). Only a label."
+  type        = string
+  default     = "console-learn"
+}
+
+variable "on_demand" {
+  description = "Run the render box on-demand instead of spot: for a type with no spot capacity, at the on-demand price (g6e.8xlarge ~$4.5/h). Changing this replaces the instance and its disk."
+  type        = bool
+  default     = false
 }
 
 variable "spot_max_price" {
@@ -49,9 +71,9 @@ variable "spot_max_price" {
 }
 
 variable "root_volume_gb" {
-  description = "Root EBS volume size. Holds the OS, Python env and model weights (~210 GB once the two Wan2.2 A14B models are converted to bf16)."
+  description = "Root EBS volume size. Holds the OS, the Python envs and model weights (~330 GB: the bf16 Wan models, the edit and description models, Helios, Krea 2). A first boot without the model mirror also holds both fp32 Wan downloads (~240 GB) until they are converted."
   type        = number
-  default     = 500
+  default     = 750
 }
 
 variable "root_volume_throughput" {
@@ -70,24 +92,48 @@ variable "video_model" {
   description = "Hugging Face repo for text-to-video and avatar candidate frames (diffusers format)."
   type        = string
   default     = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.video_model))
+    error_message = "video_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "i2v_model" {
   description = "Hugging Face repo for image-to-video from an avatar keyframe (diffusers format)."
   type        = string
   default     = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.i2v_model))
+    error_message = "i2v_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "vlm_model" {
   description = "Hugging Face repo for the vision-language model used for descriptions and story shot lists."
   type        = string
   default     = "Qwen/Qwen2.5-VL-7B-Instruct"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.vlm_model))
+    error_message = "vlm_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "edit_model" {
   description = "Hugging Face repo for the image-edit model that places 1-3 avatars into each shot (diffusers format)."
   type        = string
   default     = "Qwen/Qwen-Image-Edit-2511"
+
+  # A Hugging Face repo id: it is put into root shell commands at first boot.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", var.edit_model))
+    error_message = "edit_model must be a Hugging Face repo id like org/name."
+  }
 }
 
 variable "edit_lightning" {
@@ -144,6 +190,12 @@ variable "train_instance_type" {
   description = "Trainer instance type. g6e.4xlarge (L40S 48 GB) trains a T2V expert at ~12.7 s/step (measured); H100 spot was not available in this account."
   type        = string
   default     = "g6e.4xlarge"
+}
+
+variable "train_availability_zone" {
+  description = "AZ for the trainer's subnet. Empty = the same as availability_zone. Set it to keep the trainer where it is when the render box moves to another AZ."
+  type        = string
+  default     = ""
 }
 
 variable "train_root_volume_gb" {

@@ -53,8 +53,23 @@ data "aws_iam_policy_document" "worker" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["code/*", "uploads/*"]
+      values   = ["code/*", "uploads/*", "models/*"]
     }
+  }
+
+  # Model mirror (docs/specs/2026-11-25-model-mirror.md): the render box restores its weights from the
+  # bucket and uploads what the mirror lacks. Its own units only; models/trainer/ belongs to the trainer.
+  statement {
+    sid     = "ModelMirror"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      "${aws_s3_bucket.data.arn}/models/hub/*",
+      "${aws_s3_bucket.data.arn}/models/bf16/*",
+      "${aws_s3_bucket.data.arn}/models/mmaudio/*",
+      "${aws_s3_bucket.data.arn}/models/krea-2-turbo/*",
+      "${aws_s3_bucket.data.arn}/models/nsfw-filter/*",
+      "${aws_s3_bucket.data.arn}/models/helios/*",
+    ]
   }
 
   statement {
@@ -69,10 +84,24 @@ data "aws_iam_policy_document" "worker" {
     ]
   }
 
+  # Avatar media for an existing avatar reuses the photos of its Krea LoRA dataset.
+  statement {
+    sid       = "ReadAvatarDatasets"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.data.arn}/datasets/*/avatar-*"]
+  }
+
   statement {
     sid       = "WriteOutputs"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.data.arn}/outputs/*"]
+  }
+
+  # The dashboard's "ready to render" line: first boot and the worker write it, GET /status reads it.
+  statement {
+    sid       = "WriteReadiness"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.data.arn}/status/render.json"]
   }
 
   # Krea 2 avatar LoRAs: the avatar_photoset job writes the avatar's dataset, updates its krea_lora
@@ -83,6 +112,8 @@ data "aws_iam_policy_document" "worker" {
     resources = [
       "${aws_s3_bucket.data.arn}/datasets/*/avatar-*",
       "${aws_s3_bucket.data.arn}/avatars/*/avatar.json",
+      # Avatar media: photos, 2 s clips and media.json (docs/specs/2026-11-24-avatar-media.md).
+      "${aws_s3_bucket.data.arn}/avatars/*/media/*",
     ]
   }
 
@@ -188,6 +219,24 @@ data "aws_iam_policy_document" "api" {
       "${aws_s3_bucket.data.arn}/outputs/*",
       "${aws_s3_bucket.data.arn}/uploads/*",
       "${aws_s3_bucket.data.arn}/avatars/*",
+    ]
+  }
+
+  # The render machine's readiness report (written by the box), shown by GET /status.
+  statement {
+    sid       = "ReadReadiness"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.data.arn}/status/render.json"]
+  }
+
+  # DELETE /avatars/{name}: the avatar's folder and the default marker, and (when asked) the avatar's own
+  # LoRAs. Uploaded LoRAs cannot be named avatar-*, so no other LoRA is in reach.
+  statement {
+    sid     = "DeleteAvatars"
+    actions = ["s3:DeleteObject"]
+    resources = [
+      "${aws_s3_bucket.data.arn}/avatars/*",
+      "${aws_s3_bucket.data.arn}/loras/*/avatar-*",
     ]
   }
 

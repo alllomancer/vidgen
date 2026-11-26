@@ -35,6 +35,9 @@ s_mean, s_std = models.colour_stats(shifted)
 r_mean, r_std = stats
 out = models.match_colours(shifted, stats)
 assert out.shape == shifted.shape and out.dtype == np.uint8
+threads, models.COLOUR_THREADS = models.COLOUR_THREADS, 1
+assert np.array_equal(models.match_colours(shifted, stats), out), "frames in parallel: the same pixels as one at a time"
+models.COLOUR_THREADS = threads
 assert np.array_equal(out[0], shifted[0]), "frame 0 untouched: no step at the seam"
 
 

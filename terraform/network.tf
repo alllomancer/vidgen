@@ -20,6 +20,17 @@ data "aws_subnet" "gpu" {
   }
 }
 
+# The trainer keeps its own AZ when the render box moves: moving replaces an instance and its disk.
+data "aws_subnet" "trainer" {
+  vpc_id            = data.aws_vpc.main.id
+  availability_zone = var.train_availability_zone == "" ? var.availability_zone : var.train_availability_zone
+
+  filter {
+    name   = "tag:Visibility"
+    values = [var.subnet_visibility_tag]
+  }
+}
+
 resource "aws_security_group" "worker" {
   name        = "${var.project}-worker"
   description = "GPU worker: no inbound, all outbound"

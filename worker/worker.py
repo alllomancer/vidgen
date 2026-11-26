@@ -7,6 +7,10 @@ invisible, honours cancel requests and enforces JOB_TIMEOUT_MINUTES."""
 import hashlib
 import json
 import os
+
+# Before anything imports huggingface_hub: its Xet transfers at full speed (weights are tens of GB).
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +25,9 @@ from botocore.exceptions import ClientError
 from PIL import Image
 
 import models
+import helios
 import krea
+import mirror
 import photos
 import realism
 
@@ -108,10 +114,60 @@ def _queue_empty():
     return int(attrs["ApproximateNumberOfMessages"]) + int(attrs["ApproximateNumberOfMessagesNotVisible"]) == 0
 
 
+# The render machine's readiness for the dashboard (GET /status reads it): a percent and one line.
+READY_KEY = "status/render.json"
+
+
+def report_ready(percent, text):
+    """Best effort: a failed write never stops the worker."""
+    try:
+        s3.put_object(Bucket=BUCKET, Key=READY_KEY, ContentType="application/json",
+                      Body=json.dumps({"percent": int(percent), "text": text, "updated_at": int(time.time())}))
+    except Exception as e:  # noqa: BLE001
+        log(event="report_ready_failed", error=f"{type(e).__name__}: {e}"[:200])
+
+
+# A restart asked for from the dashboard (API: POST /worker/restart): a row in the jobs table with the time
+# of the request. A request newer than this worker's start means "exit between jobs"; systemd then starts
+# the worker again (Restart=on-failure), which pulls the latest code.
+RESTART_KEY = "_restart_worker"
+STARTED_AT = time.time()
+
+
+def restart_requested():
+    try:
+        item = jobs.get_item(Key={"job_id": RESTART_KEY}).get("Item") or {}
+        return float(item.get("requested_at") or 0) > STARTED_AT
+    except Exception:  # noqa: BLE001 - a failed lookup never restarts the worker
+        return False
+
+
 def stop_self():
     instance_id = _instance_id()
+    report_ready(0, "Stopping: no jobs for a while.")
     log(event="idle_stop", instance=instance_id)
     ec2.stop_instances(InstanceIds=[instance_id])
+
+
+_preload = {"on": True}
+
+
+def preload_idle():
+    """Queue empty: load one more big model into RAM where the box has room for all of them (see
+    models.preload_next). A load that fails is logged and not tried again until the worker restarts."""
+    if not _preload["on"]:
+        return
+    start = time.time()
+    try:
+        name = models.preload_next()
+    except Exception as e:
+        _preload["on"] = False
+        log(event="preload_failed", error=str(e)[:300])
+        return
+    if name:
+        log(event="preloaded", model=name, seconds=round(time.time() - start, 1))
+    else:
+        _preload["on"] = False  # all loaded, or a box that holds one model: nothing more to do
 
 
 # ---------------------------------------------------------------- job plumbing
@@ -256,21 +312,47 @@ def sound_for_clip(path, prompt, seconds, seed, workdir, tag="sound"):
     if seconds <= SOUND_CHUNK + 3:
         return models.generate_sound(path, out, prompt, seconds, seed)
     chunks, start, n = [], 0.0, 0
-    while start < seconds - 0.01:
-        length = min(SOUND_CHUNK + SOUND_OVERLAP, seconds - start)
-        piece = os.path.join(workdir, f"{tag}_part{n}.mp4")
-        ffmpeg("-ss", f"{start:.3f}", "-i", path, "-t", f"{length:.3f}", "-an", "-c:v", "libx264",
-               "-preset", "veryfast", "-crf", "18", piece)
-        chunks.append(models.generate_sound(piece, os.path.join(workdir, f"{tag}_part{n}.wav"), prompt,
-                                            length, None if seed is None else int(seed) + n))
-        start += SOUND_CHUNK
-        n += 1
+    with models.sound_session():  # the sound model stays on the GPU for all the chunks
+        while start < seconds - 0.01:
+            length = min(SOUND_CHUNK + SOUND_OVERLAP, seconds - start)
+            piece = os.path.join(workdir, f"{tag}_part{n}.mp4")
+            ffmpeg("-ss", f"{start:.3f}", "-i", path, "-t", f"{length:.3f}", "-an", "-c:v", "libx264",
+                   "-preset", "veryfast", "-crf", "18", piece)
+            chunks.append(models.generate_sound(piece, os.path.join(workdir, f"{tag}_part{n}.wav"), prompt,
+                                                length, None if seed is None else int(seed) + n))
+            start += SOUND_CHUNK
+            n += 1
     joined = chunks[0]
     for i, nxt in enumerate(chunks[1:], 1):
         mixed = os.path.join(workdir, f"{tag}_join{i}.wav")
         ffmpeg("-i", joined, "-i", nxt, "-filter_complex", f"acrossfade=d={SOUND_OVERLAP}:c1=tri:c2=tri", mixed)
         joined = mixed
     shutil.copy(joined, out)
+    return out
+
+
+# Helios videos (params["video_model"] == "helios", docs/specs/2026-11-26-helios-default.md): the first frame
+# is made in Helios's 5:3 shape at twice its size, so the image models work at a size they are good at.
+HELIOS_FRAME = (1280, 768)
+
+
+def render_helios(job_id, params, args, seed, out, tag=""):
+    """One Helios take written to `out`: the whole length in one run from one prompt (the same look, shot and
+    natural-style wording as Wan), from the first frame when there is one, with the job's Wan LoRAs through
+    their low-noise files, each at its weight. Grain and the 2x upscale work on the result; there are no
+    segments to chain."""
+    loras = [{"path": l["low"], "weight": l.get("weight", 1.0)} for l in models._JOB_LORAS if l.get("low")]
+    prompt, _ = models.natural_prompts(models.with_triggers(args["prompt"]))
+    frames = helios.generate(prompt, params["seconds"], seed=seed, image=args.get("image"), loras=loras,
+                             progress=lambda msg: progress(job_id, msg + tag))
+    if params.get("upscale"):
+        import enhance
+
+        progress(job_id, f"upscaling{tag}")
+        frames = enhance.upscale(frames, models.check_cancel)
+    effect = realism.frame_effect(params, seed)  # the phone look, or the plain grain switch
+    models.write_video(frames, out, fps=helios.FPS,
+                       grain=effect if callable(effect) else (realism.Grain(seed or 0) if effect else None))
     return out
 
 
@@ -283,7 +365,7 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
     args = {k: params[k] for k in ("prompt", "negative_prompt", "width", "height")}
     styled = realism.with_style(params["prompt"], params)  # look / natural skin / candid; unchanged without
     args.update(prompt=styled, seconds=params["seconds"], seed=seed, fps=params.get("fps", 16),
-                upscale=params.get("upscale", False), grain=bool(params.get("grain")))
+                upscale=params.get("upscale", False), grain=realism.frame_effect(params, seed))
     if params.get("_work_dir"):  # long take: saved segments, so a re-delivered job resumes
         def segment_progress(text):  # best effort: a status write failing must not end a long take
             try:
@@ -301,9 +383,11 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
         params["_first_frame"].save(keyframe_path)
         args["image"] = params["_first_frame"]
     elif cast:
-        progress(job_id, f"placing avatar in scene{tag}")
-        keyframe = models.make_keyframe(cast, styled, params["width"], params["height"], seed,
-                                        best=params.get("quality") == "best")
+        keyframe = params.get("_keyframe")  # made before the planner (single takes)
+        if keyframe is None:
+            progress(job_id, f"placing avatar in scene{tag}")
+            keyframe = models.make_keyframe(cast, styled, params["width"], params["height"], seed,
+                                            best=params.get("quality") == "best")
         keyframe_path = os.path.join(workdir, f"keyframe{suffix}.png")
         keyframe.save(keyframe_path)
         args["image"] = keyframe
@@ -318,7 +402,10 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
         args["segment_prompts"][0] = realism.with_style(f"{params['prompt']} {timeline[0]}", params)
     progress(job_id, f"rendering video{tag}")
     name = f"video{suffix}"
-    path = models.generate_video(os.path.join(workdir, f"{name}.mp4"), **args)
+    if params.get("video_model") == "helios":
+        path = render_helios(job_id, params, args, seed, os.path.join(workdir, f"{name}.mp4"), tag)
+    else:
+        path = models.generate_video(os.path.join(workdir, f"{name}.mp4"), **args)
     if params.get("sound", True):
         progress(job_id, f"adding sound{tag}")
         sound = sound_for_clip(path, params["prompt"], params["seconds"], seed, workdir, f"sound_{name}")
@@ -333,20 +420,29 @@ def run_video(job, params, workdir):
     # No seed given: one derived from the job id, so a re-delivered take matches its saved segments.
     base = params["seed"] if params.get("seed") is not None else \
         int.from_bytes(hashlib.sha256(job_id.encode()).digest()[:4], "big")
-    timeline = take_timeline(job, params, cast) if count == 1 else None
-    work_dir = take_work_dir(job_id) if count == 1 and models.segment_count(params["seconds"]) > 1 else None
+    helios_job = params.get("video_model") == "helios"  # one run, one prompt: no segments, planner or resume
+    if helios_job:
+        params = dict(params, width=HELIOS_FRAME[0], height=HELIOS_FRAME[1])  # the size of the first frame
+    work_dir = take_work_dir(job_id) if count == 1 and not helios_job and models.segment_count(params["seconds"]) > 1 \
+        else None
     frames = krea_first_frames(job, params, cast, [base + i for i in range(count)])
     if count == 1:
-        path, keyframe = render_take(job, dict(params, _first_frame=frames[0], _segment_prompts=timeline,
-                                               _work_dir=work_dir), workdir, cast, base)
-        result = {"video_key": upload(path, client, job_id, "video.mp4", "video/mp4")}
+        # The first frame comes first, so the planner can see the scene it is planning.
+        keyframe_img, first_path = make_first_frame(job, params, cast, base, workdir, frames[0])
+        if params.get("plan_only"):
+            return plan_only_result(job, params, cast, base, first_path)
+        timeline = None if helios_job else take_timeline(job, params, cast, image=first_path)
+        path, keyframe = render_take(job, dict(params, _first_frame=frames[0], _keyframe=keyframe_img,
+                                               _segment_prompts=timeline, _work_dir=work_dir), workdir, cast, base)
+        result = {"video_key": upload(path, client, job_id, "video.mp4", "video/mp4"),
+                  **({"video_model": "helios"} if helios_job else {})}
         if timeline:
             result["segment_prompts"] = timeline
         if keyframe:
             result["keyframe_key"] = upload(keyframe, client, job_id, "keyframe.png", "image/png")
         return result
     # Variations: same prompt, seeds base, base+1, ...; models stay loaded between takes.
-    result = {"seeds": [base + i for i in range(count)]}
+    result = {"seeds": [base + i for i in range(count)], **({"video_model": "helios"} if helios_job else {})}
     for i in range(count):
         path, keyframe = render_take(job, dict(params, _first_frame=frames[i]), workdir, cast, base + i, i + 1, count)
         result[f"video_{i + 1}_key"] = upload(path, client, job_id, f"video_{i + 1}.mp4", "video/mp4")
@@ -355,7 +451,47 @@ def run_video(job, params, workdir):
     return result
 
 
-def take_timeline(job, params, cast=()):
+def make_first_frame(job, params, cast, seed, workdir, krea_frame=None):
+    """A single take's first frame before anything else: the Krea frame when there is one, else the Qwen avatar
+    keyframe when there is a cast, else none (text to video). Returns (keyframe image or None, saved path or None);
+    the keyframe image is what render_take then animates (it isn't made twice)."""
+    image, keyframe = krea_frame, None
+    if image is None and cast:
+        progress(job["job_id"], "placing avatar in scene")
+        keyframe = image = models.make_keyframe(cast, realism.with_style(params["prompt"], params), params["width"],
+                                                params["height"], seed, best=params.get("quality") == "best")
+    if image is None:
+        return None, None
+    path = os.path.join(workdir, "first_frame.png")
+    image.save(path)
+    return keyframe, path
+
+
+def plan_only_result(job, params, cast, seed, first_path):
+    """A plan-only job: the planner's prompts (seeing the first frame) as editable beats every 5 s, the seed that
+    makes the same first frame, and the frame itself; no video. A planner failure fails the job."""
+    n = models.segment_count(params["seconds"])
+    progress(job["job_id"], f"planning {n} segments")
+    try:
+        plan = models.plan_segments(params["prompt"], n, [(name, desc) for name, _, desc in cast],
+                                    seconds=int(params["seconds"]), image=first_path)
+    except models.JobCancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 - shown to the user with what to do
+        raise RuntimeError(f"the planner could not write a timeline ({type(e).__name__}); try again or write "
+                           "beats yourself") from e
+    if not models.valid_segment_plan(plan, n):
+        raise RuntimeError("the planner could not write a timeline; try again or write beats yourself")
+    # One line per beat; ";" would split a beat in the API's parser, so it becomes ",".
+    beats = "\n".join(f"{models.SEGMENT_SECONDS * i}: {' '.join(p.replace(';', ',').split())}"
+                      for i, p in enumerate(plan))
+    result = {"plan_only": True, "segment_prompts": plan, "beats": beats, "seed": seed}
+    if first_path:
+        result["keyframe_key"] = upload(first_path, job["client"], job["job_id"], "keyframe.png", "image/png")
+    return result
+
+
+def take_timeline(job, params, cast=(), image=None):
     """A long take's prompt per 5 s segment, or None when every segment just repeats the prompt.
     From the user's beats; else, for takes of more than 3 segments, from the planner (VLM, before the
     video model loads). A planner failure is logged and the take keeps the user's prompt."""
@@ -377,7 +513,7 @@ def take_timeline(job, params, cast=()):
     progress(job["job_id"], f"planning {n} segments")
     try:
         plan = models.plan_segments(params["prompt"], n, [(name, desc) for name, _, desc in cast],
-                                    seconds=int(params["seconds"]))
+                                    seconds=int(params["seconds"]), image=image)
     except models.JobCancelled:
         raise
     except Exception as e:  # noqa: BLE001 - any planner failure: the take goes on with one prompt
@@ -593,6 +729,8 @@ def run_story(job, params, workdir):
     # so interleaving them would reload one per shot.
     clips = [os.path.join(workdir, f"shot_{i:02}.mp4") for i in range(len(shots))]
     order = sorted(range(len(shots)), key=lambda i: keyframes[i] is not None)
+    # Burning in subtitles encodes the whole story again, so the shots are quick near-lossless intermediates.
+    x264 = models.X264_INTERMEDIATE if params.get("subtitles", True) else None
     for n, i in enumerate(order):
         progress(job_id, f"rendering shot {n + 1}/{len(shots)}")
         shot = shots[i]
@@ -601,16 +739,17 @@ def run_story(job, params, workdir):
                                     params)
         models.generate_video(clips[i], prompt=prompt, seconds=secs, seed=seed, image=keyframes[i],
                               fps=params.get("fps", 16), upscale=params.get("upscale", False),
-                              grain=bool(params.get("grain")), **size)
+                              grain=bool(params.get("grain")), x264=x264, **size)
 
     # Then all shot sounds: one more model load for the whole story.
     sound = None
     if params.get("sound", True):
         sounds = []
-        for i, (clip, shot) in enumerate(zip(clips, shots)):
-            progress(job_id, f"adding sound, shot {i + 1}/{len(shots)}")
-            sounds.append(models.generate_sound(clip, os.path.join(workdir, f"sound_{i:02}.wav"),
-                                                shot["prompt"], secs, seed))
+        with models.sound_session():  # the sound model stays on the GPU for all the shots
+            for i, (clip, shot) in enumerate(zip(clips, shots)):
+                progress(job_id, f"adding sound, shot {i + 1}/{len(shots)}")
+                sounds.append(models.generate_sound(clip, os.path.join(workdir, f"sound_{i:02}.wav"),
+                                                    shot["prompt"], secs, seed))
         sound_list = os.path.join(workdir, "sound_concat.txt")
         with open(sound_list, "w") as f:
             f.writelines(f"file '{s}'\n" for s in sounds)
@@ -768,16 +907,195 @@ def _update_build(client, name, job_id, created_at, **fields):
     return True
 
 
+def _current_media(client, name, job_id, created_at):
+    """(avatar, media) while this job is still the one making the avatar's media, else None."""
+    avatar = _s3_json(f"avatars/{client}/{name}/avatar.json")
+    media = (avatar or {}).get("media") or {}
+    if not avatar or media.get("job_id") != job_id:
+        return None
+    if created_at is not None and avatar.get("created_at") != created_at:
+        return None
+    return avatar, media
+
+
+def _update_media(client, name, job_id, created_at, **fields):
+    """Update the avatar's media record from a fresh read, only while this job owns it."""
+    cur = _current_media(client, name, job_id, created_at)
+    if not cur:
+        return False
+    avatar, media = cur
+    avatar["media"] = dict(media, **fields)
+    s3.put_object(Bucket=BUCKET, Key=f"avatars/{client}/{name}/avatar.json", Body=json.dumps(avatar).encode(),
+                  ContentType="application/json")
+    return True
+
+
+def _one_person(kept, job_id):
+    """Keep the photos that show exactly one person (the VLM counts); returns (kept, dropped)."""
+    progress(job_id, "checking each photo shows one person")
+    ok = [(p, scene) for p, scene in kept if models.count_people(p) == 1]
+    return ok, len(kept) - len(ok)
+
+
+def _make_photo_set(job_id, params, workdir, avatar, trigger, purpose):
+    """The avatar's photo set: one Qwen photo per KREA_DATASET_PROMPTS entry at 1024x1024, content-filtered.
+    Returns [(path, scene)] of the kept photos and the number made; too few kept raises FilteredOut."""
+    keys = [i["key"] for i in avatar.get("images") or []] or [avatar["reference_key"]]
+    refs = load_references(keys[:3], workdir, "avatar")
+    base = int.from_bytes(os.urandom(4), "big")
+    prompts = photos.KREA_DATASET_PROMPTS[:int(params.get("count") or len(photos.KREA_DATASET_PROMPTS))]
+    paths = []
+    for i, scene in enumerate(prompts, 1):
+        progress(job_id, f"photo {i}/{len(prompts)} {purpose}")
+        image = models.make_photo(refs, photos.photo_prompt(scene, len(refs), keep_outfit=False), photos.NEGATIVE,
+                                  1024, 1024, base + i)
+        path = os.path.join(workdir, f"{trigger}_{i:02d}.png")
+        image.save(path)
+        paths.append(path)
+    progress(job_id, "content filter on the photo set")
+    scores = krea.score_images(paths, lambda m: progress(job_id, m))
+    kept = [(p, scene) for p, scene, sc in zip(paths, prompts, scores) if not krea.flagged(sc)]
+    if len(kept) < AVATAR_DATASET_MIN:
+        raise krea.FilteredOut(f"the photo set was flagged by the content filter ({len(paths) - len(kept)} of "
+                               f"{len(paths)} photos)")
+    kept, people_dropped = _one_person(kept, job_id)
+    if len(kept) < AVATAR_DATASET_MIN:
+        raise krea.FilteredOut(f"only {len(kept)} of {len(paths)} photos show exactly one person; use reference "
+                               "images of just this person")
+    return kept, len(paths), people_dropped
+
+
+AVATAR_CLIPS = 4
+
+
+class MediaFailed(Exception):
+    pass
+
+
+def _avatar_media(client, name, job_id, created, kept, workdir, trigger):
+    """The avatar's media: the kept photos stored first, then four 2 s clips from kept photos (positions 0,
+    n/4, n/2, 3n/4), content-filtered together after rendering (one filter process for all 12 stills), stored with
+    media.json under avatars/<client>/<name>/media/, and the media record set ready. Raises MediaFailed
+    (after marking the media failed) when no clip is left; the photos stay stored."""
+    stale = {"media": "skipped: the avatar was replaced or newer media was requested"}
+    if not _update_media(client, name, job_id, created, state="clips"):
+        return stale
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = {"created_at": int(time.time()), "job_id": job_id, "photos": [], "clips": []}
+    for i, (path, scene) in enumerate(kept, 1):
+        fname = f"photo_{i:02d}.png"
+        s3.upload_file(path, BUCKET, prefix + fname, ExtraArgs={"ContentType": "image/png"})
+        doc["photos"].append({"file": fname, "scene": scene, "size": os.path.getsize(path)})
+    n = len(kept)
+    picks = [kept[i * n // AVATAR_CLIPS][0] for i in range(AVATAR_CLIPS)]
+    base = int.from_bytes(os.urandom(4), "big")
+    rendered = []
+    for i, (photo, motion) in enumerate(zip(picks, photos.AVATAR_CLIP_MOTIONS), 1):
+        if not _current_media(client, name, job_id, created):  # replaced meanwhile: stop using the GPU
+            return stale
+        progress(job_id, f"clip {i}/{AVATAR_CLIPS} of the avatar")
+        prompt = f"{trigger} {motion}, natural light, static camera"
+        out = os.path.join(workdir, f"clip_{i}.mp4")
+        stills = models.render_clip(photo, prompt, out, base + i)
+        rendered.append(({"path": out, "prompt": prompt, "motion": motion, "seed": base + i,
+                          "photo": os.path.basename(photo)}, stills))
+    progress(job_id, "content filter on the clips")
+    scores = krea.score_images([p for _, stills in rendered for p in stills])
+    clips, dropped = [], 0
+    for k, (clip, stills) in enumerate(rendered):
+        if any(krea.flagged(sc) for sc in scores[k * 3:k * 3 + len(stills)]) or \
+                models.count_people(stills[len(stills) // 2]) != 1:  # flagged, or not just this one person
+            dropped += 1
+        else:
+            clips.append(clip)
+    if not clips:
+        _update_media(client, name, job_id, created, state="failed", photos=n, clips=0,
+                      error=f"all {AVATAR_CLIPS} clips were flagged by the content filter")
+        raise MediaFailed(f"all {AVATAR_CLIPS} clips were flagged by the content filter")
+    if not _current_media(client, name, job_id, created):
+        return stale
+    for i, c in enumerate(clips, 1):
+        fname = f"clip_{i}.mp4"
+        s3.upload_file(c["path"], BUCKET, prefix + fname, ExtraArgs={"ContentType": "video/mp4"})
+        doc["clips"].append({"file": fname, "size": os.path.getsize(c["path"]),
+                             **{k: c[k] for k in ("prompt", "motion", "seed", "photo")}})
+    s3.put_object(Bucket=BUCKET, Key=prefix + "media.json", Body=json.dumps(doc).encode(),
+                  ContentType="application/json")
+    _update_media(client, name, job_id, created, state="ready", photos=n, clips=len(clips),
+                  preview="clip_1.mp4", updated_at=doc["created_at"], error=None)
+    return {"clips": len(clips), "clips_filtered": dropped, "_clips": [(c["path"], c["motion"]) for c in clips]}
+
+
+def _dataset_photos(client, lora, version, workdir, trigger):
+    """The kept photos of an avatar's Krea dataset (datasets/<client>/<lora>/v<N>/), downloaded:
+    [(path, scene)] in dataset order, or None when the dataset isn't there."""
+    prefix = f"datasets/{client}/{lora}/v{int(version)}/"
+    manifest = _s3_json(prefix + "manifest.json")
+    if not manifest or not manifest.get("files"):
+        return None
+    items = (_s3_json(prefix + "captions.json") or {}).get("items") or {}
+    kept = []
+    for i, f in enumerate(manifest["files"], 1):
+        path = os.path.join(workdir, f"ds_{i:02d}_{os.path.basename(f['path'])}")
+        s3.download_file(BUCKET, prefix + "raw/" + f["path"], path)
+        caption = items.get(f"p{i:04d}.png") or ""
+        kept.append((path, caption[len(trigger) + 2:] if caption.startswith(f"{trigger}, ") else caption))
+    return kept
+
+
+def _media_photoset(job, params, workdir):
+    """An avatar_photoset job without a Krea LoRA build: the photo set for the avatar's media only."""
+    client, job_id = job["client"], job["job_id"]
+    name, trigger, created = params["avatar"], params.get("trigger") or params["avatar"], params.get("avatar_created_at")
+    cur = _current_media(client, name, job_id, created)
+    if not cur:
+        return {"skipped": "the avatar was replaced or newer media was requested"}
+    try:
+        _update_media(client, name, job_id, created, state="photos")
+        kl = cur[0].get("krea_lora") or {}
+        # Reuse the photos of a Krea LoRA that is ready for this avatar (not one kept from a replaced avatar).
+        ready = (kl.get("ready") or {}) if params.get("media_only") and kl.get("state") == "ready" else {}
+        kept = None
+        if ready.get("lora") and ready.get("version"):
+            try:
+                kept = _dataset_photos(client, ready["lora"], ready["version"], workdir, trigger)
+            except (ClientError, OSError, KeyError, ValueError) as e:  # unreadable dataset: make new photos
+                log(event="media_dataset_unreadable", job_id=job_id, error=str(e)[:200])
+        made, people_dropped = len(kept or []), 0
+        if kept:  # the reused photos get the one-person check too (sets made before it existed)
+            kept, people_dropped = _one_person(kept, job_id)
+            if len(kept) < AVATAR_DATASET_MIN:
+                kept = None
+        if not kept:  # no usable Krea dataset to reuse: make the photo set
+            kept, made, people_dropped = _make_photo_set(job_id, params, workdir, cur[0], trigger, "of the avatar")
+        if not _current_media(client, name, job_id, created):
+            return {"skipped": "the avatar was replaced or newer media was requested"}
+        result = {"kept": len(kept), "filtered": made - len(kept) - people_dropped, "people_dropped": people_dropped,
+                  **_avatar_media(client, name, job_id, created, kept, workdir, trigger)}
+        clips = result.pop("_clips", [])
+        return dict(result, **_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+    except Exception as e:
+        _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+        raise
+
+
 def run_avatar_photoset(job, params, workdir):
     """Qwen photos of the avatar for its Krea 2 LoRA: one per KREA_DATASET_PROMPTS entry at 1024x1024, each
     checked by the Krea content filter (flagged ones dropped; fewer than AVATAR_DATASET_MIN -> fail), written
     as the dataset datasets/<client>/<lora>/v<N>/ (manifest, raw/, captions.json starting with the trigger =
     the avatar name), then a krea2 train job is queued for the trainer. Every avatar write checks that this
     job is still the avatar's current build. docs/specs/2026-11-24-krea-avatar-lora.md"""
+    if params.get("wan_only"):  # an on-demand Wan LoRA build from the avatar's stored media
+        return _wan_only(job, params, workdir)
+    if params.get("krea_lora") is False:  # media only (no Krea LoRA for this avatar, or media for an existing one)
+        return _media_photoset(job, params, workdir)
     client, job_id = job["client"], job["job_id"]
     name, lora, trigger, version = params["avatar"], params["lora"], params["trigger"], int(params["version"])
     created = params.get("avatar_created_at")
     if not TRAIN_QUEUE_URL:
+        _update_media(client, name, job_id, created, state="failed", error="the trainer is not deployed")
+        _update_wan(client, name, job_id, created, state="failed", error="the trainer is not deployed")
         raise RuntimeError("the trainer is not deployed (training_enabled in Terraform); can't train the Krea LoRA")
     cur = _current_build(client, name, job_id, created)
     if not cur:
@@ -790,12 +1108,191 @@ def run_avatar_photoset(job, params, workdir):
                       job_ids=[j for j in kl.get("job_ids") or [] if j != train_id] + [train_id])
         if existing.get("status") == "queued":  # a duplicate message is harmless: the trainer skips finished jobs
             sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
-        return {"skipped": "the train job is already queued", "train_job_id": train_id}
+        result = {"skipped": "the train job is already queued", "train_job_id": train_id}
+        media = (_current_media(client, name, job_id, created) or (None, {}))[1]
+        if media.get("state") == "ready" and params.get("wan_lora") and \
+                not jobs.get_item(Key={"job_id": _wan_train_job_id(job_id)}).get("Item"):
+            try:  # the media is done but the Wan build never started: build it from the stored media
+                stored = _media_files(client, name, workdir)
+                kept_m = _one_person(stored[0], job_id)[0] if stored else []
+                if len(kept_m) < AVATAR_DATASET_MIN:
+                    raise RuntimeError(f"only {len(kept_m)} stored photos show exactly one person")
+                result.update(_maybe_wan(client, name, job_id, created, params, kept_m, stored[1], trigger))
+            except models.JobCancelled:
+                _update_wan(client, name, job_id, created, state="failed", error="cancelled")
+                raise
+            except Exception as e:  # noqa: BLE001 - the Krea build is queued; only the Wan build failed
+                _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+                result["wan_error"] = str(e)[:500]
+        if media and media.get("state") != "ready":  # the media wasn't finished: make it from this build's photos
+            try:
+                kept = _dataset_photos(client, lora, version, workdir, trigger)
+                if kept:
+                    kept, _ = _one_person(kept, job_id)
+                if kept and len(kept) >= AVATAR_DATASET_MIN:
+                    result.update(_avatar_media(client, name, job_id, created, kept, workdir, trigger))
+                    clips = result.pop("_clips", [])
+                    result.update(_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+            except models.JobCancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - as in _photoset: media never fails the Krea build
+                _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+                result["media_error"] = str(e)[:500]
+        return result
     try:
         return _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger, version, created)
-    except Exception as e:
+    except Exception as e:  # the photo set failed: the Krea build and the media and Wan builds it was for
         _update_build(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
         raise
+
+
+AVATAR_WAN_STEPS = 1000  # per expert; spike 2026-11-24: likeness held through 50 s, ~54 min for both experts
+
+
+def _current_wan(client, name, job_id, created_at):
+    """(avatar, wan_lora) while this job is still the avatar's current Wan LoRA build, else None."""
+    avatar = _s3_json(f"avatars/{client}/{name}/avatar.json")
+    wl = (avatar or {}).get("wan_lora") or {}
+    if not avatar or job_id not in (wl.get("job_ids") or []):
+        return None
+    if created_at is not None and avatar.get("created_at") != created_at:
+        return None
+    return avatar, wl
+
+
+def _update_wan(client, name, job_id, created_at, **fields):
+    cur = _current_wan(client, name, job_id, created_at)
+    if not cur:
+        return False
+    avatar, wl = cur
+    avatar["wan_lora"] = dict(wl, **fields)
+    s3.put_object(Bucket=BUCKET, Key=f"avatars/{client}/{name}/avatar.json", Body=json.dumps(avatar).encode(),
+                  ContentType="application/json")
+    return True
+
+
+def _wan_train_job_id(photoset_job_id):
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"vidgen-wan-train:{photoset_job_id}").hex
+
+
+def _wan_step(client, name, job_id, created, params, kept, clips, trigger):
+    """The avatar's Wan LoRA build: kept photos + clips as datasets/<client>/<wan lora>/v<N>/ (captions keyed as
+    the trainer names items: photo i -> p{i:04d}.png, clip at manifest index i -> s{i:04d}_00.mp4), then one
+    t2v train job (id derived from this job), linked on the avatar before it is sent."""
+    lora, version = params["wan_lora_name"], int(params["wan_version"])
+    cur = _current_wan(client, name, job_id, created)
+    if not cur:
+        return {"wan": "skipped: the avatar was replaced or a newer Wan LoRA build started"}
+    train_id = _wan_train_job_id(job_id)
+    existing = jobs.get_item(Key={"job_id": train_id}).get("Item")
+    if existing:  # redelivered after the train job was written: link and (if still queued) re-send only
+        _update_wan(client, name, job_id, created, state="training",
+                    job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
+        if existing.get("status") == "queued":
+            sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
+        return {"wan_train_job_id": train_id}
+    if not TRAIN_QUEUE_URL:
+        raise RuntimeError("the trainer is not deployed; can't train the Wan LoRA")
+    progress(job_id, "writing the Wan LoRA dataset")
+    dataset = f"{lora}/v{version}"
+    prefix = f"datasets/{client}/{dataset}/"
+    files, items = [], {}
+    for i, (path, scene) in enumerate(kept, 1):
+        fname = f"p_{i:02d}.png"
+        s3.upload_file(path, BUCKET, prefix + "raw/" + fname, ExtraArgs={"ContentType": "image/png"})
+        files.append({"path": fname, "size": os.path.getsize(path)})
+        items[f"p{i:04d}.png"] = f"{trigger}, {scene}"
+    for k, (path, motion) in enumerate(clips, 1):
+        fname = f"c_{k}.mp4"
+        s3.upload_file(path, BUCKET, prefix + "raw/" + fname, ExtraArgs={"ContentType": "video/mp4"})
+        files.append({"path": fname, "size": os.path.getsize(path)})
+        items[f"s{len(kept) + k:04d}_00.mp4"] = f"{trigger}, {motion}, natural light"
+    fingerprint = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
+    now = int(time.time())
+    manifest = {"kind": "character", "trigger": trigger, "files": files, "file_count": len(files),
+                "total_bytes": sum(f["size"] for f in files), "updated_at": now, "source": "avatar", "avatar": name}
+    captions = {"trigger": trigger, "fingerprint": fingerprint, "edited_at": now, "source": "avatar", "items": items}
+    for key, doc in (("manifest.json", manifest), ("captions.json", captions)):
+        s3.put_object(Bucket=BUCKET, Key=prefix + key, Body=json.dumps(doc).encode(), ContentType="application/json")
+    if not _current_wan(client, name, job_id, created):
+        return {"wan": "skipped: the avatar was replaced or a newer Wan LoRA build started"}
+    tparams = {"dataset": dataset, "model": "t2v", "lora": lora, "version": version, "trigger": trigger,
+               "avatar": name, "avatar_created_at": created, "steps": AVATAR_WAN_STEPS, "kind": "character",
+               "speed": "standard", "captions_only": False, "files": len(files), "dataset_updated_at": now,
+               "fingerprint": fingerprint}
+    try:
+        jobs.put_item(Item={"job_id": train_id, "client": client, "type": "train", "params": json.dumps(tparams),
+                            "status": "queued", "created_at": now, "expires_at": now + JOB_RETENTION_DAYS * 86400},
+                      ConditionExpression="attribute_not_exists(job_id)")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+            raise
+    cur = _current_wan(client, name, job_id, created)
+    if cur:
+        _update_wan(client, name, job_id, created, state="training",
+                    job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
+    sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
+    jobs.put_item(Item={"job_id": "_control_trainer", "client": "_system", "hold": False})
+    return {"wan_train_job_id": train_id, "wan_dataset": prefix}
+
+
+def _media_files(client, name, workdir):
+    """The avatar's stored media, downloaded: ([(photo path, scene)], [(clip path, motion)]), or None."""
+    prefix = f"avatars/{client}/{name}/media/"
+    doc = _s3_json(prefix + "media.json")
+    if not doc or not doc.get("photos"):
+        return None
+    out = []
+    for kind, label in (("photos", "scene"), ("clips", "motion")):
+        items = []
+        for e in doc.get(kind) or []:
+            fname = os.path.basename(str(e.get("file") or ""))
+            if not fname:
+                continue
+            path = os.path.join(workdir, f"m_{fname}")
+            s3.download_file(BUCKET, prefix + fname, path)
+            items.append((path, e.get(label) or ""))
+        out.append(items)
+    return out[0], out[1]
+
+
+def _wan_only(job, params, workdir):
+    """An on-demand Wan LoRA build (POST /avatars/{name}/wan-lora): the avatar's stored photos (one-person
+    checked) and clips become a new Wan dataset version; no new photos or clips."""
+    client, job_id = job["client"], job["job_id"]
+    name, trigger, created = params["avatar"], params.get("trigger") or params["avatar"], params.get("avatar_created_at")
+    if not _current_wan(client, name, job_id, created):
+        return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
+    try:
+        _update_wan(client, name, job_id, created, state="photos")
+        media = _media_files(client, name, workdir)
+        if not media:
+            raise RuntimeError("the avatar has no stored media to train on; make media first")
+        kept, clips = media
+        kept, people_dropped = _one_person(kept, job_id)
+        if len(kept) < AVATAR_DATASET_MIN:
+            raise krea.FilteredOut(f"only {len(kept)} of the avatar's media photos show exactly one person")
+        return dict(_wan_step(client, name, job_id, created, params, kept, clips, trigger),
+                    people_dropped=people_dropped)
+    except Exception as e:
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+        raise
+
+
+def _maybe_wan(client, name, job_id, created, params, kept, clips, trigger):
+    """The Wan step when this build asks for it; a failure marks the Wan LoRA failed, never the job."""
+    if not params.get("wan_lora") or params.get("media_only"):
+        return {}
+    try:
+        return _wan_step(client, name, job_id, created, params, kept, clips, trigger)
+    except models.JobCancelled:
+        _update_wan(client, name, job_id, created, state="failed", error="cancelled")
+        raise
+    except Exception as e:  # noqa: BLE001 - the Krea build and the media are already done
+        _update_wan(client, name, job_id, created, state="failed", error=str(e)[:500])
+        return {"wan_error": str(e)[:500]}
 
 
 def _train_job_id(photoset_job_id):
@@ -805,24 +1302,11 @@ def _train_job_id(photoset_job_id):
 
 def _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger, version, created):
     _update_build(client, name, job_id, created, state="photos")
-    keys = [i["key"] for i in avatar.get("images") or []] or [avatar["reference_key"]]
-    refs = load_references(keys[:3], workdir, "avatar")
-    base = int.from_bytes(os.urandom(4), "big")
-    prompts = photos.KREA_DATASET_PROMPTS[:int(params.get("count") or len(photos.KREA_DATASET_PROMPTS))]
-    paths = []
-    for i, scene in enumerate(prompts, 1):
-        progress(job_id, f"photo {i}/{len(prompts)} for the Krea LoRA")
-        image = models.make_photo(refs, photos.photo_prompt(scene, len(refs), keep_outfit=False), photos.NEGATIVE,
-                                  1024, 1024, base + i)
-        path = os.path.join(workdir, f"{trigger}_{i:02d}.png")
-        image.save(path)
-        paths.append(path)
-    progress(job_id, "content filter on the photo set")
-    scores = krea.score_images(paths, lambda m: progress(job_id, m))
-    kept = [(p, scene) for p, scene, sc in zip(paths, prompts, scores) if not krea.flagged(sc)]
-    if len(kept) < AVATAR_DATASET_MIN:
-        raise krea.FilteredOut(f"the photo set was flagged by the content filter ({len(paths) - len(kept)} of "
-                               f"{len(paths)} photos); no Krea LoRA for this avatar")
+    _update_media(client, name, job_id, created, state="photos")
+    try:
+        kept, made, people_dropped = _make_photo_set(job_id, params, workdir, avatar, trigger, "for the Krea LoRA")
+    except krea.FilteredOut as e:
+        raise krea.FilteredOut(f"{e}; no Krea LoRA for this avatar") from e
     if not _current_build(client, name, job_id, created):
         return {"skipped": "the avatar was replaced or a newer Krea LoRA build started"}
     dataset = f"{lora}/v{version}"
@@ -861,7 +1345,21 @@ def _photoset(job, params, workdir, avatar, client, job_id, name, lora, trigger,
                       job_ids=[j for j in cur[1].get("job_ids") or [] if j != train_id] + [train_id])
     sqs.send_message(QueueUrl=TRAIN_QUEUE_URL, MessageBody=json.dumps({"job_id": train_id}))
     jobs.put_item(Item={"job_id": "_control_trainer", "client": "_system", "hold": False})  # as the API does
-    return {"kept": len(kept), "filtered": len(paths) - len(kept), "train_job_id": train_id, "dataset": prefix}
+    result = {"kept": len(kept), "filtered": made - len(kept) - people_dropped, "people_dropped": people_dropped,
+              "train_job_id": train_id, "dataset": prefix}
+    clips = []
+    if _current_media(client, name, job_id, created):  # the same job makes the avatar's media
+        try:
+            result.update(_avatar_media(client, name, job_id, created, kept, workdir, trigger))
+            clips = result.pop("_clips", [])
+        except models.JobCancelled:
+            _update_media(client, name, job_id, created, state="failed", error="cancelled")
+            raise
+        except Exception as e:  # noqa: BLE001 - media must not fail the Krea build; its training is queued
+            _update_media(client, name, job_id, created, state="failed", error=str(e)[:500])
+            result["media_error"] = str(e)[:500]
+    result.update(_maybe_wan(client, name, job_id, created, params, kept, clips, trigger))
+    return result
 
 
 RUNNERS = {"avatar_photoset": run_avatar_photoset, "lora_preview": run_lora_preview, "video": run_video, "describe": run_describe, "story": run_story, "write": run_write, "avatar": run_avatar,
@@ -876,6 +1374,15 @@ def process(job_id, receipt):
     if job.get("cancel_requested"):
         set_status(job_id, "cancelled", finished_at=int(time.time()))
         log(event="cancelled", job_id=job_id, before_start=True)
+        if job.get("type") == "avatar_photoset":  # release the avatar's build/media records this job owned
+            p = json.loads(job.get("params") or "{}")
+            if p.get("avatar"):
+                _update_build(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                              state="failed", error="cancelled")
+                _update_media(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                              state="failed", error="cancelled")
+                _update_wan(job["client"], p["avatar"], job_id, p.get("avatar_created_at"),
+                            state="failed", error="cancelled")
         return
 
     params = json.loads(job["params"])
@@ -909,11 +1416,56 @@ def process(job_id, receipt):
 
 # ---------------------------------------------------------------- main loop
 
+def mirror_backfill(hf_home=None):
+    """Queue for the model mirror every weights folder that is complete on this disk (mirror.py uploads only
+    what the bucket lacks, in the background, and skips mirrored folders after one small request). This is
+    how a running box seeds the mirror, so the next new disk restores from the bucket instead of Hugging
+    Face. Never stops the worker."""
+    try:
+        hub = os.path.join(hf_home or os.environ.get("HF_HOME", "/opt/models"), "hub")
+        units = []
+        for name in sorted(os.listdir(models.BF16_DIR)) if os.path.isdir(models.BF16_DIR) else []:
+            if os.path.exists(os.path.join(models.BF16_DIR, name, "model_index.json")):  # a finished conversion
+                units.append((f"bf16/{name}", os.path.join(models.BF16_DIR, name)))
+        # The fp32 Wan downloads are not mirrored: their bf16 copies are.
+        fp32 = {"models--" + r.replace("/", "--") for r in (models.VIDEO_MODEL, models.I2V_MODEL)}
+        for name in sorted(os.listdir(hub)) if os.path.isdir(hub) else []:
+            folder = os.path.join(hub, name)
+            if not name.startswith("models--") or name in fp32:
+                continue
+            if any(f.endswith(".incomplete") for _, _, fs in os.walk(folder) for f in fs):
+                continue  # a download in progress or cut off
+            units.append((f"hub/{name}", folder))
+        if os.path.isdir(models.MMAUDIO_DIR) and mirror.local_files(models.MMAUDIO_DIR)[0]:
+            units.append(("mmaudio", models.MMAUDIO_DIR))
+        for unit, folder in ((krea.MODEL_UNIT, krea.MODEL_DIR), (krea.FILTER_UNIT, krea.FILTER_DIR),
+                             (helios.MODEL_UNIT, helios.MODEL_DIR)):
+            if os.path.exists(os.path.join(folder, ".complete")):
+                units.append((unit, folder))
+        for unit, folder in units:
+            mirror.push_async(unit, folder)
+        log(event="mirror_backfill", units=[u for u, _ in units])
+    except Exception as e:
+        log(event="mirror_backfill", error=f"{type(e).__name__}: {e}")
+
+
+def mirror_busy():
+    """Uploads to the model mirror still queued or running: the box doesn't stop itself in the middle (an
+    interrupted file starts again from zero). The API's max-uptime guard still applies."""
+    return mirror.busy()
+
+
 def main():
     log(event="worker_up", idle_seconds=IDLE_SECONDS, job_timeout_seconds=JOB_TIMEOUT_SECONDS)
     sweep_work_dirs()
+    mirror_backfill()
+    report_ready(100, "Ready: the worker is up and takes jobs (the first job of each kind loads its model).")
     last_work = time.time()
     while True:
+        if restart_requested():  # between jobs only: a render in progress is never cut off
+            log(event="restart_requested")
+            report_ready(60, "Restarting the worker (pulling the latest code); back in about a minute.")
+            raise SystemExit(1)  # non-zero, so systemd starts it again
         resp = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,
@@ -922,9 +1474,11 @@ def main():
         )
         messages = resp.get("Messages", [])
         if not messages:
-            if time.time() - last_work > IDLE_SECONDS and _queue_empty():
+            if time.time() - last_work > IDLE_SECONDS and _queue_empty() and not mirror_busy():
                 stop_self()
                 time.sleep(300)  # the instance is going down; don't poll meanwhile
+            else:
+                preload_idle()
             continue
 
         message = messages[0]

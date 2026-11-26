@@ -218,9 +218,10 @@ def run(skip_cancel=False):
     # Phase 1: everything that runs on Wan T2V, queued together so it shares one model load.
     avatar_job = submit({"type": "avatar", "candidates": 2, "seed": 1234,
                          "description": "a smoke-test character: a man in his 40s with a grey beard, yellow raincoat"})
-    video_job = submit({"type": "video", "prompt": "a paper boat floating on a calm pond, slow pan",
+    video_job = submit({"type": "video", "video_model": "wan", "prompt": "a paper boat floating on a calm pond, slow pan",
                         "seconds": 2, "avatar": "none", "seed": 1})
-    cancel_job = None if skip_cancel else submit({"type": "video", "prompt": "a slow timelapse of clouds",
+    cancel_job = None if skip_cancel else submit({"type": "video", "video_model": "wan",
+                                                  "prompt": "a slow timelapse of clouds",
                                                   "seconds": 5, "avatar": "none"})
     cancel_out = {}
     cancel_thread = None
@@ -244,7 +245,8 @@ def run(skip_cancel=False):
         # Phase 2: the keyframe + I2V path, with both avatars in one shot (multi-avatar keyframe).
         # Photos first: the edit model it loads stays resident for avatar-vid's keyframe.
         photos_job = submit({"type": "photos", "avatar": "smoke-a", "scenes": PHOTO_SCENES, "count": 3, "seed": 3})
-        avatar_video_job = submit({"type": "video", "prompt": "two friends walking along a beach at sunset, tracking shot",
+        avatar_video_job = submit({"type": "video", "video_model": "wan",
+                                   "prompt": "two friends walking along a beach at sunset, tracking shot",
                                    "seconds": 2, "avatar": "smoke-a,smoke-b", "seed": 2})
     else:
         results.add("avatar", False, _job_seconds(job), f"{job['status']}: {job.get('error', 'no candidates')}")
@@ -253,6 +255,9 @@ def run(skip_cancel=False):
     # Krea 2 runs in its own process and unloads the other models, so it goes after the edit-model jobs.
     krea_job = submit({"type": "photos", "model": "krea2", "avatar": "none", "scenes": KREA_SCENES, "count": 2,
                        "seed": 4})
+    # Helios (the default video model, own venv and process like Krea): one 5 s take from text, with sound.
+    helios_job = submit({"type": "video", "prompt": "a paper boat floating on a calm pond", "seconds": 5,
+                         "avatar": "none", "seed": 6})
 
     plain_video = _check_video(results, "video", _wait(video_job, "video"), folder, expect_seconds=2,
                                expect_audio=True)
@@ -286,6 +291,7 @@ def run(skip_cancel=False):
         results.add("photos", False, None, "skipped: no avatars")
 
     _check_krea(results, _wait(krea_job, "krea"), folder)
+    _check_video(results, "helios", _wait(helios_job, "helios"), folder, expect_seconds=5, expect_audio=True)
 
     if describe_job:
         job = _wait(describe_job, "describe")

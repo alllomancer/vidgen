@@ -325,3 +325,12 @@ if __name__ == "__main__":
     assert "Image 3 is an earlier photo" in pa and NATURAL_SKIN in pa and CANDID in pa and "smartphone" in pa
     print(photo_prompt(a[0]["scene"]))
     print("ok")
+
+
+# Avatar media: one gentle motion per 2 s clip (docs/specs/2026-11-24-avatar-media.md).
+AVATAR_CLIP_MOTIONS = [
+    "turns their head slowly and smiles",
+    "takes a step towards the camera",
+    "looks around the room, then back at the camera",
+    "laughs softly and tilts their head",
+]

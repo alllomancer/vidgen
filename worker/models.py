@@ -13,6 +13,7 @@ Long-running calls check CANCEL between denoising steps, so a cancelled or
 timed-out job stops within one step instead of running to the end.
 """
 
+import contextlib
 import gc
 import json
 import os
@@ -58,10 +59,47 @@ def check_cancel():
         raise JobCancelled(_cancel_reason["text"])
 
 
+_step_ends = []  # when each denoising step of the current pipeline call ended
+
+
 def _on_step(pipe, step, timestep, callback_kwargs):
     """diffusers callback_on_step_end: abort between denoising steps."""
+    _step_ends.append(time.time())
     check_cancel()
     return callback_kwargs
+
+
+def _timed(call, pipe, **kwargs):
+    """pipe(**kwargs), plus one JSON line saying where the time went: seconds per denoising step (the
+    first includes the encoders and moving the model to the GPU; for Wan one later step includes the
+    swap to the second expert) and `finish` (decoding, and everything going back to RAM).
+
+    A call that is cancelled or fails skips the pipeline's own clean-up and would leave a component on the
+    GPU, where the next call's 28 GB expert no longer fits beside it; so it is cleaned up here."""
+    del _step_ends[:]
+    start = time.time()
+    try:
+        out = pipe(**kwargs)
+    except BaseException:
+        free = getattr(pipe, "maybe_free_model_hooks", None)
+        if free:
+            free()  # everything back to RAM, offload hooks as new
+        raise
+    marks = [start] + _step_ends + [time.time()]
+    spans = [round(b - a, 1) for a, b in zip(marks, marks[1:])]
+    print(json.dumps({"event": "pipeline_timing", "call": call, "steps": spans[:-1], "finish": spans[-1],
+                      "seconds": round(marks[-1] - start, 1)}), flush=True)
+    return out
+
+
+@contextlib.contextmanager
+def _stage(spent, name):
+    """Add the seconds the block takes to spent[name] (for a timing log line)."""
+    start = time.time()
+    try:
+        yield
+    finally:
+        spent[name] = round(spent.get(name, 0) + time.time() - start, 1)
 
 
 def _resident_limit():
@@ -75,17 +113,42 @@ def _resident_limit():
 
 
 RESIDENT_LIMIT = _resident_limit()
+
+
+def _gpu_hold():
+    """Does the GPU have room to keep a big model wholly on it (>= 80 GB: both 14B Wan experts, the text
+    encoder and the VAE peak at ~75 GB)? Then a pipeline stays on the GPU instead of moving its parts on
+    and off for every pass, which is ~30% of a 5 s segment (docs/specs/2026-11-25-g7e-benchmark.md).
+    GPU_HOLD=0|1 in /etc/ai-video.env overrides."""
+    if os.environ.get("GPU_HOLD") in ("0", "1"):
+        return os.environ["GPU_HOLD"] == "1"
+    try:
+        return bool(torch.cuda.get_device_properties(0).total_memory >= 80 * 1024 ** 3)
+    except Exception:  # no GPU to ask
+        return False
+
+
+GPU_HOLD = _gpu_hold()
+BIG_MODELS = ("t2v", "i2v", "edit")
 # The VLM is loaded straight onto the GPU; every other model offloads to CPU RAM between
 # runs, so only the VLM has to be evicted before something else runs.
 GPU_RESIDENT = {"vlm"}
 _loaded = {}  # name -> model, least recently used first
 
 
+def _gpu_resident():
+    """The models that sit on the GPU while loaded, so only one of them is loaded at a time: the VLM, and
+    with GPU_HOLD the big ones too (switching then reloads from disk; the page cache and warm_ahead keep
+    that short)."""
+    return GPU_RESIDENT | (set(BIG_MODELS) if GPU_HOLD else set())
+
+
 def _swap_to(name, loader):
-    # The VLM sits on the GPU, so it can't stay loaded while anything else runs.
-    evict = [n for n in _loaded if n in GPU_RESIDENT and n != name]
-    if name not in _loaded and name not in GPU_RESIDENT:
-        cpu_models = [n for n in _loaded if n not in GPU_RESIDENT]
+    # What sits on the GPU can't stay loaded while anything else runs.
+    resident = _gpu_resident()
+    evict = [n for n in _loaded if n in resident and n != name]
+    if name not in _loaded and name not in resident:
+        cpu_models = [n for n in _loaded if n not in resident]
         evict += cpu_models[:max(0, len(cpu_models) - RESIDENT_LIMIT + 1)]
     for n in evict:
         del _loaded[n]
@@ -118,6 +181,66 @@ KREA_FILTER_REVISION = "96cb0d0342c7afb80cab76ecc58b265fa44da256"
 
 def _generator(seed):
     return torch.Generator("cuda").manual_seed(int(seed)) if seed is not None else None
+
+
+# Model offload moves a component with module.to(): going back to RAM copies its weights off the GPU
+# although nothing changed them (28 GB per Wan expert, twice per 5 s segment; ~56 GB per photo for the
+# edit model). With the RAM copy kept while the component is on the GPU, going back only points the
+# parameters at it again. RAM use then stays at the between-runs level (what RESIDENT_LIMIT is sized
+# for) instead of dipping during a run. KEEP_RAM_WEIGHTS=0 in /etc/ai-video.env switches it off.
+KEEP_RAM_WEIGHTS = os.environ.get("KEEP_RAM_WEIGHTS", "1") == "1"
+KEEP_RAM_COMPONENTS = ("text_encoder", "transformer", "transformer_2")
+
+
+def keep_ram_weights(module):
+    """Make module.to() keep the RAM copy of each parameter while the module is on the GPU and hand it
+    back on .to("cpu"). Only for weights nothing writes to while they are on the GPU (inference; LoRA
+    adapters are added as new parameters, never fused). A parameter replaced while on the GPU (another
+    LoRA under the same name), a changed dtype and the buffers all move the usual way.
+
+    The module gets its own subclass (same name) rather than a `to` attribute: accelerate deletes that
+    attribute whenever it removes its hooks, which diffusers does after every pipeline call."""
+    kept = {}  # parameter name -> (its tensor in RAM, the tensor it became on the GPU)
+    cls = type(module)
+
+    def plain_to(*args, **kwargs):
+        return cls.to(module, *args, **kwargs)
+
+    def to(self, *args, **kwargs):
+        device, dtype = torch._C._nn._parse_to(*args, **kwargs)[:2]
+        if device is None or dtype is not None:
+            kept.clear()
+            return plain_to(*args, **kwargs)
+        if device.type == "cpu":
+            for name, p in module.named_parameters():
+                ram, gpu = kept.get(name, (None, None))
+                if ram is not None and p.data_ptr() == gpu.data_ptr() and p.dtype == ram.dtype:
+                    p.data = ram
+            kept.clear()
+            return plain_to(*args, **kwargs)
+        in_ram = {name: p.data for name, p in module.named_parameters() if p.device.type == "cpu"}
+        out = plain_to(*args, **kwargs)
+        for name, p in module.named_parameters():
+            if name in in_ram and p.device.type != "cpu":
+                kept[name] = (in_ram[name], p.data)
+        return out
+
+    module.__class__ = type(cls.__name__, (cls,), {"to": to, "__module__": cls.__module__})
+    return module
+
+
+def _offload(pipe):
+    """Where a big pipeline lives. On a GPU with room (GPU_HOLD) all of it stays there. Otherwise model
+    offload, for a pipeline whose components don't fit the GPU together: each moves there only while it
+    runs. See KEEP_RAM_WEIGHTS for what the big ones do on the way back."""
+    if GPU_HOLD:
+        return pipe.to("cuda")
+    if KEEP_RAM_WEIGHTS:
+        for name in KEEP_RAM_COMPONENTS:
+            if getattr(pipe, name, None) is not None:
+                keep_ram_weights(getattr(pipe, name))
+    pipe.enable_model_cpu_offload()
+    return pipe
 
 
 def fit(image, width, height):
@@ -167,16 +290,91 @@ def prefetch(folder, threads=PREFETCH_THREADS):
     return total
 
 
+def _model_folder(model):
+    """Where a model's files are on disk: the path itself, or the Hugging Face cache snapshot of a repo
+    id. None when it isn't downloaded yet (from_pretrained will fetch it; nothing to warm)."""
+    if os.path.isdir(model):
+        return model
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(model, local_files_only=True)
+    except Exception:  # not in the cache, or the cache can't be read: loading works without the warm-up
+        return None
+
+
+def prefetch_model(model):
+    """prefetch() for a model given as a path or repo id; a warm-up only, so it never fails the load."""
+    try:
+        folder = _model_folder(model)
+        return prefetch(folder) if folder else 0
+    except OSError as e:
+        print(f"prefetch of {model} skipped: {e}", flush=True)
+        return 0
+
+
+def _wan_source(repo):
+    """The local bf16 copy of a Wan repo when there is one (the Hugging Face repos store the experts in
+    fp32), else the repo id."""
+    local = bf16_path(repo)
+    return local if os.path.exists(os.path.join(local, "model_index.json")) else repo
+
+
+_warming = {}  # model source (path or repo id) -> the thread reading its files into the page cache
+
+
+def warm_ahead(name):
+    """Start reading the weights of the model that runs next ("t2v", "i2v" or "edit") into the page cache
+    while the current one works on the GPU: the disk is idle then, and with one resident model
+    (RESIDENT_LIMIT 1) the next load would otherwise start by reading ~60 GB. Call it once the current model
+    is loaded. Does nothing when that model is loaded already or a warm-up is still running. The cache is
+    only borrowed RAM: the kernel drops it when the models need the space."""
+    if name in _loaded or any(t.is_alive() for t in _warming.values()):
+        return None
+    source = {"t2v": lambda: _wan_source(VIDEO_MODEL), "i2v": lambda: _wan_source(I2V_MODEL),
+              "edit": lambda: EDIT_MODEL}[name]()
+    thread = threading.Thread(target=prefetch_model, args=(source,), name=f"warm-{name}", daemon=True)
+    _warming.clear()
+    _warming[source] = thread
+    thread.start()
+    return thread
+
+
+def _warm(source):
+    """Before a model loads: its files in the page cache, read by parallel readers (waiting for a warm-up
+    of the same files that is still running rather than reading them twice)."""
+    thread = _warming.pop(source, None)
+    if thread:
+        thread.join()
+    return prefetch_model(source)  # fast when warm_ahead already read them
+
+
+PRELOAD_MODELS = os.environ.get("PRELOAD_MODELS", "1") == "1"
+PRELOAD = ("t2v", "i2v", "edit")
+
+
+def preload_next():
+    """On a box with room for every big model (RESIDENT_LIMIT 3): load one that is not in RAM yet and
+    return its name, so no later job waits for a load. None when all are loaded, or when the box holds
+    one model at a time. The worker calls it while the queue is empty, one model per call."""
+    if not PRELOAD_MODELS or RESIDENT_LIMIT < len(PRELOAD) or GPU_HOLD:  # held: one big model at a time
+        return None
+    loaders = {"t2v": _load_t2v, "i2v": _load_i2v, "edit": _load_edit}
+    for name in PRELOAD:
+        if name not in _loaded:
+            _swap_to(name, loaders[name])
+            return name
+    return None
+
+
 def _load_wan(pipeline_cls, repo, lightning_dir):
     """A Wan2.2 A14B pipeline: two 14B experts (~28 GB each in bf16), so components
     move to the GPU only while they run; the 128 GB of RAM holds the rest."""
     from diffusers import AutoencoderKLWan
 
-    # The Hugging Face repos store the experts in fp32; prefer the local bf16 copy.
-    local = bf16_path(repo)
-    if os.path.exists(os.path.join(local, "model_index.json")):
-        repo = local
-        prefetch(local)  # warm the page cache in parallel before diffusers maps the files
+    repo = _wan_source(repo)
+    if os.path.isdir(repo):
+        _warm(repo)  # warm the page cache in parallel before diffusers maps the files
     print(f"loading {repo}", flush=True)
     vae = AutoencoderKLWan.from_pretrained(repo, subfolder="vae", torch_dtype=torch.float32)
     # Decoding all frames at 1280x704 in one pass overflows the GPU (the fp32 VAE is the peak).
@@ -192,8 +390,7 @@ def _load_wan(pipeline_cls, repo, lightning_dir):
                 load_into_transformer_2=target == "lightning_2",
             )
         pipe.set_adapters(["lightning", "lightning_2"], adapter_weights=[1.0, 1.0])
-    pipe.enable_model_cpu_offload()
-    return pipe
+    return _offload(pipe)
 
 
 # User LoRAs (trained by the trainer, `--lora` on video/story jobs) for the current job:
@@ -305,17 +502,49 @@ def _to_uint8_frames(frames):
     return frames
 
 
-def _render_segment(prompt, negative_prompt, num_frames, width, height, seed, image):
-    """One Wan pass (<= 81 frames): T2V, or I2V from `image`. Returns uint8 (N, H, W, 3)."""
-    kwargs = dict(prompt=prompt, negative_prompt=negative_prompt, width=width, height=height,
-                  num_frames=num_frames, **_sampling(), generator=_generator(seed),
+# Text-encoder outputs of recent prompts. Variations and avatar candidates repeat one prompt, as do the
+# segments of a long take without beats; a hit skips moving the ~11 GB text encoder to the GPU and back.
+# Keyed per pipeline; LoRAs only touch the transformers, so they don't change the embeddings.
+EMBED_CACHE_SIZE = 16
+_embed_cache = {}  # (model, prompt, negative, cfg) -> (embeds, negative embeds or None) on the CPU, oldest first
+
+
+def _prompt_embeds(name, pipe, prompt, negative_prompt, cfg):
+    """`prompt_embeds`/`negative_prompt_embeds` kwargs for a Wan pipeline call, encoded once per prompt.
+    The same encoding the pipeline does itself (512 tokens; the negative only with CFG)."""
+    key = (name, prompt, negative_prompt, cfg)
+    if key in _embed_cache:
+        _embed_cache[key] = _embed_cache.pop(key)  # mark as most recently used
+    else:
+        with torch.no_grad():
+            embeds, negative = pipe.encode_prompt(prompt=prompt, negative_prompt=negative_prompt,
+                                                  do_classifier_free_guidance=cfg, max_sequence_length=512)
+        _embed_cache[key] = (embeds.to("cpu"), negative.to("cpu") if negative is not None else None)
+        for old in list(_embed_cache)[:-EMBED_CACHE_SIZE]:
+            del _embed_cache[old]
+    embeds, negative = _embed_cache[key]
+    return dict(prompt_embeds=embeds.to("cuda"),
+                negative_prompt_embeds=negative.to("cuda") if negative is not None else None)
+
+
+def _render_segment(prompt, negative_prompt, num_frames, width, height, seed, image, then=None):
+    """One Wan pass (<= 81 frames): T2V, or I2V from `image`. Returns uint8 (N, H, W, 3).
+    then: the model that runs after this pass, if another ("i2v", "edit"): warm_ahead reads it meanwhile."""
+    sampling = _sampling()
+    kwargs = dict(width=width, height=height, num_frames=num_frames, **sampling, generator=_generator(seed),
                   output_type="np", callback_on_step_end=_on_step)
+    cfg = sampling["guidance_scale"] > 1.0
     if image is not None:
         i2v = _apply_loras(_swap_to("i2v", _load_i2v))
-        frames = i2v(image=fit(image, width, height), **kwargs).frames[0]
+        kwargs.update(_prompt_embeds("i2v", i2v, prompt, negative_prompt, cfg), image=fit(image, width, height))
+        name, pipe = "i2v", i2v
     else:
         t2v = _apply_loras(_swap_to("t2v", _load_t2v))
-        frames = t2v(**kwargs).frames[0]
+        kwargs.update(_prompt_embeds("t2v", t2v, prompt, negative_prompt, cfg))
+        name, pipe = "t2v", t2v
+    if then and then != name:
+        warm_ahead(then)
+    frames = _timed(name, pipe, **kwargs).frames[0]
     return _to_uint8_frames(frames)
 
 
@@ -325,6 +554,7 @@ def _render_segment(prompt, negative_prompt, num_frames, width, height, seed, im
 COLOUR_STRENGTH = 0.7
 COLOUR_MIN_GAIN, COLOUR_MAX_GAIN = 0.7, 1.4
 COLOUR_MATCH_OVER_SECONDS = 10
+COLOUR_THREADS = min(8, os.cpu_count() or 1)  # frames corrected at once (numpy releases the GIL)
 _SRGB_TO_XYZ = ((0.4124564, 0.3575761, 0.1804375), (0.2126729, 0.7151522, 0.0721750),
                 (0.0193339, 0.1191920, 0.9503041))
 _D65 = (0.95047, 1.0, 1.08883)
@@ -372,6 +602,8 @@ def match_colours(frames, reference, strength=COLOUR_STRENGTH):
     the last frame (which conditions the next segment). Contrast change is clamped to COLOUR_MIN_GAIN -
     COLOUR_MAX_GAIN so flat frames (fades, plain walls) are not blown up. Returns `frames` itself when
     there is nothing to correct."""
+    from concurrent.futures import ThreadPoolExecutor
+
     import numpy as np
 
     frames = np.asarray(frames)
@@ -383,10 +615,14 @@ def match_colours(frames, reference, strength=COLOUR_STRENGTH):
         return frames
     out = frames.copy()
     last = max(1, len(frames) - 1)
-    for i in range(1, len(frames)):  # frame by frame: a 5 s segment in float LAB would be several GB
+
+    def correct(i):  # frame by frame: a 5 s segment in float LAB would be several GB
         w = i / last  # 0 at the seam -> 1 at the last frame
         scale = 1 + w * (full_scale - 1)
         out[i] = _lab_to_rgb8((_rgb8_to_lab(frames[i]) - mean) * scale + mean + w * shift)
+
+    with ThreadPoolExecutor(COLOUR_THREADS) as pool:
+        list(pool.map(correct, range(1, len(frames))))
     return out
 
 
@@ -441,6 +677,18 @@ def _load_segments(work_dir, key):
     return parts
 
 
+# px: soften the frame each later segment starts from. Off: live check 2026-11-25 showed 0.8 px didn't reduce the
+# halo and over-sharpened textures; kept switchable while the halo's cause is investigated.
+CONDITION_BLUR = 0
+
+
+def soften(image, radius=CONDITION_BLUR):
+    """A lightly blurred copy of a PIL image (for the frame a segment starts from; see CONDITION_BLUR)."""
+    from PIL import ImageFilter
+
+    return image.filter(ImageFilter.GaussianBlur(radius)) if radius else image
+
+
 def transfer_colours(frame, reference):
     """One uint8 frame moved fully onto `reference` LAB stats (gain clamped). Used on a re-anchored frame, so
     the image edit's colour shift doesn't start the next segment off the take's colours."""
@@ -475,7 +723,8 @@ def segment_prompts(prompt, n, beats=None):
 
 def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, height=704,
                    seed=None, image=None, fps=32, upscale=False, raw_path=None, grain=False,
-                   segment_prompts=None, work_dir=None, progress=None, anchor_every=None, reanchor=None):
+                   segment_prompts=None, work_dir=None, progress=None, anchor_every=None, reanchor=None,
+                   x264=None):
     """Text-to-video, or image-to-video when `image` (a PIL keyframe) is given.
 
     Up to MAX_TAKE_SECONDS: segments of 5 s, each after the first rendered I2V from the previous
@@ -487,7 +736,9 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
     work_dir: finished segments are saved there (segment_NN.npz + segments.json); a re-run with the same
     settings loads them and renders only the rest. progress(text) gets "segment N/M" for long takes.
     anchor_every k + reanchor(frame, n) -> frame: the conditioning frames of segments k, 2k, ... (1-based) are
-    re-anchored (the avatar's face restored) before those segments render."""
+    re-anchored (the avatar's face restored) before those segments render.
+    x264: encoder settings for `out_path` instead of X264_ARGS (X264_INTERMEDIATE for a clip that is
+    encoded again later)."""
     import numpy as np
 
     import enhance
@@ -505,9 +756,15 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
     key = {"v": RESUME_VERSION, "seed": seed, "total": total, "width": width, "height": height,
            "image": image is not None, "prompts": [p for p, _ in styled], "negatives": [g for _, g in styled],
            "loras": [[l.get("adapter"), l.get("weight")] for l in _JOB_LORAS],
-           "colour": [COLOUR_STRENGTH, COLOUR_MIN_GAIN, COLOUR_MAX_GAIN] if colour else None, "anchor_every": anchor_every if reanchor else None}
+           "colour": [COLOUR_STRENGTH, COLOUR_MIN_GAIN, COLOUR_MAX_GAIN] if colour else None,
+           "blur": CONDITION_BLUR if seconds > SEGMENT_SECONDS else 0, "anchor_every": anchor_every if reanchor else None}
     parts = _load_segments(work_dir, key) if work_dir else []
     cond, reference = image, None
+    spent = {}  # seconds per stage, for the video_timing line
+
+    def is_anchored(n):
+        return bool(reanchor and anchor_every and n and (n + 1) % anchor_every == 0)
+
     if parts:
         cond = Image.fromarray(parts[-1][-1])
         reference = colour_stats(parts[0]) if colour else None
@@ -515,20 +772,29 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
         if progress and len(sizes) > 1:
             progress(f"segment {n + 1}/{len(sizes)}")
         num = sizes[n]
-        if reanchor and anchor_every and n and (n + 1) % anchor_every == 0:
+        anchored = is_anchored(n)
+        if anchored:
             before = np_frame(cond)
-            cond = reanchor(cond, n)
+            with _stage(spent, "reanchor"):
+                cond = reanchor(cond, n)
             if colour:  # keep the take's colours across the edit
                 cond = Image.fromarray(transfer_colours(np_frame(cond), colour_stats([before])))
+        # The halo: soften what the next segment starts from (not a freshly re-anchored frame: no build-up there).
+        if n and seconds > SEGMENT_SECONDS and CONDITION_BLUR and not anchored:
+            cond = soften(cond, CONDITION_BLUR)
         seg_prompt, seg_negative = styled[min(n, len(styled) - 1)]
-        frames = _render_segment(seg_prompt, seg_negative, num, width, height,
-                                 None if seed is None else int(seed) + n, cond)
+        # What runs after this pass, if it is another model: the face edit, or I2V after a text-to-video start.
+        then = None if n + 1 >= len(sizes) else "edit" if is_anchored(n + 1) else "i2v"
+        with _stage(spent, "render"):
+            frames = _render_segment(seg_prompt, seg_negative, num, width, height,
+                                     None if seed is None else int(seed) + n, cond, then=then)
         if n:
             frames = frames[1:]
-        if colour and n:
-            frames = match_colours(frames, reference)
-        elif colour:
-            reference = colour_stats(frames)
+        with _stage(spent, "colour"):
+            if colour and n:
+                frames = match_colours(frames, reference)
+            elif colour:
+                reference = colour_stats(frames)
         parts.append(frames)
         if work_dir:
             try:
@@ -538,28 +804,39 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
                 work_dir = None
         cond = Image.fromarray(frames[-1])
     frames = np.concatenate(parts)[:total]
-    if raw_path:
-        write_video(frames, raw_path, fps=VIDEO_FPS)
-    if fps == 32:
-        frames = enhance.interpolate(frames, check_cancel)
-    if upscale:
-        frames = enhance.upscale(frames, check_cancel)
     import realism
 
-    write_video(frames, out_path, fps=fps, grain=realism.Grain(seed or 0) if grain else None)
+    if raw_path:
+        with _stage(spent, "encode"):
+            write_video(frames, raw_path, fps=VIDEO_FPS)
+    if fps == 32:
+        with _stage(spent, "interpolate"):
+            frames = enhance.interpolate(frames, check_cancel)
+    if upscale:
+        with _stage(spent, "upscale"):
+            frames = enhance.upscale(frames, check_cancel)
+    with _stage(spent, "encode"):
+        # grain: the plain switch, or a per-frame effect (realism.frame_effect: the phone look)
+        effect = grain if callable(grain) else (realism.Grain(seed or 0) if grain else None)
+        write_video(frames, out_path, fps=fps, grain=effect, x264=x264)
+    print(json.dumps({"event": "video_timing", "video_seconds": seconds, "segments": len(sizes), "fps": fps,
+                      "upscale": bool(upscale), **spent}), flush=True)
     return out_path
 
 
 # High-quality H.264: imageio's default (quality 5) is visibly blocky in gradients and skin.
 X264_ARGS = ["-crf", "16", "-preset", "slow"]
+# For a clip that is encoded again before anyone sees it (a story's shots when subtitles are burned in):
+# near-lossless and quick, so the X264_ARGS encode happens once, on the final file.
+X264_INTERMEDIATE = ["-crf", "10", "-preset", "veryfast"]
 
 
-def write_video(frames, out_path, fps=VIDEO_FPS, grain=None):
+def write_video(frames, out_path, fps=VIDEO_FPS, grain=None, x264=None):
     import imageio
     import numpy as np
 
     with imageio.get_writer(out_path, fps=fps, codec="libx264", quality=None, pixelformat="yuv420p",
-                            macro_block_size=16, ffmpeg_params=X264_ARGS) as writer:
+                            macro_block_size=16, ffmpeg_params=x264 or X264_ARGS) as writer:
         for frame in frames:
             if isinstance(frame, Image.Image):
                 frame = np.asarray(frame.convert("RGB"))
@@ -582,15 +859,18 @@ def generate_avatar_candidates(description, count, seed=None):
     t2v = _apply_loras(_swap_to("t2v", _load_t2v))  # the worker clears job LoRAs; this drops leftovers
     prompt = avatar_prompt(description)
     base = seed if seed is not None else int.from_bytes(os.urandom(4), "big")
+    sampling = _sampling()
     images = []
     for i in range(count):
-        frame = t2v(
-            prompt=prompt,
-            negative_prompt="blurry, distorted face, extra limbs, text, watermark",
+        frame = _timed(
+            "t2v", t2v,
+            # the same prompt for every candidate: encoded once
+            **_prompt_embeds("t2v", t2v, prompt, "blurry, distorted face, extra limbs, text, watermark",
+                             sampling["guidance_scale"] > 1.0),
             width=704,
             height=1280,
             num_frames=1,
-            **_sampling(),
+            **sampling,
             generator=_generator(base + i),
             output_type="np",
             callback_on_step_end=_on_step,
@@ -631,6 +911,7 @@ def _edit_sampling(best=False):
 def _load_edit():
     from diffusers import QwenImageEditPlusPipeline
 
+    _warm(EDIT_MODEL)  # ~58 GB: warm the page cache in parallel, as for Wan
     pipe = QwenImageEditPlusPipeline.from_pretrained(EDIT_MODEL, torch_dtype=torch.bfloat16)
     steps = _edit_lightning()
     if steps:
@@ -639,8 +920,7 @@ def _load_edit():
             weight_name=f"Qwen-Image-Edit-2511-Lightning-{steps}steps-V1.0-bf16.safetensors",
         )
     # ~58 GB of weights: components move to the GPU only while they run.
-    pipe.enable_model_cpu_offload()
-    return pipe
+    return _offload(pipe)
 
 
 class _full_model:
@@ -666,6 +946,7 @@ def make_keyframe(cast, scene, width=1280, height=704, seed=None, best=False):
     model takes at most 3 input images.
     """
     pipe = _swap_to("edit", _load_edit)
+    warm_ahead("i2v")  # the keyframe is animated next
     if len(cast) == 1:
         images = _as_list(cast[0][1])[:MAX_EDIT_IMAGES]
         who = "Keep this exact character identical: same face, hair, skin tone, body shape and outfit."
@@ -678,7 +959,8 @@ def make_keyframe(cast, scene, width=1280, height=704, seed=None, best=False):
         who = (f"Keep each of these characters exactly identical to their image ({roles}): "
                "same faces, hair, skin tones, body shapes and outfits. Show all of them together.")
     with _full_model(pipe, best):
-        image = pipe(
+        image = _timed(
+            "edit", pipe,
             image=[ref.convert("RGB") for ref in images],
             prompt=f"{who} Scene: {scene}. Wide cinematic frame, natural lighting, photorealistic.",
             negative_prompt=" ",
@@ -693,12 +975,33 @@ def make_keyframe(cast, scene, width=1280, height=704, seed=None, best=False):
     return fit(image, width, height)
 
 
+CLIP_FRAMES = 33  # 2 s at 16 fps (4k + 1 for Wan); also the trainer's clip length
+
+
+def render_clip(image, prompt, out_path, seed=None, width=832, height=832):
+    """A 2 s Wan I2V clip from `image` (a path or PIL image): 16 fps, no smoothing/upscale/sound/grain.
+    Writes `out_path` and three stills (first, middle, last frame) for the content filter; returns their paths."""
+    if isinstance(image, str):
+        image = Image.open(image).convert("RGB")
+    text, negative = natural_prompts(with_triggers(prompt))
+    frames = _render_segment(text, negative, CLIP_FRAMES, width, height, seed, fit(image, width, height))
+    write_video(frames, out_path, fps=VIDEO_FPS)
+    stills = []
+    for k, i in enumerate((0, len(frames) // 2, len(frames) - 1)):
+        path = f"{out_path}.{k}.png"
+        Image.fromarray(frames[i]).save(path)
+        stills.append(path)
+    return stills
+
+
 def reanchor(frame, references, width, height, seed=None):
     """A long take's conditioning frame with the avatar's face and hair restored from `references`
     (its images), everything else kept: composition, pose, clothes, background, light."""
     pipe = _swap_to("edit", _load_edit)
     refs = _as_list(references)[:MAX_EDIT_IMAGES - 1]
-    image = pipe(
+    warm_ahead("i2v")  # the take goes on from this frame
+    image = _timed(
+        "edit", pipe,
         image=[frame.convert("RGB")] + [ref.convert("RGB") for ref in refs],
         prompt=(f"Image 1 is a frame from a video. Images 2-{len(refs) + 1} show the same person. Keep image 1 "
                 "exactly as it is: same composition, framing, pose, expression, clothes, background, lighting "
@@ -721,7 +1024,8 @@ def make_photo(references, prompt, negative_prompt, width, height, seed=None, be
     call), so the negative prompt applies; ~3x slower."""
     pipe = _swap_to("edit", _load_edit)
     with _full_model(pipe, best):
-        image = pipe(
+        image = _timed(
+            "edit", pipe,
             image=[ref.convert("RGB") for ref in _as_list(references)[:MAX_EDIT_IMAGES]],
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -777,30 +1081,44 @@ def _load_audio():
 # MMAudio is small (a few GB), so it stays in RAM beside whichever big model is loaded
 # and visits the GPU only while it runs. Going through _swap_to would evict the 14B
 # video model after every clip and force a reload on the next job.
-_audio = {}
+_audio = {}  # "models": (cfg, net, features); "sessions": open sound_session blocks; "on_gpu"
 
 
 def _audio_models():
-    if not _audio:
+    if "models" not in _audio:
         print("loading audio", flush=True)
         _audio["models"] = _load_audio()
     return _audio["models"]
 
 
-@torch.inference_mode()
+@contextlib.contextmanager
+def sound_session():
+    """MMAudio stays on the GPU from the first generate_sound call inside the block to the block's end (the
+    chunks of a long take, the shots of a story) instead of moving there and back for every call. Nothing
+    else may use the GPU inside the block. Opening it loads nothing."""
+    _audio["sessions"] = _audio.get("sessions", 0) + 1
+    try:
+        yield
+    finally:
+        _audio["sessions"] -= 1
+        if not _audio["sessions"] and _audio.pop("on_gpu", False):
+            _, net, features = _audio["models"]
+            net.to("cpu")
+            features.to("cpu")
+            torch.cuda.empty_cache()
+
+
 def generate_sound(video_path, out_path, prompt="", seconds=5, seed=None):
     """Ambient sound and Foley for a silent clip, synchronised to its frames and
     steered by `prompt`. Writes a 44.1 kHz WAV of the clip's length."""
     cfg, net, features = _audio_models()
     check_cancel()
-    net.to("cuda")
-    features.to("cuda")
-    try:
+    with sound_session(), torch.inference_mode():
+        if not _audio.get("on_gpu"):
+            _audio["on_gpu"] = True  # set first: a move that fails half-way is still undone
+            net.to("cuda")
+            features.to("cuda")
         return _generate_sound(cfg, net, features, video_path, out_path, prompt, seconds, seed)
-    finally:
-        net.to("cpu")
-        features.to("cpu")
-        torch.cuda.empty_cache()
 
 
 def _generate_sound(cfg, net, features, video_path, out_path, prompt, seconds, seed):
@@ -855,6 +1173,7 @@ def narrate(text, voice, out_path):
 def _load_vlm():
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+    prefetch_model(VLM_MODEL)  # ~16 GB
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         VLM_MODEL, torch_dtype=torch.bfloat16, device_map="cuda"
     )
@@ -882,6 +1201,35 @@ def _extract_json(text):
     if not match:
         raise ValueError(f"model did not return JSON: {text[:300]}")
     return json.loads(match.group(0))
+
+
+COUNT_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+               "nine": 9, "ten": 10}
+
+
+def _parse_count(answer):
+    """The number of people in a VLM answer: the first integer, else a number word; "none"/"no one" -> 0;
+    -1 when it can't be read."""
+    text = (answer or "").strip().lower()
+    m = re.search(r"\d+", text)
+    if m:
+        return int(m.group(0))
+    if re.search(r"\b(none|nobody|no one|no people|zero)\b", text):
+        return 0
+    if re.search(r"\b(a single|single|just one|only one|alone)\b", text):
+        return 1
+    m = re.search(r"\b(" + "|".join(COUNT_WORDS) + r")\b", text)
+    return COUNT_WORDS[m.group(1)] if m else -1
+
+
+def count_people(image_path):
+    """How many people the VLM sees in a photo (partial people included); -1 when its answer can't be read.
+    Avatar photo sets keep only photos with exactly one person."""
+    messages = [{"role": "user", "content": [
+        {"type": "image", "image": f"file://{image_path}"},
+        {"type": "text", "text": "How many people are visible in this photo? Count partial people and people "
+                                 "in the background too. Answer with a number only."}]}]
+    return _parse_count(_chat(messages, max_new_tokens=8))
 
 
 def describe_video(video_path, instructions=""):
@@ -954,7 +1302,7 @@ def _first_json_object(text):
     raise ValueError(f"model did not return JSON: {text[:300]}")
 
 
-def plan_segments(prompt, n, cast=(), seconds=None):
+def plan_segments(prompt, n, cast=(), seconds=None, image=None):
     """A long take's timeline: n prompts, one per continuous 5 s segment, written by the VLM from the
     user's prompt. Same subject, place, light and camera style; only the action moves on.
     cast: (name, description) pairs, referred to by name. Raises ValueError on unusable output."""
@@ -973,8 +1321,13 @@ Each prompt is one or two sentences, at most 400 characters.
 Respond with JSON only: {{"segments": [str, ...]}} with exactly {n} strings.
 
 TAKE: {prompt}"""
-    out = _first_json_object(_chat([{"role": "user", "content": [{"type": "text", "text": ask}]}],
-                                   min(4096, 160 * n + 200)))
+    content = [{"type": "text", "text": ask}]
+    if image:  # the take's opening frame: the plan keeps to what is in it
+        content = [{"type": "image", "image": f"file://{image}"},
+                   {"type": "text", "text": "This is the opening frame of the take. Every prompt must keep to what is "
+                                            "in this frame: the same people (no one else appears), place, light and "
+                                            "camera; no new animals, objects, crowds or effects.\n\n" + ask}]
+    out = _first_json_object(_chat([{"role": "user", "content": content}], min(4096, 160 * n + 200)))
     plan = [p.strip() if isinstance(p, str) else p for p in out.get("segments") or []]
     if not valid_segment_plan(plan, n):
         raise ValueError(f"planner returned {len(plan)} usable segment prompts, wanted {n}")

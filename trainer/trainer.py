@@ -8,8 +8,13 @@ skips what is done and resumes training from the last saved state (every 250 ste
 See docs/specs/2026-11-09-lora-training.md, "Trainer: step 2".
 """
 
+import hashlib
 import json
 import os
+
+# Before anything imports huggingface_hub: its Xet transfers at full speed (the Krea files are ~66 GB).
+os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
+
 import re
 import shutil
 import signal
@@ -19,8 +24,12 @@ import time
 import traceback
 import urllib.request
 
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
+
 import boto3
 
+import mirror
 import plan
 
 REGION = os.environ["AWS_REGION"]
@@ -41,6 +50,20 @@ DIT = {"t2v_low": f"{MODELS}/split_files/diffusion_models/wan2.2_t2v_low_noise_1
        "t2v_high": f"{MODELS}/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors"}
 VAE = f"{MODELS}/split_files/vae/wan_2.1_vae.safetensors"
 T5 = f"{MODELS}/models_t5_umt5-xxl-enc-bf16.pth"
+# The Wan training files, relative to MODELS, and the commits first boot downloads them at (the same pins
+# are in terraform/templates/trainer_user_data.sh.tpl; a test keeps the two in step).
+WAN_FILES = [os.path.relpath(p, MODELS) for p in (DIT["t2v_low"], DIT["t2v_high"], VAE, T5)]
+WAN_REPOS = [("Comfy-Org/Wan_2.2_ComfyUI_Repackaged", "5df3a4a3ed0628002308022198249dbbbd045d09"),
+             ("Wan-AI/Wan2.1-T2V-14B", "a064a6c71f5be440641209c07bf2a5ce7a2ff5e4")]
+
+
+def _pinned_unit(name, revisions):
+    """A folder in the model mirror (mirror.py) named by the pinned commits of what it holds: after a pin
+    is bumped the old copy is neither restored nor overwritten."""
+    return f"trainer/{name}/" + hashlib.sha256("\n".join(revisions).encode()).hexdigest()[:12]
+
+
+WAN_UNIT = _pinned_unit("wan", [rev for _, rev in WAN_REPOS])
 BASE_MODEL = "Wan-AI/Wan2.2-T2V-A14B (ComfyUI fp16 repackage)"
 VISIBILITY_SECONDS = 1800
 WATCH_SECONDS = 15
@@ -60,9 +83,16 @@ KREA_RAW = f"{KREA_DIR}/raw.safetensors"
 KREA_TURBO = f"{KREA_DIR}/turbo.safetensors"
 KREA_VAE = f"{KREA_DIR}/split_files/vae/qwen_image_vae.safetensors"
 KREA_TE = f"{KREA_DIR}/text_encoders/qwen3vl_4b_bf16.safetensors"
-KREA_FILES = [("krea/Krea-2-Raw", "raw.safetensors"), ("krea/Krea-2-Turbo", "turbo.safetensors"),
-              ("Comfy-Org/Qwen-Image", "split_files/vae/qwen_image_vae.safetensors"),
-              ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_bf16.safetensors")]
+# (repo, file, commit): pinned, so a rebuilt trainer trains on the same weights. Turbo's pin is the render
+# box's (worker/models.py KREA_REVISION). Bump deliberately.
+KREA_FILES = [("krea/Krea-2-Raw", "raw.safetensors", "6b0ece7fffb640c5e3bcbe0a7f10f66b8e60a603"),
+              ("krea/Krea-2-Turbo", "turbo.safetensors", "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7"),
+              ("Comfy-Org/Qwen-Image", "split_files/vae/qwen_image_vae.safetensors",
+               "1f12b17be14c89b026c51a91d67c32f84bb047bc"),
+              ("Comfy-Org/Qwen3-VL", "text_encoders/qwen3vl_4b_bf16.safetensors",
+               "02f0d3eefb59528799653d16735818801177ef1f")]
+KREA_UNIT = _pinned_unit("krea2", [rev for _, _, rev in KREA_FILES])  # their copy in the model mirror
+FETCH_POLL = 5  # seconds between looks at a running fetch (and at a cancel)
 # musubi-tuner's Krea 2 scripts need torch >= 2.6 (the Wan venv keeps 2.5.1): own venv, built on first use.
 KREA_VENV = f"{ROOT}/krea-venv"
 KREA_TORCH = ["torch==2.8.0", "torchvision==0.23.0", "--index-url", "https://download.pytorch.org/whl/cu126"]
@@ -389,9 +419,37 @@ cache_directory = "{cache}/image"
         run([VENV_PY, f"{MUSUBI}/convert_lora.py", "--input", src, "--output", dst, "--target", "other"],
             os.path.join(self.jd, "convert.log"))
 
+    def avatar_wan(self):
+        """An avatar's Wan LoRA build (docs/specs/2026-11-24-avatar-wan-lora.md): uploaded under its own LoRA name
+        and version, linked on the avatar, no auto previews."""
+        return self.params.get("model") == "t2v" and bool(self.params.get("avatar")) and bool(self.params.get("lora"))
+
+    def wan_current(self):
+        """Is this train job still the avatar's current Wan LoRA build?"""
+        try:
+            avatar = json.loads(s3.get_object(Bucket=BUCKET, Key=f"avatars/{self.client}/{self.params['avatar']}/"
+                                                                  "avatar.json")["Body"].read())
+        except s3.exceptions.NoSuchKey:
+            return False
+        created = self.params.get("avatar_created_at")
+        return (self.job["job_id"] in ((avatar.get("wan_lora") or {}).get("job_ids") or [])
+                and (created is None or avatar.get("created_at") in (None, created)))
+
+    def wan_link(self):
+        r = self.state["result"]
+        _update_avatar_lora(self.client, self.params["avatar"], self.job["job_id"], "wan_lora", state="ready",
+                            version=r["version"], ready={"lora": r["lora"], "version": r["version"]}, error=None)
+
     def upload(self):
         out = os.path.join(self.jd, "out")
-        base = f"loras/{self.client}/{self.name}/"
+        if self.avatar_wan() and not self.wan_current():  # replaced while training: write nothing
+            self.state["result"] = {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
+            return
+        lora_name = self.params["lora"] if self.avatar_wan() else self.name
+        base = f"loras/{self.client}/{lora_name}/"
+        if self.avatar_wan() and "version" not in self.state:  # the avatar build picked its version
+            self.state["version"] = int(self.params["version"])
+            self.save()
         if "version" not in self.state:
             keys = [o["Key"] for p in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=base)
                     for o in p.get("Contents", [])]
@@ -414,20 +472,22 @@ cache_directory = "{cache}/image"
                     s3.upload_file(conv, BUCKET, prefix + "checkpoints/" + abs_name)
                     files.append("checkpoints/" + abs_name)
         m = self.state["manifest"]
-        lora = {"name": self.name, "kind": m["kind"], "trigger": m["trigger"], "version": version,
+        lora = {"name": lora_name, "kind": m["kind"], "trigger": m["trigger"], "version": version,
                 "models": ["t2v"], "steps_per_expert": self.params["steps"], "rank": 32,
                 "speed": self.speed, "resolution": RESOLUTION[self.speed],
                 "base": {"t2v": BASE_MODEL, "dit": {e: os.path.basename(p) for e, p in DIT.items()}},
                 "dataset": {"fingerprint": self.params.get("fingerprint"), "files": m["file_count"],
                             "segments": self.state["segments"], "photos": self.state["photos"]},
                 "files": files, "job_id": self.job["job_id"], "created_at": int(time.time()),
-                "train_seconds": int(time.time() - int(self.job.get("started_at") or time.time()))}
+                "train_seconds": int(time.time() - int(self.job.get("started_at") or time.time())),
+                **({"avatar": self.params["avatar"], "source": "avatar"} if self.avatar_wan() else {})}
         s3.put_object(Bucket=BUCKET, Key=prefix + "lora.json", Body=json.dumps(lora, indent=2).encode(),
                       ContentType="application/json")
-        s3.put_object(Bucket=BUCKET, Key=base + "current.json", Body=json.dumps({"version": version}).encode(),
-                      ContentType="application/json")
+        if not self.avatar_wan() or self.wan_current():  # a replaced avatar build never becomes current
+            s3.put_object(Bucket=BUCKET, Key=base + "current.json", Body=json.dumps({"version": version}).encode(),
+                          ContentType="application/json")
         self.state["files"] = files
-        self.state["result"] = {"lora": self.name, "version": version, "prefix": prefix, "speed": self.speed,
+        self.state["result"] = {"lora": lora_name, "version": version, "prefix": prefix, "speed": self.speed,
                                 "steps_per_expert": self.params["steps"], "trigger": m["trigger"],
                                 "segments": self.state["segments"], "photos": self.state["photos"],
                                 "checkpoints": sum(f.startswith("checkpoints/") for f in files)}
@@ -493,20 +553,20 @@ cache_directory = "{cache}/image"
         with open(marker, "w") as f:
             f.write("ok")
 
+    def krea_prefetch(self):
+        """Start getting the Krea models now, in the background, so the download overlaps prepare, caption
+        and the venv build instead of following them. Only on a trainer whose musubi-tuner has Krea support
+        (krea_env reports the other case) and while this job still needs them."""
+        if "krea_models" not in self.state["done"] and os.path.exists(f"{MUSUBI}/krea2_train_network.py"):
+            krea_fetch_start(self.job["job_id"])
+
     def krea_models(self):
-        missing = [(r, f) for r, f in KREA_FILES if not os.path.exists(os.path.join(KREA_DIR, f))]
-        if not missing:
+        if not _krea_missing() and _KREA_FETCH["thread"] is None:
             return
-        self.progress("downloading Krea 2 models (first Krea job, ~66 GB)", force=True)
-        token = _hf_token()
-        for repo, filename in missing:
-            try:
-                _hf_download(repo, filename, KREA_DIR, token)
-            except Exception as e:
-                if repo == "krea/Krea-2-Raw":
-                    raise RuntimeError("no access to krea/Krea-2-Raw: accept its license on huggingface.co with the "
-                                       f"account of the SSM token ({type(e).__name__})") from e
-                raise
+        self.progress("getting the Krea 2 models (first Krea job, ~66 GB)", force=True)
+        stats = krea_fetch_wait(self.progress, self.job["job_id"])
+        if stats:
+            self.state["krea_download"] = {k: stats[k] for k in ("source", "bytes", "seconds")}
 
     def krea_dataset_toml(self):
         items, cache = os.path.join(self.jd, "items"), os.path.join(self.jd, "cache")
@@ -603,6 +663,8 @@ num_repeats = 1
         self.state["result"] = {"lora": lora, "version": version, "prefix": prefix, "model": "krea2",
                                 "trigger": self.params["trigger"], "avatar": self.params.get("avatar"),
                                 "photos": self.state.get("photos"), "steps": int(self.params["steps"])}
+        if self.state.get("krea_download"):  # this job fetched the models: where from and how long it took
+            self.state["result"]["krea_download"] = self.state["krea_download"]
 
     def krea_link(self):
         r = self.state["result"]
@@ -613,6 +675,7 @@ num_repeats = 1
         if self.params.get("model") == "krea2":
             if not self.krea_current():
                 return {"skipped": "the avatar was replaced or a newer Krea LoRA build started"}
+            self.krea_prefetch()
             self.phase("prepare", self.prepare)
             self.phase("caption", self.caption)  # the photo set's captions are saved: nothing to caption
             self.phase("krea_env", self.krea_env)
@@ -622,6 +685,8 @@ num_repeats = 1
             self.phase("krea_upload", self.krea_upload)
             self.phase("krea_link", self.krea_link)
             return self.state["result"]
+        if self.avatar_wan() and not self.wan_current():
+            return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
         self.phase("prepare", self.prepare)
         self.phase("caption", self.caption)
         if self.params.get("captions_only"):
@@ -629,9 +694,16 @@ num_repeats = 1
                     "segments": self.state["segments"], "photos": self.state["photos"]}
         self.phase("cache", self.cache)
         self.phase("t2v_low", lambda: self.train("t2v_low"))
+        if self.avatar_wan() and not self.wan_current():  # replaced meanwhile: don't spend the second expert
+            return {"skipped": "the avatar was replaced or a newer Wan LoRA build started"}
         self.phase("t2v_high", lambda: self.train("t2v_high"))
         self.phase("upload", self.upload)
-        self.phase("preview", self.queue_preview)
+        if self.avatar_wan():
+            if self.state.get("result", {}).get("skipped"):
+                return self.state["result"]
+            self.phase("wan_link", self.wan_link)
+        else:
+            self.phase("preview", self.queue_preview)
         return self.state["result"]
 
 
@@ -640,37 +712,149 @@ def _hf_token():
     return ssm.get_parameter(Name=HF_TOKEN_PARAM, WithDecryption=True)["Parameter"]["Value"]
 
 
-def _hf_download(repo, filename, local_dir, token):
+def _hf_download(repo, filename, local_dir, token, revision):
     from huggingface_hub import hf_hub_download
-    return hf_hub_download(repo_id=repo, filename=filename, local_dir=local_dir, token=token)
+    return hf_hub_download(repo_id=repo, filename=filename, revision=revision, local_dir=local_dir, token=token)
+
+
+def _krea_missing():
+    return [(r, f, rev) for r, f, rev in KREA_FILES if not os.path.exists(os.path.join(KREA_DIR, f))]
+
+
+def krea_fetch():
+    """The Krea 2 training files on this disk: from the model mirror when it has them, the rest from
+    Hugging Face, all files at once (then queued for the mirror). Returns where they came from, the bytes
+    and the seconds; logs them as model_download."""
+    t0 = time.time()
+    wanted = _krea_missing()
+    restored = mirror.pull(KREA_UNIT, KREA_DIR)
+    missing = _krea_missing()
+    if missing:
+        token = _hf_token()
+        pool = ThreadPoolExecutor(len(missing))
+        jobs_ = [(repo, pool.submit(_hf_download, repo, f, KREA_DIR, token, rev)) for repo, f, rev in missing]
+        try:  # the first failure ends the wait: a token without access is reported at once
+            futures_wait([fut for _, fut in jobs_], return_when=FIRST_EXCEPTION)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        failed = [(repo, fut.exception()) for repo, fut in jobs_ if fut.done() and not fut.cancelled()
+                  and fut.exception() is not None]
+        for repo, e in failed:
+            if repo == "krea/Krea-2-Raw":
+                raise RuntimeError("no access to krea/Krea-2-Raw: accept its license on huggingface.co with the "
+                                   f"account of the SSM token ({type(e).__name__})") from e
+        if failed:
+            raise failed[0][1]
+        mirror.push_async(KREA_UNIT, KREA_DIR, files=[f for _, f, _ in KREA_FILES])
+    secs = round(time.time() - t0, 1)
+    nbytes = sum(os.path.getsize(os.path.join(KREA_DIR, f)) for _, f, _ in wanted)
+    source = "+".join(x for x in ("mirror" if restored else "", "huggingface" if missing else "") if x)
+    stats = {"unit": KREA_UNIT, "source": source, "bytes": nbytes, "seconds": secs,
+             "mb_per_s": round(nbytes / 1e6 / max(secs, 0.1))}
+    log(event="model_download", **stats)
+    return stats
+
+
+# One fetch at a time in this process: a Krea job starts it early (Job.krea_prefetch), its krea_models
+# phase waits for it, and a job that arrives while one runs joins it.
+_KREA_FETCH = {"thread": None, "result": None, "error": None, "owner": None}
+_FETCH_LOCK = threading.Lock()
+
+
+def krea_fetch_start(owner=None):
+    """Start the fetch in the background unless one is running or nothing is missing. Returns its thread.
+    owner: the job that starts it (the one whose result reports the download)."""
+    with _FETCH_LOCK:
+        t = _KREA_FETCH["thread"]
+        if t is not None and t.is_alive():
+            return t
+        if not _krea_missing():
+            return None
+
+        def work():
+            try:
+                _KREA_FETCH["result"] = krea_fetch()
+            except BaseException as e:  # raised to the job that waits for it
+                _KREA_FETCH["error"] = e
+
+        _KREA_FETCH.update(result=None, error=None, owner=owner)
+        t = _KREA_FETCH["thread"] = threading.Thread(target=work, daemon=True, name="krea-fetch")
+        t.start()
+        return t
+
+
+def krea_fetch_wait(progress, owner=None):
+    """Wait for the fetch (starting it if needed) and raise its error. Returns its stats to the job that
+    started it or had to wait for it, None to a job that found the files already there. `progress` is
+    called while waiting, so a cancel stops the job; the download itself goes on for the next job."""
+    krea_fetch_start(owner)  # an earlier attempt that failed is tried again; a running or finished one is kept
+    t = _KREA_FETCH["thread"]
+    waited = False
+    while t is not None and t.is_alive():
+        waited = True
+        t.join(FETCH_POLL)
+        progress("getting the Krea 2 models (first Krea job, ~66 GB)")
+    with _FETCH_LOCK:
+        result, error, started_by = _KREA_FETCH["result"], _KREA_FETCH["error"], _KREA_FETCH["owner"]
+        _KREA_FETCH.update(thread=None, result=None, error=None, owner=None)
+    if error is not None:
+        raise error
+    return result if waited or started_by == owner else None
+
+
+def busy():
+    """Is a model fetch or an upload to the mirror running? (The trainer doesn't stop itself meanwhile.)"""
+    t = _KREA_FETCH["thread"]
+    return bool(t is not None and t.is_alive()) or mirror.busy()
+
+
+def mirror_backfill(hf_home=None):
+    """Queue for the model mirror the weights that are complete on this disk (mirror.py uploads only what
+    the bucket lacks, in the background): the Wan and Krea training files and the caption model. This is how
+    a running trainer seeds the mirror for the next new disk. Never stops the trainer."""
+    try:
+        mirror.push_async(WAN_UNIT, MODELS, files=WAN_FILES)  # skipped while a file is missing
+        mirror.push_async(KREA_UNIT, KREA_DIR, files=[f for _, f, _ in KREA_FILES])
+        name = "models--" + VLM_MODEL.replace("/", "--")
+        folder = os.path.join(hf_home or os.environ.get("HF_HOME", "/opt/models"), "hub", name)
+        if os.path.isdir(folder) and not any(f.endswith(".incomplete") for _, _, fs in os.walk(folder) for f in fs):
+            # Its own copy (not the render box's hub/ folder): neither machine restores what the other wrote.
+            mirror.push_async(f"trainer/hub/{name}", folder)
+    except Exception as e:
+        log(event="mirror_backfill", error=f"{type(e).__name__}: {e}")
 
 
 def _update_avatar_krea_lora(client, name, job_id, **fields):
-    """Set fields on the avatar's krea_lora, only while this job is still the avatar's current build
-    (a field set to None is removed)."""
+    return _update_avatar_lora(client, name, job_id, "krea_lora", **fields)
+
+
+def _update_avatar_lora(client, name, job_id, record, **fields):
+    """Set fields on the avatar's krea_lora / wan_lora record, only while this job is still the avatar's
+    current build (a field set to None is removed)."""
     key = f"avatars/{client}/{name}/avatar.json"
     try:
         avatar = json.loads(s3.get_object(Bucket=BUCKET, Key=key)["Body"].read())
     except s3.exceptions.NoSuchKey:
         return False
-    kl = avatar.get("krea_lora") or {}
+    kl = avatar.get(record) or {}
     if job_id not in (kl.get("job_ids") or []):
         return False
     kl.update(fields)
     for k in [k for k, v in fields.items() if v is None]:
         kl.pop(k)
-    avatar["krea_lora"] = kl
+    avatar[record] = kl
     s3.put_object(Bucket=BUCKET, Key=key, Body=json.dumps(avatar).encode(), ContentType="application/json")
     return True
 
 
 def krea_failed(job, error):
-    """A Krea avatar LoRA build failed: show it on the avatar (its last ready LoRA stays linked)."""
+    """An avatar LoRA build (Krea or Wan) failed: show it on the avatar (its last ready LoRA stays linked)."""
     params = json.loads(job.get("params") or "{}")
-    if params.get("model") == "krea2" and params.get("avatar"):
+    record = {"krea2": "krea_lora", "t2v": "wan_lora"}.get(params.get("model"))
+    if record and params.get("avatar") and (record == "krea_lora" or params.get("lora")):
         try:
-            _update_avatar_krea_lora(job["client"], params["avatar"], job["job_id"], state="failed",
-                                     error=str(error)[:500])
+            _update_avatar_lora(job["client"], params["avatar"], job["job_id"], record, state="failed",
+                                error=str(error)[:500])
         except Exception as e:  # never hide the job's own error
             log(event="krea_failed_update_error", error=str(e)[:200])
 
@@ -733,12 +917,13 @@ def _queue_empty():
 
 def main():
     log(event="trainer_up", idle_seconds=IDLE_SECONDS, job_timeout_seconds=JOB_TIMEOUT_SECONDS)
+    mirror_backfill()
     last_work = time.time()
     while True:
         msgs = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=20,
                                    VisibilityTimeout=VISIBILITY_SECONDS).get("Messages", [])
         if not msgs:
-            if time.time() - last_work > IDLE_SECONDS and _queue_empty():
+            if time.time() - last_work > IDLE_SECONDS and _queue_empty() and not busy():
                 log(event="idle_stop")
                 ec2.stop_instances(InstanceIds=[_instance_id()])
                 time.sleep(300)
