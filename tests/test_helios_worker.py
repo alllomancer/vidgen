@@ -40,7 +40,12 @@ def run(cmd, check=True, **kw):
         open(os.path.join(cmd[3], "bin", "python"), "w").close()
     if cmd[:2] == ["git", "clone"]:
         os.makedirs(os.path.join(cmd[-1], ".git"))
+    if "--help" in cmd:  # the check that Helios's script starts in this venv
+        return mock.MagicMock(returncode=run.check_exit, stdout="", stderr="Traceback\nModuleNotFoundError: No module named 'pandas'\n")
     return mock.MagicMock(returncode=0)
+
+
+run.check_exit = 0
 
 
 helios.subprocess = types.SimpleNamespace(run=run, PIPE=-1, STDOUT=-2, Popen=None)
@@ -51,6 +56,8 @@ assert any(c[:3] == [helios.PYTHON, "-m", "venv"] for c in ran), ran
 assert any("pip" in c[0] and "-r" in c and helios.REQUIREMENTS in c for c in ran), ran
 assert ["git", "clone"] in [c[:2] for c in ran] and any(c[:2] == ["git", "-C"] and "checkout" in c and helios.REPO_COMMIT in c for c in ran), kinds
 assert said and "Helios" in said[0]
+# ... and Helios's own script was started once in the new venv, so a missing package shows here, not on a job
+assert any(c[0] == os.path.join(helios.VENV, "bin", "python") and "infer_helios.py" in c and "--help" in c for c in ran), ran
 # nothing changed: nothing runs
 ran.clear()
 helios.ensure_env(said.append)
@@ -64,6 +71,20 @@ ran.clear()
 helios.REPO_COMMIT = "0" * 40
 helios.ensure_env(said.append)
 assert any("checkout" in c and "0" * 40 in c for c in ran), ran
+
+# the script doesn't start in the venv (a package is missing): an error that names it, and no "ready" marker
+ran.clear()
+helios.REPO_COMMIT = "1" * 40
+run.check_exit = 1
+try:
+    helios.ensure_env(said.append)
+    raise AssertionError("an incomplete environment was accepted")
+except RuntimeError as e:
+    assert "pandas" in str(e), e
+run.check_exit = 0
+ran.clear()
+helios.ensure_env(said.append)
+assert ran, "not marked ready: it is built again next time"
 
 # ---------------------------------------------------------------- weights: mirror first (criterion 9)
 helios.MODEL_DIR = os.path.join(root, "model")

@@ -74,6 +74,13 @@ def ensure_env(progress=lambda msg: None):
     else:
         subprocess.run(["git", "-C", REPO_DIR, "fetch", "-q", "origin"], check=True)
     subprocess.run(["git", "-C", REPO_DIR, "checkout", "-q", "--detach", REPO_COMMIT], check=True)
+    # Does Helios's script start in this venv? A package missing from helios_requirements.txt shows here, in
+    # a minute, instead of on the first job after everything else is set up.
+    check = subprocess.run([os.path.join(VENV, "bin", "python"), "infer_helios.py", "--help"], cwd=REPO_DIR,
+                           capture_output=True, text=True)
+    if check.returncode != 0:
+        raise RuntimeError("Helios's environment is incomplete (infer_helios.py does not start): "
+                           + " | ".join((check.stderr or check.stdout or "").strip().splitlines()[-4:]))
     with open(marker, "w") as f:
         f.write(want)
 
