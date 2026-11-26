@@ -114,8 +114,22 @@ def _queue_empty():
     return int(attrs["ApproximateNumberOfMessages"]) + int(attrs["ApproximateNumberOfMessagesNotVisible"]) == 0
 
 
+# The render machine's readiness for the dashboard (GET /status reads it): a percent and one line.
+READY_KEY = "status/render.json"
+
+
+def report_ready(percent, text):
+    """Best effort: a failed write never stops the worker."""
+    try:
+        s3.put_object(Bucket=BUCKET, Key=READY_KEY, ContentType="application/json",
+                      Body=json.dumps({"percent": int(percent), "text": text, "updated_at": int(time.time())}))
+    except Exception as e:  # noqa: BLE001
+        log(event="report_ready_failed", error=f"{type(e).__name__}: {e}"[:200])
+
+
 def stop_self():
     instance_id = _instance_id()
+    report_ready(0, "Stopping: no jobs for a while.")
     log(event="idle_stop", instance=instance_id)
     ec2.stop_instances(InstanceIds=[instance_id])
 
@@ -1430,6 +1444,7 @@ def main():
     log(event="worker_up", idle_seconds=IDLE_SECONDS, job_timeout_seconds=JOB_TIMEOUT_SECONDS)
     sweep_work_dirs()
     mirror_backfill()
+    report_ready(100, "Ready: the worker is up and takes jobs (the first job of each kind loads its model).")
     last_work = time.time()
     while True:
         resp = sqs.receive_message(

@@ -182,6 +182,10 @@ form:not(.krea) .krea-text { display: none !important; }
     <section class="card" aria-labelledby="server-h">
       <h2 id="server-h">Render server</h2>
       <div class="big"><span id="state">…</span><span id="state-pill" class="pill s-unknown">…</span></div>
+      <div id="ready" hidden>
+        <div class="bar" id="ready-bar" role="progressbar" aria-labelledby="ready-text" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span style="width:0%"></span></div>
+        <p class="hint" id="ready-text" role="status" aria-live="polite"></p>
+      </div>
       <dl id="server-dl"></dl>
       <p class="hint" id="server-err" role="alert"></p>
       <div style="margin-top:14px"><button id="wake" class="primary">Wake GPU</button></div>
@@ -585,6 +589,16 @@ async function loadStatus() {
     $("state").textContent = {running: "Running", stopped: "Stopped", pending: "Starting", stopping: "Stopping"}[st] || st;
     for (const el of [$("state-pill"), $("hdr-state")]) { el.className = `pill s-${st}`; el.textContent = st; }
     $("wake").disabled = st === "running" || st === "pending";
+    // How ready the render machine is to take a job: a percent and one line (from the API).
+    const rd = s.readiness;
+    $("ready").hidden = !rd;
+    if (rd) {
+      const pct = Math.max(0, Math.min(100, Math.round(Number(rd.percent) || 0)));
+      $("ready-bar").setAttribute("aria-valuenow", pct);
+      $("ready-bar").firstElementChild.style.width = pct + "%";
+      const line = `Ready to render: ${pct}% · ${rd.text || ""}`;
+      if ($("ready-text").textContent !== line) $("ready-text").textContent = line;  // no re-announcing an unchanged line
+    }
     const rows = [
       ["Instance", s.instance_type || "—"],
       ["Up for", s.running_minutes != null ? dur(s.running_minutes * 60) : "—"],

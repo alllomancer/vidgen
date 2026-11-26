@@ -97,6 +97,13 @@ data "aws_iam_policy_document" "worker" {
     resources = ["${aws_s3_bucket.data.arn}/outputs/*"]
   }
 
+  # The dashboard's "ready to render" line: first boot and the worker write it, GET /status reads it.
+  statement {
+    sid       = "WriteReadiness"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.data.arn}/status/render.json"]
+  }
+
   # Krea 2 avatar LoRAs: the avatar_photoset job writes the avatar's dataset, updates its krea_lora
   # state, and queues the train job (docs/specs/2026-11-24-krea-avatar-lora.md).
   statement {
@@ -213,6 +220,13 @@ data "aws_iam_policy_document" "api" {
       "${aws_s3_bucket.data.arn}/uploads/*",
       "${aws_s3_bucket.data.arn}/avatars/*",
     ]
+  }
+
+  # The render machine's readiness report (written by the box), shown by GET /status.
+  statement {
+    sid       = "ReadReadiness"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.data.arn}/status/render.json"]
   }
 
   # DELETE /avatars/{name}: the avatar's folder and the default marker, and (when asked) the avatar's own

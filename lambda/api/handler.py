@@ -2293,10 +2293,48 @@ def _models():
     return out
 
 
+# How far the render machine is from taking a job: the box writes its own percent and line to this object
+# (first boot at each step, the worker when it starts); GET /status adds the instance's state to it.
+READY_KEY = "status/render.json"
+FIRST_BOOT_MINUTES = 45  # a first boot without the model mirror, roughly
+
+
+def _ready_report():
+    try:
+        return json.loads(s3.get_object(Bucket=BUCKET, Key=READY_KEY)["Body"].read())
+    except Exception:  # none yet, or unreadable: the instance's state still says something
+        return None
+
+
+def _readiness(inst, report, now):
+    """{"percent": 0-100, "text": one line} for the render machine."""
+    state = inst["State"]["Name"]
+    if state == "stopped":
+        return {"percent": 0, "text": "Off. It starts when you send a job (or Wake): a few minutes to boot, "
+                                      "then the first job loads its model."}
+    if state == "pending":
+        return {"percent": 5, "text": "Starting the machine."}
+    if state != "running":
+        return {"percent": 0, "text": "Stopping." if state in ("stopping", "shutting-down") else f"Machine is {state}."}
+    launched = inst["LaunchTime"].timestamp()
+    if isinstance(report, dict) and (report.get("updated_at") or 0) >= launched - 5:  # reported since this start
+        percent = report.get("percent")
+        percent = max(0, min(100, int(percent))) if isinstance(percent, (int, float)) and not isinstance(percent, bool) else 50
+        return {"percent": percent, "text": " ".join(str(report.get("text") or "Working").split())[:200]}
+    minutes = int((now - launched) / 60)
+    disks = [d["Ebs"]["AttachTime"].timestamp() for d in inst.get("BlockDeviceMappings") or [] if d.get("Ebs", {}).get("AttachTime")]
+    if disks and abs(launched - min(disks)) < 600:  # the disk is as new as this start: a first boot
+        return {"percent": min(95, 5 + int(90 * minutes / FIRST_BOOT_MINUTES)),
+                "text": f"First boot: installing and downloading the models, about {minutes} of ~{FIRST_BOOT_MINUTES} min "
+                        "(an estimate; the box reports details once its worker starts)."}
+    return {"percent": 50, "text": "Machine is up; starting the worker (about a minute)."}
+
+
 def status():
     inst = _instance()
     out = {"instance": inst["State"]["Name"], "queued_jobs": _queue_depth(), "uptime_hold": _hold(),
-           "instance_type": inst.get("InstanceType"), "models": _models()}
+           "instance_type": inst.get("InstanceType"), "models": _models(),
+           "readiness": _readiness(inst, _ready_report(), time.time())}
     if inst["State"]["Name"] == "running":
         out["running_minutes"] = int((time.time() - inst["LaunchTime"].timestamp()) / 60)
     if TRAINER_INSTANCE_ID:
