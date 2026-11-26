@@ -237,7 +237,10 @@ form:not(.krea) .krea-text { display: none !important; }
       <form class="add create" id="create-video" data-kind="video">
         <label class="wide">Prompt<textarea name="prompt" required maxlength="2000" placeholder="walking through a night market, handheld camera"></textarea></label>
         <label>Avatar<select name="avatar" class="avatar-select"></select></label>
-        <label>Seconds (1-60; over 5 chains 5 s segments)<input name="seconds" type="number" min="1" max="60" value="5"></label>
+        <label title="Helios: the whole clip in one take from one prompt, 640x384 at 24 fps, one Wan LoRA. Wan: 5 s segments chained, 1280x704, with beats, plans, re-anchoring and several LoRAs">Video model<select name="video_model">
+          <option value="helios" selected>Helios (default): long clips in one take, 640×384</option>
+          <option value="wan">Wan: 5 s segments, beats and plans, 1280×704</option></select></label>
+        <label>Seconds (1-60)<input name="seconds" type="number" min="1" max="60" value="30"></label>
         <p class="wide hint take-estimate" role="status" aria-live="polite" hidden></p>
         <label class="wide long-only" hidden>Beats (optional)<textarea name="beats" maxlength="6500" aria-describedby="beats-hint" placeholder="0: a man walks into a sunny kitchen&#10;10: he sits down at the table&#10;30: he looks up at the window"></textarea></label>
         <p class="wide hint long-only" id="beats-hint" hidden>What happens when: one "SECONDS: text" per line, times in multiples of 5, each a full description of the shot. Empty: over 15 s the planner writes the timeline.</p>
@@ -673,6 +676,7 @@ function details(j) {
   if (d.avatars && d.avatars.length) bits.push(`starring ${d.avatars.join(", ")}`);
   if (d.candidates) bits.push(`${d.candidates} candidates`);
   if (d.shot) bits.push(SHOT_LABELS[d.shot] || d.shot);
+  if (d.video_model) bits.push(d.video_model === "helios" ? "Helios" : "Wan");
   if (d.steps) bits.push(`${d.steps} steps per expert`);
   if (j.rerun_of) bits.push(`re-run of ${j.rerun_of.slice(0, 8)}`);
   return bits.join(" · ");
@@ -1507,10 +1511,11 @@ function createBody(kind, f) {
   const kreaPhotoAvatar = kind === "photos" && d.avatar !== "none" && on("krea_avatar") && avatarKreaReady(d.avatar);
   const lora = collectLoras(f, kreaFrameAvatar || kreaPhotoAvatar);
   if (kind === "video") {
-    const secs = num(d.seconds) || 5, long = videoLong(f);
-    return {type: "video", prompt: d.prompt, seconds: num(d.seconds), variations: secs > 5 ? 1 : num(d.variations),
+    const long = videoLong(f), secs = long.secs;
+    return {type: "video", video_model: videoModel(f), prompt: d.prompt, seconds: num(d.seconds),
+      variations: long.wan && secs > 5 ? 1 : num(d.variations),
       seed: num(d.seed), avatar: d.avatar || undefined, loras: lora, fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
-      quality: vq, sound: on("sound"), image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real,
+      quality: long.wan ? vq : (vq === "draft" ? "standard" : vq), sound: on("sound"), image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real,
       shot: shotChoice(f),
       beats: long.beats && (d.beats || "").trim() ? d.beats.trim() : undefined,
       anchor_every: long.anchor && d.anchor_every ? num(d.anchor_every) : undefined,
@@ -1566,9 +1571,12 @@ function photoForm() {
     (f.elements.best.checked ? " at best quality" : "") + " (plus model loading if the machine was idle).";
 }
 // Video: long takes (over 5 s) get beats, re-anchoring (over 10 s, one avatar) and a time estimate.
+// Helios renders the whole take in one run from one prompt: beats, plans and re-anchoring are Wan's.
+const VIDEO_SECONDS = {helios: 30, wan: 5};
+function videoModel(f) { return f.elements.video_model && f.elements.video_model.value === "wan" ? "wan" : "helios"; }
 function videoLong(f) {
-  const secs = Number(f.elements.seconds.value) || 5;
-  return {secs, beats: secs > 5, anchor: secs > 10 && f.elements.avatar.value !== "none"};
+  const wan = videoModel(f) === "wan", secs = Number(f.elements.seconds.value) || VIDEO_SECONDS[videoModel(f)];
+  return {secs, wan, beats: wan && secs > 5, anchor: wan && secs > 10 && f.elements.avatar.value !== "none"};
 }
 // Draft and Best can't be combined: ticking Draft clears and locks Best.
 function draftBest(f) {
@@ -1581,15 +1589,28 @@ function videoForm() {
   const f = $("create-video"), long = videoLong(f);
   draftBest(f);
   for (const el of f.querySelectorAll(".long-only")) el.hidden = !long.beats;
-  f.querySelector(".plan-first-row").hidden = long.secs <= 15;  // the planner's range
+  f.querySelector(".plan-first-row").hidden = !long.wan || long.secs <= 15;  // the planner's range (Wan)
   for (const el of f.querySelectorAll(".anchor-only")) el.hidden = !long.anchor;
-  const v = f.elements.variations;
-  if (long.secs > 5 && !v.disabled) { v.dataset.kept = v.value; v.value = 1; v.disabled = true; }
-  else if (long.secs <= 5 && v.disabled) { v.disabled = false; v.value = v.dataset.kept || 1; }
+  const v = f.elements.variations, oneTake = long.wan && long.secs > 5;  // a Wan take over 5 s is a chain: one take
+  if (oneTake && !v.disabled) { v.dataset.kept = v.value; v.value = 1; v.disabled = true; }
+  else if (!oneTake && v.disabled) { v.disabled = false; v.value = v.dataset.kept || 1; }
+  for (const name of ["smooth", "draft"]) {  // Wan's frame doubling and quick mode; Helios has one size and speed
+    const box = f.elements[name];
+    box.disabled = !long.wan;
+    box.closest("label").title = long.wan ? "" : "A Wan option: Helios renders at 640x384, 24 fps";
+  }
   const est = f.querySelector(".take-estimate"), segs = Math.ceil(Math.min(long.secs, 60) / 5);
   est.hidden = long.secs <= 15;
-  est.textContent = `${segs} segments of 5 s: at least ${segs * 5 + 5} min to render (~5 min per segment plus smoothing and sound; more with Best or Upscale).`;
+  est.textContent = long.wan
+    ? `${segs} segments of 5 s: at least ${segs * 5 + 5} min to render (~5 min per segment plus smoothing and sound; more with Best or Upscale).`
+    : `One take with Helios: roughly ${Math.max(3, Math.round(1.5 + long.secs * 0.08))} min to render, plus the first frame and sound.`;
 }
+// Switching the model moves the length to that model's usual one, unless you typed your own.
+$("create-video").elements.video_model.addEventListener("change", e => {
+  const f = e.target.form, other = e.target.value === "wan" ? "helios" : "wan";
+  if (Number(f.elements.seconds.value) === VIDEO_SECONDS[other]) f.elements.seconds.value = VIDEO_SECONDS[e.target.value];
+  videoForm();
+});
 // "Plan first": a plan-only job (first frame + beats, no video); its beats and seed fill the form for review.
 // The job id and the form are kept in localStorage, so a reload (or closing the tab) picks the plan up again.
 const PLAN_KEY = "vidgen.plan", PLAN_MAX_MS = 45 * 60000;
@@ -1662,6 +1683,7 @@ $("create-video").querySelector(".plan-first").onclick = async () => {
     const job = createBody("video", f);
     delete job.beats;
     job.plan_only = true;
+    job.video_model = "wan";  // planning writes beats, which are Wan's
     planBusy = true;
     status.textContent = "Planning: starting the render machine if needed…";
     r = await api("POST", "/api/create", {job, out: (f.elements.out.value || "").trim() || undefined});

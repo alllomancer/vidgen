@@ -3,11 +3,12 @@
 
     python3 cli/g7e_switch.py [--dry-run] [--force]      (or: make g7e)
 
-1. Preflight: AWS credentials; the worker's torch can run on a g7e (>= 2.7); no job queued or running;
-   the model mirror holds the weights, so the new disk restores in minutes. --force skips the last three.
-2. Capacity: launches a probe instance and terminates it at once - spot g7e.8xlarge in each zone, then spot
-   g7e.4xlarge, then on-demand g7e.4xlarge. The first that reaches "running" wins. (AWS has no yes/no for
-   spot capacity; a probe costs cents.)
+1. Preflight: AWS credentials; the worker's torch can run on a g7e (>= 2.7); no job queued or running
+   (--force skips those two). It also says whether the model mirror holds the weights (if not, first boot
+   downloads them, ~45 min).
+2. Capacity: launches a probe instance and terminates it at once - spot g7e.4xlarge in each zone, then spot
+   g7e.8xlarge, then on-demand g7e.4xlarge, then on-demand g7e.8xlarge. The first that reaches "running"
+   wins. (AWS has no yes/no for spot capacity; a probe costs cents.)
 3. Writes instance_type, on_demand and availability_zone to terraform/terraform.tfvars and runs
    `make build`, `terraform plan`, `terraform apply`. THE APPLY REPLACES THE RENDER BOX AND ITS DISK; it
    does not ask again. If the apply fails, the next candidate is tried.
@@ -23,7 +24,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # (size, market), in the order they are tried.
-CANDIDATES = [("g7e.8xlarge", "spot"), ("g7e.4xlarge", "spot"), ("g7e.4xlarge", "on-demand")]
+CANDIDATES = [("g7e.4xlarge", "spot"), ("g7e.8xlarge", "spot"), ("g7e.4xlarge", "on-demand"), ("g7e.8xlarge", "on-demand")]
 AMI_NAME = "Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04) *"  # terraform/ec2.tf
 PROBE_TAGS = "Tags=[{Key=Name,Value=ai-video-probe},{Key=Project,Value=ai-video-trial}]"
 PROBE_WAIT = 120  # seconds for a probe to reach "running"
@@ -130,10 +131,10 @@ class Switch:
         need = [f"bf16/{self.vars[v].split('/')[-1]}" for v in ("video_model", "i2v_model") if v in self.vars]
         need += [f"hub/models--{self.vars[v].replace('/', '--')}" for v in ("vlm_model", "edit_model") if v in self.vars]
         missing = [u for u in need + ["mmaudio"] if u not in have]
-        if missing:
-            problems.append("the model mirror doesn't hold " + ", ".join(missing) + ": the new disk would download "
-                            "everything from Hugging Face and convert Wan again (~45 min). Deploy the mirror and start "
-                            "the render box once so it uploads (RUNBOOK, Model mirror)")
+        if missing:  # not a reason to stop: the first move can't have a mirror (the old box never ran this code)
+            self.say("note: the model mirror doesn't hold " + ", ".join(missing) + ", so the new disk downloads those "
+                     "from Hugging Face and converts Wan again at first boot (~45 min); the new box then fills "
+                     "the mirror for next time")
         if problems and not force:
             raise Stop("Not switching:\n- " + "\n- ".join(problems) + "\n(--force goes on anyway.)")
         for p in problems:
@@ -246,7 +247,7 @@ def main(argv, run=shell, root=ROOT, say=print, wait=time.sleep):
                     "watch it with the commands in RUNBOOK 1.4. Jobs sent meanwhile wait in the queue.")
                 return 0
             say("trying the next option")
-        raise Stop("No g7e could be launched right now (spot 8xlarge, spot 4xlarge, on-demand 4xlarge)."
+        raise Stop("No g7e could be launched right now (spot or on-demand, 4xlarge or 8xlarge)."
                    if not tried_apply else "Every option that launched as a probe failed to apply.")
     except Stop as e:
         say(str(e))

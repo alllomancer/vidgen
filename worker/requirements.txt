@@ -1,9 +1,12 @@
-torch==2.5.1
-torchvision==0.20.1
-torchaudio==2.5.1
-# MMAudio (video-to-audio). Its own deps are pinned here to versions that keep torch at 2.5.1.
-torchcodec==0.1.1
-tensordict==0.6.2
+# torch 2.9 built for CUDA 12.8: the first set with kernels for the g7e's GPU (RTX PRO 6000 Blackwell);
+# installed and run on a g7e 2026-11-26 (T2V, I2V, edit, MMAudio, VLM), docs/specs/2026-11-25-render-on-g7e.md.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.9.0+cu128
+torchvision==0.24.0+cu128
+torchaudio==2.9.0+cu128
+# MMAudio (video-to-audio). Its own deps are pinned here to versions that go with torch 2.9.
+torchcodec==0.8.0
+tensordict==0.10.0
 mmaudio @ git+https://github.com/hkchengrex/MMAudio.git@974010a026c731054592d8f777218bd9d85a6c24
 diffusers==0.37.1  # >= 0.37 for Qwen-Image-Edit-2511 (zero_cond_t)
 transformers==4.55.4

@@ -7,7 +7,7 @@ exec > >(tee /var/log/ai-video-setup.log) 2>&1
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ffmpeg python3-venv python3-pip fonts-dejavu-core espeak-ng
+apt-get install -y ffmpeg python3-venv python3-pip fonts-dejavu-core espeak-ng git
 
 mkdir -p /opt/ai-video /opt/models
 cat > /etc/ai-video.env <<'EOF'
@@ -61,6 +61,9 @@ cfg.download_if_needed()
 PY
 # The Wan repos store the 14B experts in fp32; keep a bf16 copy and drop the fp32 download.
 (cd /opt/ai-video/worker && /opt/ai-video/venv/bin/python convert_bf16.py --delete-source)
+# Helios, the default video model: its venv, its pinned repository and its weights (worker/helios.py; the
+# worker does the same on a first Helios job, so a failure here only moves the wait there).
+(cd /opt/ai-video/worker && /opt/ai-video/venv/bin/python -c "import helios; helios.ensure_env(print); helios.ensure_weights(print)") || echo "Helios setup failed; the worker retries on the first Helios job"
 
 cat > /etc/systemd/system/ai-video-worker.service <<'EOF'
 [Unit]

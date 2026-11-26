@@ -30,16 +30,20 @@ variable "subnet_visibility_tag" {
 
 variable "instance_type" {
   description = <<-EOT
-    GPU instance type. g6e.xlarge-16xlarge all have one L40S (48 GB VRAM) and
-    render at the same speed; larger sizes add CPU RAM. 4xlarge (128 GB) holds
-    one big model (~55-65 GB) at a time, so switching between T2V, I2V and the
-    avatar keyframe model reloads ~60 GB (~5 min). 8xlarge/16xlarge (256/512 GB)
-    keep all three loaded, which only pays off when jobs come in batches. See
-    "Choosing the instance" in RUNBOOK.md. Changing this replaces the spot
-    instance and its disk: first boot re-downloads the models (~25 min).
+    GPU instance type of the render box: a g7e (one RTX PRO 6000, 96 GB VRAM). Helios, the default video
+    model, and a whole Wan or image-edit pipeline stay on the GPU there (no moving parts on and off), and the
+    worker's and Krea's torch builds are the ones for that GPU. g7e.4xlarge has 128 GB of RAM, g7e.8xlarge
+    256 GB. `make g7e` finds a size, market and zone with capacity and sets this, on_demand and
+    availability_zone (RUNBOOK "Moving the render box to a g7e"). Changing it replaces the instance and its
+    disk: first boot restores the models from the model mirror, or downloads them (~45 min).
   EOT
   type        = string
-  default     = "g6e.4xlarge"
+  default     = "g7e.4xlarge"
+
+  validation {
+    condition     = startswith(var.instance_type, "g7e.")
+    error_message = "The render box runs on g7e only (g7e.4xlarge, g7e.8xlarge): run `make g7e` to pick one with capacity."
+  }
 }
 
 variable "on_demand" {
@@ -55,9 +59,9 @@ variable "spot_max_price" {
 }
 
 variable "root_volume_gb" {
-  description = "Root EBS volume size. Holds the OS, Python env and model weights (~210 GB once the two Wan2.2 A14B models are converted to bf16)."
+  description = "Root EBS volume size. Holds the OS, the Python envs and model weights (~330 GB: the bf16 Wan models, the edit and description models, Helios, Krea 2). A first boot without the model mirror also holds both fp32 Wan downloads (~240 GB) until they are converted."
   type        = number
-  default     = 500
+  default     = 750
 }
 
 variable "root_volume_throughput" {

@@ -120,33 +120,40 @@ for q in ((1, 0), (0, 1)):
 c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, torch="2.5.1")
 code, out = go(c)
 assert code != 0 and "torch" in out and not c.launched, out
+# a model mirror without the weights doesn't stop it (the first move can't have one: the old box never ran
+# this code), but it says what that means for the first boot
 c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, mirror=False)
 code, out = go(c)
-assert code != 0 and "mirror" in out and not c.launched, out
-# --force goes on anyway (first boot then downloads from Hugging Face)
+assert code == 0 and "mirror" in out and "Hugging Face" in out and c.applied == [("g7e.8xlarge", "us-east-1a", False)], out
+# --force goes on although a job is queued
+c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, queue=(1, 0))
 code, out = go(c, "--force")
 assert code == 0 and c.applied == [("g7e.8xlarge", "us-east-1a", False)], out
 
-# ---- spot 8xlarge launches: chosen, nothing else probed, applied (criterion 6); only three lines change (10)
-c = Cloud(capacity={("g7e.8xlarge", "us-east-1b", "spot"), ("g7e.4xlarge", "us-east-1a", "spot"),
+# the order: spot 4xlarge, spot 8xlarge, on-demand 4xlarge, on-demand 8xlarge
+assert sw.CANDIDATES == [("g7e.4xlarge", "spot"), ("g7e.8xlarge", "spot"), ("g7e.4xlarge", "on-demand"),
+                         ("g7e.8xlarge", "on-demand")]
+
+# ---- spot 4xlarge launches: chosen, nothing else probed, applied; only three lines change
+c = Cloud(capacity={("g7e.4xlarge", "us-east-1b", "spot"), ("g7e.8xlarge", "us-east-1a", "spot"),
                     ("g7e.4xlarge", "us-east-1a", "on-demand")})
 code, out = go(c)
-assert code == 0 and c.applied == [("g7e.8xlarge", "us-east-1b", False)], out
-assert [x[1:] for x in c.launched] == [("g7e.8xlarge", "us-east-1b", "spot")], c.launched
+assert code == 0 and c.applied == [("g7e.4xlarge", "us-east-1b", False)], out
+assert [x[1:] for x in c.launched] == [("g7e.4xlarge", "us-east-1b", "spot")], c.launched
 assert c.terminated == ["i-0"], "the probe is terminated"
 want = TFVARS.replace('availability_zone = "us-east-1a"', 'availability_zone = "us-east-1b"', 1).replace(
-    'instance_type     = "g6e.4xlarge"', 'instance_type     = "g7e.8xlarge"')
+    'instance_type     = "g6e.4xlarge"', 'instance_type     = "g7e.4xlarge"')
 assert tfvars(c) == want, tfvars(c)
 assert 'train_availability_zone = "us-east-1a"' in tfvars(c)
-assert "g7e.8xlarge" in out and "us-east-1b" in out and "spot" in out
+assert "g7e.4xlarge" in out and "us-east-1b" in out and "spot" in out
 # the order of the commands: build, init, plan to a file, apply that file
 tf = [x for x in c.calls if x[0] in ("make", "terraform")]
 assert tf[0][:2] == ["make", "build"] and "init" in tf[1] and "plan" in tf[2] and "apply" in tf[3] and tf[3][-1] == "tfplan", tf
 
-# ---- no 8xlarge anywhere, a 4xlarge spot launches (criterion 7)
-c = Cloud(capacity={("g7e.4xlarge", "us-east-1d", "spot"), ("g7e.4xlarge", "us-east-1a", "on-demand")})
+# ---- no spot 4xlarge anywhere, a spot 8xlarge launches
+c = Cloud(capacity={("g7e.8xlarge", "us-east-1d", "spot"), ("g7e.4xlarge", "us-east-1a", "on-demand")})
 code, out = go(c)
-assert code == 0 and c.applied == [("g7e.4xlarge", "us-east-1d", False)], out
+assert code == 0 and c.applied == [("g7e.8xlarge", "us-east-1d", False)], out
 
 # ---- no spot at all: on-demand 4xlarge in the first zone that launches (criterion 8)
 c = Cloud(capacity={("g7e.4xlarge", "us-east-1b", "on-demand"), ("g7e.4xlarge", "us-east-1d", "on-demand")})
@@ -154,6 +161,10 @@ code, out = go(c)
 assert code == 0 and c.applied == [("g7e.4xlarge", "us-east-1b", True)], out
 assert 'on_demand         = true' in tfvars(c) and "on-demand" in out
 assert c.terminated == ["i-0"]
+# no spot and no on-demand 4xlarge: on-demand 8xlarge is the last option
+c = Cloud(capacity={("g7e.8xlarge", "us-east-1d", "on-demand")})
+code, out = go(c)
+assert code == 0 and c.applied == [("g7e.8xlarge", "us-east-1d", True)], out
 # a tfvars file without the on_demand line gets one
 c = Cloud(capacity={("g7e.4xlarge", "us-east-1b", "on-demand")})
 open(c.tfvars, "w").write(TFVARS.replace("on_demand         = false\n", ""))
