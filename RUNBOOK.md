@@ -214,18 +214,41 @@ Every `video` and `story` stars your **default avatar**, so the same character a
 
 **Consent:** use fictional or AI-generated characters, or yourself. Never use a real person's likeness without their consent.
 
+### Video models: Helios (default) and Wan
+
+`vidgen video` renders with **Helios** unless you ask for Wan (`--video-model wan`; dashboard: Create → Video → **Video model**). Stories always use Wan. Design and test results: [docs/specs/2026-11-26-helios-default.md](docs/specs/2026-11-26-helios-default.md).
+
+| | Helios (default) | Wan (`--video-model wan`) |
+|---|---|---|
+| How a clip is made | the whole length in one take, from one prompt | 5 s segments, each continuing from the last frame |
+| Length | 30 s unless `--seconds` says otherwise (1–60) | 5 s unless `--seconds` says otherwise (1–60) |
+| Size and frame rate | 640×384 at 24 fps, always (`--upscale` doubles it to 1280×768) | 1280×704 at 16 or 32 fps |
+| Render time on a g7e | about 3.5 min for 30 s, 5 min for 60 s (plus first frame and sound) | about 1.75–2 min per 5 s segment |
+| Avatars | one person from the first frame; with two in the frame it kept one in a test | 1–3 |
+| LoRAs | one Wan LoRA (the avatar's own counts), used through its low-noise file | several, both halves |
+| Beats, `vidgen plan`, `--anchor-every`, Smooth, Draft | no (the API says to use Wan) | yes |
+| Variations | any length | takes up to 5 s |
+
+- **Why 640×384**: at other sizes (512×512, 640×640, 384×640) Helios jumps at every 33rd frame; at its own size it doesn't (measured 2026-11-26). The first frame is made at 1280×768 and fitted.
+- **Longer is not always better**: in a dark scene, coloured speckle built up in the background from about 20 s and was heavy by 60 s; a bright kitchen scene was clean at 30 s. If a long Helios take degrades, shorten it or use Wan.
+- **The avatar's Wan LoRA matters**: without it the person drifts to someone else within ~15 s. Only its low-noise file is used; the high-noise file broke the colours in a test.
+- **Look options** (`--look`, `--shot`, `--grain`, …) apply to both models.
+- **Box**: Helios has its own venv (`/opt/helios-venv`, from `worker/helios_requirements.txt`), its repository at a pinned commit in `/opt/helios`, and ~80 GB of weights in `/opt/models/helios/`; all three are prepared at first boot (or on the first Helios job) and the weights are in the [model mirror](#model-mirror). Log line: `{"event": "helios", ...}`.
+
 ### Short video from text
 
 ```bash
-vidgen video "walking through a night market, handheld camera, warm lantern light" --seconds 5 -o market.mp4
+vidgen video "walking through a night market, handheld camera, warm lantern light" -o market.mp4          # Helios, 30 s
+vidgen video "walking through a night market, handheld camera" --video-model wan --seconds 5 -o market5.mp4
 vidgen video "two friends sharing an umbrella in the rain" --avatar star,robot
 vidgen video "a red fox in fresh snow" --no-avatar
 ```
 
 | Option | Default | Allowed |
 |---|---|---|
-| `--seconds` | 5 | 1–60. Up to 5 s is one Wan pass; longer takes chain 5 s segments (see **Long single takes** below) |
-| `--width` / `--height` | 1280 × 704 | stick to 1280×704 (landscape) or 704×1280 (vertical/shorts) |
+| `--video-model` | helios | `helios` or `wan` (see the table above) |
+| `--seconds` | 30 (Helios), 5 (Wan) | 1–60. Wan: up to 5 s is one pass; longer takes chain 5 s segments (see **Long single takes** below) |
+| `--width` / `--height` | 1280 × 704 | Wan only: stick to 1280×704 (landscape) or 704×1280 (vertical/shorts). Helios is always 640×384 |
 | `--negative` | none | things to avoid, e.g. `"blurry, text, watermark"` |
 | `--seed` | random | set to reproduce a result |
 | `--no-sound` | sound on | skip the generated ambient sound/Foley (MMAudio); the clip comes back silent |
@@ -242,7 +265,9 @@ vidgen video "a red fox in fresh snow" --no-avatar
 
 **How it is filmed (`--shot`, videos only; one or none):** `--shot stream` makes it look like a streaming session (a fixed webcam that never moves, the person facing it, a ring light on the face). `--shot pov` makes it look shot on a phone by someone holding it: the wording asks for amateur handheld phone footage (the phone and the person filming are not in the picture, so don't write them into your prompt), and the finished frames get a slow hand shake, a softer low-resolution image and grain, whatever the model did with the wording; the usual "static tripod" sentence is left out. `stream` only adds wording. Dashboard: Create → Video → Realism → **Streaming session** / **Shot on a phone** (ticking one unticks the other). Plans carry it (`vidgen plan ... --shot pov`), and the "render with" command repeats it. Stories and photos refuse it.
 
-### Long single takes (up to 60 s)
+### Long single takes with Wan (up to 60 s)
+
+This section is about `--video-model wan` (beats, plans and re-anchoring are Wan's). With Helios a long take is just `--seconds N`.
 
 ```bash
 vidgen video "a man in a sunny kitchen makes coffee" --seconds 50
@@ -502,7 +527,7 @@ The queue is not strictly FIFO, so the worker may still run a job out of the pla
 | Limit | Notes |
 |---|---|
 | Spot capacity | a stopped spot instance can only restart in its own AZ. If that AZ has no `g6e` capacity, jobs wait |
-| Instance size | `g6e.4xlarge` (128 GB RAM, one L40S) by default; see [Choosing the instance](#choosing-the-instance). On `g6e.xlarge`, avatar jobs run out of memory |
+| Instance size | the render box is a g7e (one RTX PRO 6000, 96 GB VRAM), `g7e.4xlarge` (128 GB RAM) by default; Terraform refuses other families. See [Moving the render box to a g7e](#moving-the-render-box-to-a-g7e). The trainer stays on `g6e.4xlarge` |
 | Disk | 500 GB; weights ~210 GB after first boot converts the two Wan2.2 A14B models to local bf16 copies in `/opt/models/bf16` (the fp32 downloads are ~118 GB each and are deleted) |
 | Model licences | Wan2.2, Qwen2.5-VL, Qwen-Image-Edit-2511 (and its Lightning LoRA) and Kokoro are Apache-2.0. **MMAudio weights (generated sound) are CC-BY-NC 4.0: videos with sound are for non-commercial use only**; use `--no-sound` for anything commercial. Check again if you swap models |
 | Content | no moderation layer; you're responsible for what is generated. No sexual content, no real people's likenesses without consent, nothing involving minors |
@@ -583,38 +608,14 @@ nohup bash /opt/trial/run_trial.sh master 200 &
 
 ### Choosing the instance
 
-Every g6e size up to 16xlarge has the same single L40S, so rendering speed is the same. What
-changes is CPU RAM, which decides how many of the big models (T2V, I2V and the avatar keyframe
-model, ~55–65 GB each) stay loaded between jobs. Which models each job needs:
+The render box is a **g7e** (one RTX PRO 6000, 96 GB of GPU memory); Terraform refuses any other family for it. Helios and a whole Wan or image-edit pipeline stay on that GPU, and the worker's and Krea's torch builds are the ones for it (they were validated there, not on the older L40S boxes).
 
-| Job | Big models | Switches inside the job |
+| Instance | RAM | Notes |
 |---|---|---|
-| `avatar`, `video --no-avatar` | T2V | 0 |
-| `video` with an avatar (the default) | keyframe → I2V | 1 |
-| `story` | VLM (small) → keyframe → T2V → I2V | up to 3 |
-| `describe` | VLM (small) | 0 |
+| `g7e.4xlarge` (default) | 128 GB | what the tests ran on |
+| `g7e.8xlarge` | 256 GB | more page cache: switching between big models reloads faster |
 
-| Instance | RAM | Big models kept | Spot score* | Spot price* | Fits |
-|---|---|---|---|---|---|
-| `g6e.4xlarge` (default) | 128 GB | 1 | 9 (us-east-1a/b/d) | ~$1.8–2.1/h | occasional single jobs; batches of `--no-avatar` videos |
-| `g6e.8xlarge` | 256 GB | 3 | 1 everywhere | ~$1.8–2.2/h | batches of avatar videos/stories, if you can get capacity |
-| `g6e.16xlarge` | 512 GB | 3 | 9 (us-east-1a/b) | ~$2.5–4.0/h (zone-dependent) | batches, when 8xlarge spot is unavailable |
-| `g6e.8xlarge` on-demand | 256 GB | 3 | n/a | ~$4.5/h | batches, without spot interruptions (needs code change: market type) |
-
-\* Measured 2026-11-09 in us-east-1 with `aws ec2 get-spot-placement-scores` (1 = unlikely, 10 = likely) and
-`describe-spot-price-history`; both change over time, so re-check before switching:
-
-```bash
-aws ec2 get-spot-placement-scores --instance-types g6e.4xlarge g6e.16xlarge --target-capacity 1 \
-  --single-availability-zone --region-names us-east-1 --query 'SpotPlacementScores[].[AvailabilityZoneId,Score]'
-```
-
-- **On a 4xlarge**, each avatar video reloads the keyframe and I2V models (~10 min of a ~11 min job). A bigger instance
-  only helps when several such jobs run back to back: the machine stops after `idle_minutes` and starts cold.
-- **On 2026-11-08** a `g6e.8xlarge` spot instance was reclaimed mid-run and could not restart for hours
-  (`InsufficientInstanceCapacity`); that is why the default went back to 4xlarge.
-- **eu-west-1** is blocked for this account by an organisation SCP; stay in us-east-1.
-- Changing `instance_type` or `availability_zone` replaces the instance and its disk; first boot takes ~25 min.
+Capacity changes by the hour. On 2026-11-26 spot `g7e.4xlarge` never launched in us-east-1a/b/d; on-demand `g7e.4xlarge` usually did and twice did not; spot `g7e.8xlarge` launched twice when nothing else did. `make g7e` (next section) tries them in order by really launching. The trainer is a separate machine and stays on `g6e.4xlarge`.
 
 ### Moving the render box to a g7e
 
@@ -627,17 +628,17 @@ make g7e ARGS=--dry-run     # only report what could be launched right now
 make g7e                    # find capacity and move the render box there
 ```
 
-- **What it does**: checks first (AWS credentials; the worker's torch can run on that GPU; no job queued or running; the [model mirror](#model-mirror) holds the weights), then looks for capacity by launching a probe instance and terminating it at once: spot `g7e.8xlarge` in each zone, then spot `g7e.4xlarge`, then on-demand `g7e.4xlarge`. The first that starts wins. It writes `instance_type`, `on_demand` and `availability_zone` to `terraform/terraform.tfvars` and runs build, plan and apply.
-- **It replaces the render box and its disk without asking again.** Jobs sent while the new box boots wait in the queue; first boot restores the weights from the mirror. Everything in your working tree is deployed with it, as with `make apply`.
+- **What it does**: checks first (AWS credentials; the worker's torch can run on that GPU; no job queued or running), says whether the [model mirror](#model-mirror) holds the weights, then looks for capacity by launching a probe instance and terminating it at once: spot `g7e.4xlarge` in each zone, then spot `g7e.8xlarge`, then on-demand `g7e.4xlarge`, then on-demand `g7e.8xlarge`. The first that starts wins. It writes `instance_type`, `on_demand` and `availability_zone` to `terraform/terraform.tfvars` and runs build, plan and apply.
+- **It replaces the render box and its disk without asking again.** Jobs sent while the new box boots wait in the queue. First boot restores the weights from the mirror when it has them; **the first move has no mirror yet** (the old box never ran this code), so that first boot downloads everything from Hugging Face and converts Wan (~45 min), and the new box then fills the mirror. Everything in your working tree is deployed with it, as with `make apply`.
 - **If the apply fails** (the capacity went in between) it tries the next option. If none works it puts `terraform.tfvars` back; the old box may already be gone then: `make plan && make apply` brings it back.
-- **`--force`** skips the checks other than credentials (first boot then downloads from Hugging Face, ~45 min).
+- **`--force`** goes on although a job is queued or the worker's torch pin looks too old.
 - **Cost**: a probe is a few cents. On-demand `g7e.4xlarge` is about $4.00/h (spot ~$1.40-2.20 when there is any); the box still stops itself when idle.
 - **On the box**: with 80 GB or more of GPU memory the worker keeps one big model wholly on the GPU (`GPU_HOLD`; `GPU_HOLD=0` in `/etc/ai-video.env` goes back to moving parts on and off). Only one big model is loaded at a time then, so switching models reloads from disk.
-- **Back to g6e**: set `instance_type`, `on_demand` and `availability_zone` in `terraform.tfvars` and `make plan && make apply`.
+- **Another size or zone later**: run `make g7e` again. Going back to a g6e would mean taking out the g7e-only check in `terraform/variables.tf` and the torch pins in `worker/requirements.txt` and `worker/krea_requirements.txt` (those builds were only tried on the g7e).
 
 ### Cost model
 
-- **Idle (machine off):** about $40/month for the 500 GB disk. Everything else costs cents.
+- **Idle (machine off):** about $60/month for the 750 GB disk. Everything else costs cents.
 - **Working:** `g6e.4xlarge` spot price × hours running, plus ~15 min of idle time after each burst.
 - **Worst case:** bounded by the max-uptime cap, 8 h per start.
 
@@ -670,7 +671,8 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 
 | Command | What it does |
 |---|---|
-| `vidgen video "PROMPT" [-o out.mp4]` | clip from text (1-60 s; over 5 s chains 5 s segments, ~5 min each), starring your default avatar |
+| `vidgen video "PROMPT" [-o out.mp4]` | clip from text with Helios (30 s in one take unless `--seconds`), starring your default avatar |
+| `  --video-model wan` | render with Wan instead: 5 s segments chained, with beats, plans, several avatars and LoRAs |
 | `  --seconds 1-60 --width 1280 --height 704 --seed N --negative "TEXT"` | length, size, repeatable seed, negative prompt (no effect with Lightning) |
 | `  --beats "0: walks in; 10: sits down" / --beats-file F` | long takes (over 5 s): what happens when; each 5 s segment follows the last beat before it (1-12 beats, first at 0, times in multiples of 5, each a full description). Without beats, takes over 15 s get a timeline written by the planner |
 | `vidgen plan "PROMPT" --seconds N` | first frame + editable beats for a long take (no video); prints the render command with `--seed` and `--beats-file` |
