@@ -1722,6 +1722,8 @@ def main():
 
     sub.add_parser("status", help="GPU instance state, queue depth, uptime hold")
     sub.add_parser("wake", help="start the GPU instance ahead of a batch")
+    sub.add_parser("restart-worker", help="ask the render worker to restart between jobs (it pulls the latest "
+                                          "worker code); the render machine must be running")
     sub.add_parser("jobs", help="list local jobs and where their files went")
     ch = sub.add_parser("check", help="one pass: download any finished jobs (what the watcher runs)")
     ch.add_argument("--log", help=argparse.SUPPRESS)
@@ -1913,6 +1915,8 @@ def main():
             print(json.dumps(api("GET", "/status"), indent=2))
         elif args.cmd == "wake":
             print(json.dumps(api("POST", "/wake"), indent=2))
+        elif args.cmd == "restart-worker":
+            print(api("POST", "/worker/restart")["note"])
         elif args.cmd == "jobs":
             show_jobs()
         elif args.cmd == "check":

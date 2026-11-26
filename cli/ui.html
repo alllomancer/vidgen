@@ -188,7 +188,10 @@ form:not(.krea) .krea-text { display: none !important; }
       </div>
       <dl id="server-dl"></dl>
       <p class="hint" id="server-err" role="alert"></p>
-      <div style="margin-top:14px"><button id="wake" class="primary">Wake GPU</button></div>
+      <div style="margin-top:14px;display:flex;flex-wrap:wrap;gap:8px">
+        <button id="wake" class="primary">Wake GPU</button>
+        <button id="restart-worker" title="Restarts the render worker between jobs, so it pulls the latest worker code. A render in progress finishes first. Only while the machine is running" disabled>Restart worker</button>
+      </div>
     </section>
     <section class="card" aria-labelledby="trainer-h">
       <h2 id="trainer-h">Trainer</h2>
@@ -589,6 +592,7 @@ async function loadStatus() {
     $("state").textContent = {running: "Running", stopped: "Stopped", pending: "Starting", stopping: "Stopping"}[st] || st;
     for (const el of [$("state-pill"), $("hdr-state")]) { el.className = `pill s-${st}`; el.textContent = st; }
     $("wake").disabled = st === "running" || st === "pending";
+    $("restart-worker").disabled = st !== "running";
     // How ready the render machine is to take a job: a percent and one line (from the API).
     const rd = s.readiness;
     $("ready").hidden = !rd;
@@ -623,6 +627,13 @@ async function loadStatus() {
   }
   $("refreshed").textContent = `updated ${new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"})}`;
 }
+$("restart-worker").onclick = async () => {
+  if (!confirm("Restart the render worker?\n\nIt restarts between jobs (a render in progress finishes first), pulls the latest worker code, and is back in about a minute.")) return;
+  $("restart-worker").disabled = true;
+  try { const r = await api("POST", "/api/worker/restart"); toast(r.note || "Worker restart requested"); }
+  catch (e) { showError(e.message); }
+  loadStatus();
+};
 $("wake").onclick = async () => {
   $("wake").disabled = true;
   try { await api("POST", "/api/wake"); toast("GPU instance starting"); } catch (e) { showError(e.message); }

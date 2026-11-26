@@ -127,6 +127,21 @@ def report_ready(percent, text):
         log(event="report_ready_failed", error=f"{type(e).__name__}: {e}"[:200])
 
 
+# A restart asked for from the dashboard (API: POST /worker/restart): a row in the jobs table with the time
+# of the request. A request newer than this worker's start means "exit between jobs"; systemd then starts
+# the worker again (Restart=on-failure), which pulls the latest code.
+RESTART_KEY = "_restart_worker"
+STARTED_AT = time.time()
+
+
+def restart_requested():
+    try:
+        item = jobs.get_item(Key={"job_id": RESTART_KEY}).get("Item") or {}
+        return float(item.get("requested_at") or 0) > STARTED_AT
+    except Exception:  # noqa: BLE001 - a failed lookup never restarts the worker
+        return False
+
+
 def stop_self():
     instance_id = _instance_id()
     report_ready(0, "Stopping: no jobs for a while.")
@@ -1447,6 +1462,10 @@ def main():
     report_ready(100, "Ready: the worker is up and takes jobs (the first job of each kind loads its model).")
     last_work = time.time()
     while True:
+        if restart_requested():  # between jobs only: a render in progress is never cut off
+            log(event="restart_requested")
+            report_ready(60, "Restarting the worker (pulling the latest code); back in about a minute.")
+            raise SystemExit(1)  # non-zero, so systemd starts it again
         resp = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,

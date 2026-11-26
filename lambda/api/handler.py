@@ -10,6 +10,7 @@ Every route requires a request signed with an authorized SSH ed25519 key
   POST /uploads                  presigned PUT URL for an input video (describe) or image (avatar, photos)
   GET  /status                   GPU instance state, queue depth, uptime hold, deployed models
   POST /wake                     start the GPU instance ahead of a batch (clears an uptime hold)
+  POST /worker/restart           ask the render worker to restart between jobs (pulls the latest worker code)
   GET  /avatars                  your avatars and which one is the default
   POST /avatars                  save an avatar from an uploaded image or a generated candidate
   PUT  /avatars/default          make an existing avatar the default
@@ -2353,6 +2354,21 @@ def wake():
     return _resp(200, {"instance": _ensure_started()})
 
 
+# POST /worker/restart: a request row in the jobs table. The worker looks for it between jobs and exits, and
+# systemd starts it again, which pulls the latest worker code. A render in progress is never cut off.
+RESTART_KEY = "_restart_worker"
+
+
+def restart_worker():
+    state = _instance_state()
+    if state != "running":
+        return _resp(409, {"error": f"the render machine is {state}: its worker starts fresh, with the latest code, "
+                                    "the next time the machine starts"})
+    jobs.put_item(Item={"job_id": RESTART_KEY, "client": "_system", "requested_at": int(time.time())})
+    return _resp(200, {"requested": True, "note": "the worker restarts when it is between jobs (within ~20 s when "
+                                                  "idle, else after the running job) and is back in about a minute"})
+
+
 def waker():
     _wake_or_cap(INSTANCE_ID, QUEUE_URL, MAX_UPTIME_HOURS, CONTROL_KEY, "gpu")
     if TRAINER_INSTANCE_ID:
@@ -2411,6 +2427,8 @@ def handler(event, context):
         return status()
     if route == "POST /wake":
         return wake()
+    if route == "POST /worker/restart":
+        return restart_worker()
     if route == "GET /avatars":
         return list_avatars(client)
     if route == "POST /avatars":

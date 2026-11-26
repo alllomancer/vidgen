@@ -73,6 +73,7 @@ resource "aws_apigatewayv2_route" "routes" {
     "POST /uploads",
     "GET /status",
     "POST /wake",
+    "POST /worker/restart",
     "GET /avatars",
     "POST /avatars",
     "PUT /avatars/default",

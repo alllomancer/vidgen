@@ -601,6 +601,8 @@ def make_handler(port, token):
                     return self._send(200, vidgen.api("GET", "/status"))
                 if method == "POST" and path == "/api/wake":
                     return self._send(200, vidgen.api("POST", "/wake"))
+                if method == "POST" and path == "/api/worker/restart":
+                    return self._send(200, vidgen.api("POST", "/worker/restart"))
                 if method == "GET" and path == "/api/jobs":
                     return self._send(200, job_history())
                 m = re.fullmatch(r"/api/jobs/([0-9a-f]{32})", path)
