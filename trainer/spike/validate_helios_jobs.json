@@ -1,0 +1,232 @@
+{
+ "liron_phone_look_30s": {
+  "prompt": "liron dancing happily in a living room at night, she laughs while she dances",
+  "negative_prompt": "",
+  "seconds": 30,
+  "width": 640,
+  "height": 384,
+  "seed": 7,
+  "sound": true,
+  "variations": 1,
+  "fps": 24,
+  "upscale": false,
+  "quality": "standard",
+  "image_model": "krea2",
+  "look": "pro",
+  "natural_skin": false,
+  "candid": false,
+  "grain": false,
+  "avatars": [
+   {
+    "name": "liron",
+    "description": "",
+    "reference_key": "avatars/master/liron/images/dfbe617a.jpg",
+    "images": [
+     {
+      "key": "avatars/master/liron/images/dfbe617a.jpg",
+      "added_at": 1795596779
+     },
+     {
+      "key": "avatars/master/liron/images/2a5dba6a.jpg",
+      "added_at": 1795596779
+     }
+    ],
+    "created_at": 1795596779,
+    "wan_lora": {
+     "state": "ready",
+     "lora": "avatar-liron-wan",
+     "version": 1,
+     "trigger": "liron",
+     "job_ids": [
+      "c2d55689b514477f8330f32ff707c1fd",
+      "3f61833eec5d5dde9129fc5108f1b7a6"
+     ],
+     "ready": {
+      "lora": "avatar-liron-wan",
+      "version": 1
+     }
+    },
+    "krea_lora": {
+     "state": "ready",
+     "lora": "avatar-liron",
+     "version": 1,
+     "trigger": "liron",
+     "job_ids": [
+      "c2d55689b514477f8330f32ff707c1fd",
+      "5f869c602d3e59268c12edc236924f31"
+     ],
+     "ready": {
+      "lora": "avatar-liron",
+      "version": 1
+     }
+    },
+    "media": {
+     "state": "ready",
+     "job_id": "c2d55689b514477f8330f32ff707c1fd",
+     "created_at": 1795596779,
+     "photos": 21,
+     "clips": 4,
+     "preview": "clip_1.mp4",
+     "updated_at": 1795598907,
+     "error": null
+    },
+    "reference_keys": [
+     "avatars/master/liron/images/dfbe617a.jpg",
+     "avatars/master/liron/images/2a5dba6a.jpg"
+    ]
+   }
+  ],
+  "loras": [
+   {
+    "name": "avatar-liron-wan",
+    "version": 1,
+    "step": null,
+    "weight": 1.0,
+    "model": "t2v",
+    "trigger": "liron",
+    "high_key": "loras/master/avatar-liron-wan/v1/t2v_high.safetensors",
+    "low_key": "loras/master/avatar-liron-wan/v1/t2v_low.safetensors"
+   }
+  ],
+  "krea_loras": [
+   {
+    "name": "avatar-liron",
+    "version": 1,
+    "step": null,
+    "weight": 1.0,
+    "trigger": "liron",
+    "model": "krea2",
+    "key": "loras/master/avatar-liron/v1/krea2.safetensors"
+   }
+  ],
+  "krea_avatar": "liron",
+  "krea_avatar_lora": "avatar-liron",
+  "video_model": "helios",
+  "shot": "pov"
+ },
+ "liron_streaming_15s": {
+  "prompt": "liron sitting at her desk talking to her viewers about her day, gesturing with her hands",
+  "negative_prompt": "",
+  "seconds": 15,
+  "width": 640,
+  "height": 384,
+  "seed": 11,
+  "sound": true,
+  "variations": 1,
+  "fps": 24,
+  "upscale": false,
+  "quality": "standard",
+  "image_model": "krea2",
+  "look": "pro",
+  "natural_skin": false,
+  "candid": false,
+  "grain": false,
+  "avatars": [
+   {
+    "name": "liron",
+    "description": "",
+    "reference_key": "avatars/master/liron/images/dfbe617a.jpg",
+    "images": [
+     {
+      "key": "avatars/master/liron/images/dfbe617a.jpg",
+      "added_at": 1795596779
+     },
+     {
+      "key": "avatars/master/liron/images/2a5dba6a.jpg",
+      "added_at": 1795596779
+     }
+    ],
+    "created_at": 1795596779,
+    "wan_lora": {
+     "state": "ready",
+     "lora": "avatar-liron-wan",
+     "version": 1,
+     "trigger": "liron",
+     "job_ids": [
+      "c2d55689b514477f8330f32ff707c1fd",
+      "3f61833eec5d5dde9129fc5108f1b7a6"
+     ],
+     "ready": {
+      "lora": "avatar-liron-wan",
+      "version": 1
+     }
+    },
+    "krea_lora": {
+     "state": "ready",
+     "lora": "avatar-liron",
+     "version": 1,
+     "trigger": "liron",
+     "job_ids": [
+      "c2d55689b514477f8330f32ff707c1fd",
+      "5f869c602d3e59268c12edc236924f31"
+     ],
+     "ready": {
+      "lora": "avatar-liron",
+      "version": 1
+     }
+    },
+    "media": {
+     "state": "ready",
+     "job_id": "c2d55689b514477f8330f32ff707c1fd",
+     "created_at": 1795596779,
+     "photos": 21,
+     "clips": 4,
+     "preview": "clip_1.mp4",
+     "updated_at": 1795598907,
+     "error": null
+    },
+    "reference_keys": [
+     "avatars/master/liron/images/dfbe617a.jpg",
+     "avatars/master/liron/images/2a5dba6a.jpg"
+    ]
+   }
+  ],
+  "loras": [
+   {
+    "name": "avatar-liron-wan",
+    "version": 1,
+    "step": null,
+    "weight": 1.0,
+    "model": "t2v",
+    "trigger": "liron",
+    "high_key": "loras/master/avatar-liron-wan/v1/t2v_high.safetensors",
+    "low_key": "loras/master/avatar-liron-wan/v1/t2v_low.safetensors"
+   }
+  ],
+  "krea_loras": [
+   {
+    "name": "avatar-liron",
+    "version": 1,
+    "step": null,
+    "weight": 1.0,
+    "trigger": "liron",
+    "model": "krea2",
+    "key": "loras/master/avatar-liron/v1/krea2.safetensors"
+   }
+  ],
+  "krea_avatar": "liron",
+  "krea_avatar_lora": "avatar-liron",
+  "video_model": "helios",
+  "shot": "stream"
+ },
+ "text_only_beach_10s": {
+  "prompt": "waves rolling onto a black sand beach at sunset, wide shot",
+  "negative_prompt": "",
+  "seconds": 10,
+  "width": 640,
+  "height": 384,
+  "fps": 24,
+  "video_model": "helios",
+  "seed": 5,
+  "sound": true,
+  "variations": 1,
+  "upscale": false,
+  "quality": "standard",
+  "image_model": "wan",
+  "look": "pro",
+  "natural_skin": false,
+  "candid": false,
+  "grain": false,
+  "avatars": []
+ }
+}

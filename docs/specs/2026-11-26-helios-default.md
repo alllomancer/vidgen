@@ -149,3 +149,26 @@ CLI / deployment:
 - `tests/test_g7e_switch.py`: the new order (criterion 13); CLI flags (11).
 - `terraform validate` (12).
 - A temporary g7e box running the worker's own job code for criterion 14; results appended here.
+
+## End-to-end results (2026-11-26, criterion 14: met)
+
+On-demand `g7e.4xlarge`, the working tree's worker code, the worker venv built from `worker/requirements.txt`
+as committed, `trainer/spike/validate_helios.py` calling the worker's own `run_video` (progress and uploads
+kept local).
+
+| Job | Result | Whole job | Helios render | Output |
+|---|---|---|---|---|
+| Liron dancing, phone look (`shot: pov`), 30 s, her Wan LoRA | ok | 1182 s, of which ~14 min were first-use downloads (Krea 36 GB, Helios 80 GB) | 175 s, 45.1 GB peak | 30.0 s, 640x384, 24 fps, AAC sound; chunk-boundary change 1.1x normal |
+| Liron as a streaming session (`shot: stream`), 15 s | ok | 202 s | - | 15.0 s, 640x384, 24 fps, sound; 2.2x (a nearly still scene) |
+| Text only (no avatar, no first frame), 10 s | ok | 90 s | - | 10.0 s, 640x384, 24 fps, sound; 1.1x |
+
+- The path that ran: Krea first frame with the avatar's Krea LoRA (5 s), fitted to 640x384, Helios
+  image-to-video with the low-noise file of her Wan LoRA, the phone look on the frames, MMAudio sound. The
+  text-only job ran Helios text-to-video.
+- **Python**: the image has `/usr/bin/python3.11`, and the Helios venv used it. No extra package source is
+  needed. (Whether Helios runs on 3.10 was therefore not tested.)
+- An earlier attempt failed at Helios's first line: the trimmed requirements lacked `pandas`. Fixed, and
+  `ensure_env` now starts Helios's script once (`--help`) before marking the venv ready.
+- The streaming wording put a **visible ring light** in the picture (a bright circle around her). Whether
+  that is wanted is the user's call; the wording can say the light is off-camera.
+- Earlier the same day a spot `g7e.8xlarge` running this test was reclaimed by AWS after five minutes.

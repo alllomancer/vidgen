@@ -12,7 +12,7 @@ Jira: N/A
 - [x] Task 4: CLI flag and dashboard select — `30430a2` (CLI), `8a3e723` (dashboard, smoke test)
 - [x] Task 5: Deployment: g7e only, pins, first boot, IAM, switch order — `8a3e723`
 - [x] Task 6: Docs — `8185077`
-- [ ] Task 7: End-to-end on a g7e
+- [x] Task 7: End-to-end on a g7e — results in the spec; fix found by it: `38ae490`
 
 ## Tasks
 
