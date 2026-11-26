@@ -1,6 +1,8 @@
 # GPU worker. A persistent spot instance whose interruption behaviour is
 # "stop", so it can be stopped and started like an on-demand instance while
-# keeping its root volume (OS, Python env, model weights).
+# keeping its root volume (OS, Python env, model weights). With
+# var.on_demand it is a plain on-demand instance: same lifecycle, no
+# interruptions, on-demand price.
 #
 # Lifecycle:
 #   - The API Lambda (and a 1-minute EventBridge "waker") starts it when jobs
@@ -36,12 +38,16 @@ resource "aws_instance" "gpu" {
   associate_public_ip_address = false
   iam_instance_profile        = aws_iam_instance_profile.worker.name
 
-  instance_market_options {
-    market_type = "spot"
-    spot_options {
-      spot_instance_type             = "persistent"
-      instance_interruption_behavior = "stop"
-      max_price                      = var.spot_max_price == "" ? null : var.spot_max_price
+  # Spot unless var.on_demand: an on-demand box has no market options at all.
+  dynamic "instance_market_options" {
+    for_each = var.on_demand ? [] : [1]
+    content {
+      market_type = "spot"
+      spot_options {
+        spot_instance_type             = "persistent"
+        instance_interruption_behavior = "stop"
+        max_price                      = var.spot_max_price == "" ? null : var.spot_max_price
+      }
     }
   }
 

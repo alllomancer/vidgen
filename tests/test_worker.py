@@ -17,6 +17,41 @@ import photos  # noqa: E402
 import worker  # noqa: E402
 
 real_render_segment = models._render_segment  # most tests stub it; the prompt-embedding test needs the real one
+real_generate_sound = models.generate_sound
+
+# Encoder settings: X264_ARGS unless a clip is an intermediate (x264=...)
+models.write_video([], "/x.mp4")
+assert sys.modules["imageio"].get_writer.call_args.kwargs["ffmpeg_params"] == models.X264_ARGS
+models.write_video([], "/x.mp4", x264=models.X264_INTERMEDIATE)
+assert sys.modules["imageio"].get_writer.call_args.kwargs["ffmpeg_params"] == ["-crf", "10", "-preset", "veryfast"]
+
+# Pipeline calls log where their time went: one JSON line with the seconds per denoising step
+import contextlib as _contextlib  # noqa: E402
+import io as _io  # noqa: E402
+import json as _jsont  # noqa: E402
+
+logged = _io.StringIO()
+with _contextlib.redirect_stdout(logged):
+    out = models._timed("t2v", lambda **kw: [models._on_step(None, i, 0, {}) for i in range(4)] and kw, width=8)
+line = _jsont.loads(logged.getvalue())
+assert out == {"width": 8} and line["event"] == "pipeline_timing" and line["call"] == "t2v"
+assert len(line["steps"]) == 4 and set(line) == {"event", "call", "steps", "finish", "seconds"}
+
+
+# a cancelled or failed call: the pipeline's components go back to RAM (its own clean-up was skipped)
+class Cancelled:
+    freed = 0
+
+    def __call__(self, **kw):
+        raise models.JobCancelled("cancelled")
+
+    def maybe_free_model_hooks(self):
+        self.freed += 1
+
+
+cancelled = Cancelled()
+_stubs.expect_error(models._timed, "t2v", cancelled, exc=models.JobCancelled)
+assert cancelled.freed == 1
 worker.WORK_ROOT = tempfile.mkdtemp()  # long takes' saved segments/timelines, never /opt in tests
 
 
@@ -154,7 +189,11 @@ segments = []
 seg_prompts = []
 
 
-def fake_segment(prompt, negative, num, width, height, seed, image):
+nexts = []  # the `then` hint of each pass: the model to warm up for the next one
+
+
+def fake_segment(prompt, negative, num, width, height, seed, image, then=None):
+    nexts.append(then)
     segments.append((num, seed, image))
     seg_prompts.append(prompt)
     return [f"f{len(segments)}_{i}" for i in range(num)]
@@ -165,7 +204,7 @@ models._render_segment = fake_segment
 models._to_uint8_frames = lambda f: f
 models.Image = mock.MagicMock(fromarray=lambda f: f"img:{f}")
 models.soften = lambda image, radius=None: image  # identity here; the halo test below marks it
-models.write_video = lambda frames, path, fps=16, grain=None: written.append((path, len(frames), fps, grain))
+models.write_video = lambda frames, path, fps=16, grain=None, x264=None: written.append((path, len(frames), fps, grain))
 sys.modules["enhance"] = types.SimpleNamespace(
     interpolate=lambda frames, check: [x for f in frames for x in (f, f)][:-1],
     upscale=lambda frames, check: [f + "@2x" for f in frames])
@@ -179,6 +218,7 @@ assert segments[1][2] == "img:f1_80", "each segment starts from the last frame"
 assert segments[2][2] == "img:f2_80~", "over 10 s: the colour-matched last frame conditions the next segment"
 assert matched == [("f2_1", ("stats", "f1_0")), ("f3_1", ("stats", "f1_0"))], "segments 2+ matched to segment 1"
 assert written[-1] == ("/o.mp4", 2 * 193 - 1, 32, None), written[-1]
+assert nexts == ["i2v", "i2v", None], "every pass but the last says I2V runs next (a no-op unless this one is T2V)"
 matched.clear(), segments.clear()
 models.generate_video("/o.mp4", "x", seconds=10, seed=7)
 assert matched == [] and segments[1][2] == "img:f1_80", "10 s or less: no colour matching"
@@ -188,11 +228,12 @@ models._save_segment = lambda path, frames: _jsonr.dump(list(frames), open(path,
 models._load_segment = lambda path: _jsonr.load(open(path))
 captured = []
 real_write_video = models.write_video
-models.write_video = lambda frames, path, fps=16, grain=None: captured.append(list(frames))
+models.write_video = lambda frames, path, fps=16, grain=None, x264=None: captured.append(list(frames))
 msgs = []
 
 
-def seeded_segment(prompt, negative, num, width, height, seed, image):  # frames depend on the seed only
+def seeded_segment(prompt, negative, num, width, height, seed, image, then=None):  # frames depend on the seed only
+    nexts.append(then)
     segments.append((num, seed, image))
     return [f"s{seed}_{i}" for i in range(num)]
 
@@ -207,10 +248,10 @@ assert len(segments) == 10 and len(full) == 801
 wd = tempfile.mkdtemp()
 
 
-def dies_after_six(*a):
+def dies_after_six(*a, **kw):
     if len(segments) == 6:
         raise RuntimeError("spot interruption")
-    return seeded_segment(*a)
+    return seeded_segment(*a, **kw)
 
 
 segments.clear()
@@ -248,6 +289,8 @@ models.np_frame = lambda image: image  # PIL <-> array are identity in these fak
 models.generate_video("/o.mp4", "x", seconds=50, fps=16, seed=1, anchor_every=3,
                       reanchor=lambda frame, n=0: anchored.append((frame, n)) or f"anchored:{frame}")
 assert anchored == [("img:s2_80~", 2), ("img:s5_80~", 5), ("img:s8_80~", 8)], "segments 3, 6, 9 start from re-anchored frames"
+assert nexts[-10:] == ["i2v", "edit", "i2v", "i2v", "edit", "i2v", "i2v", "edit", "i2v", None], \
+    "the pass before a re-anchored one says the edit model runs next"
 assert segments[2][2] == "img:anchored:img:s2_80~#" and segments[3][2] == "img:s3_80~"
 assert transfers == [("stats", "img:s2_80~"), ("stats", "img:s5_80~"), ("stats", "img:s8_80~")], \
     "the anchored frame takes the colours of the frame it replaces"
@@ -492,6 +535,47 @@ gen.clear()
 real_sound_for_clip("/v.mp4", "p", 12, 3, d)
 assert gen == [(5.2, 3), (5.2, 4), (2, 5)], gen
 assert sum("acrossfade" in " ".join(c) for c in cmds) == 2
+open_sessions = []
+models.generate_sound = lambda path, out, prompt, seconds, seed: open_sessions.append(models._audio.get("sessions")) or out
+real_sound_for_clip("/v.mp4", "p", 12, 3, d)
+assert open_sessions == [1, 1, 1] and models._audio["sessions"] == 0, "all chunks inside one sound session"
+
+
+# The sound model goes to the GPU once per sound_session (a long take's chunks, a story's shots), not per call
+class Mover:
+    def __init__(self):
+        self.moves = []
+
+    def to(self, device):
+        self.moves.append(device)
+
+
+net, feats = Mover(), Mover()
+models._audio.clear()
+with models.sound_session():
+    pass
+assert not models._audio.get("models"), "opening a session loads nothing"
+models._audio["models"] = ("cfg", net, feats)
+during = []
+models._generate_sound = lambda cfg, n, f, path, out, prompt, seconds, seed: during.append(list(n.moves)) or out
+assert real_generate_sound("/v.mp4", "/a.wav", "p", 5, 1) == "/a.wav"
+assert net.moves == feats.moves == ["cuda", "cpu"] and during == [["cuda"]], "a single call: there and back"
+net.moves.clear(), feats.moves.clear(), during.clear()
+with models.sound_session():
+    for _ in range(3):
+        real_generate_sound("/v.mp4", "/a.wav", "p", 5, 1)
+    assert net.moves == ["cuda"], "it stays on the GPU between the calls"
+assert net.moves == feats.moves == ["cuda", "cpu"] and during == [["cuda"]] * 3
+net.moves.clear(), feats.moves.clear()
+models._generate_sound = lambda *a: (_ for _ in ()).throw(RuntimeError("out of memory"))
+try:
+    with models.sound_session():
+        real_generate_sound("/v.mp4", "/a.wav", "p", 5, 1)
+except RuntimeError:
+    pass
+assert net.moves == ["cuda", "cpu"] and not models._audio.get("on_gpu") and models._audio["sessions"] == 0, \
+    "a failed call still leaves the GPU free"
+models._audio.clear()
 # Prefetch reads every weight file fully, in parallel chunks.
 pdir = tempfile.mkdtemp()
 os.makedirs(os.path.join(pdir, "transformer"))
@@ -515,7 +599,34 @@ models._load_edit()
 models._load_vlm()
 assert warmed == [models.EDIT_MODEL, models.VLM_MODEL], warmed
 del sys.modules["diffusers"], sys.modules["transformers"]
+# warm-ahead: the next model's files are read in the background, one warm-up at a time, never for a loaded model
+import threading as _threading  # noqa: E402
+
+gate = _threading.Event()
+warmed.clear()
+models.prefetch_model = lambda source: (gate.wait(5), warmed.append(source))
+kept_loaded = dict(models._loaded)
+models._loaded.clear(), models._warming.clear()
+thread = models.warm_ahead("i2v")
+assert thread is not None and models.warm_ahead("edit") is None, "one warm-up at a time"
+gate.set(), thread.join()
+assert warmed == [models.I2V_MODEL], "no local bf16 copy here: the repo id (its Hugging Face cache folder)"
+models._loaded["edit"] = object()
+assert models.warm_ahead("edit") is None, "already loaded: nothing to read"
+del models._loaded["edit"]
+gate.clear(), warmed.clear()
+thread = models.warm_ahead("edit")
+_threading.Timer(0.05, gate.set).start()
+models._warm(models.EDIT_MODEL)  # a load waits for the warm-up of its own files, then reads (quick: cached)
+assert not thread.is_alive() and warmed == [models.EDIT_MODEL] * 2 and not models._warming
+models._loaded.update(kept_loaded)
 models.prefetch_model = real_prefetch_model
+# a Wan model loads from its local bf16 copy when there is one
+models.BF16_DIR = tempfile.mkdtemp()
+assert models._wan_source("Wan-AI/Wan2.2-I2V-A14B-Diffusers") == "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+os.makedirs(models.bf16_path("Wan-AI/Wan2.2-I2V-A14B-Diffusers"))
+open(os.path.join(models.bf16_path("Wan-AI/Wan2.2-I2V-A14B-Diffusers"), "model_index.json"), "w").write("{}")
+assert models._wan_source("Wan-AI/Wan2.2-I2V-A14B-Diffusers") == models.bf16_path("Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 
 
 # Prompt embeddings: a prompt is encoded once per pipeline and reused (variations, candidates, long takes)
@@ -1045,6 +1156,17 @@ assert "a pier" in by_adapters[("user_moody_v1",)][0], "scenery shot runs withou
 worker.load_cast = lambda params, workdir: []
 krea.generate = real_generate
 
+# story: with burned-in subtitles the whole story is encoded again, so its shots are quick intermediates
+takes.clear()
+models.plan_story = lambda story, max_shots, style, cast: {"title": "T", "visual_bible": "port.", "shots": [
+    {"prompt": "a pier", "narration": "One.", "characters": []}, {"prompt": "a boat", "narration": "Two.", "characters": []}]}
+story = dict(story="s", max_shots=2, seconds_per_shot=5, sound=False, narration=False)
+worker.run_story({"client": "m", "job_id": "st"}, dict(story), tempfile.mkdtemp())
+assert [t["x264"] for t in takes] == [models.X264_INTERMEDIATE] * 2 and models.X264_INTERMEDIATE != models.X264_ARGS
+takes.clear()
+worker.run_story({"client": "m", "job_id": "st"}, dict(story, subtitles=False), tempfile.mkdtemp())
+assert [t["x264"] for t in takes] == [None, None], "no subtitles: the shots are the final encode"
+
 # ---------------------------------------------------------------- avatar_photoset: photo set -> filter -> dataset -> train job
 import photos as _photos  # noqa: E402
 assert len(_photos.KREA_DATASET_PROMPTS) == 24 and len(set(_photos.KREA_DATASET_PROMPTS)) == 24
@@ -1532,4 +1654,43 @@ worker.sweep_work_dirs()
 assert not os.path.exists(worker.take_work_dir("old")) and os.path.exists(worker.take_work_dir("new"))
 worker.WORK_ROOT = os.path.join(tempfile.mkdtemp(), "missing")
 worker.sweep_work_dirs()  # no folder yet: nothing to do
+
+# An idle worker loads the big models that are not in RAM yet, one per empty poll, where all three fit
+kept = (models._swap_to, models.RESIDENT_LIMIT, models.PRELOAD_MODELS, dict(models._loaded))
+swaps = []
+models._swap_to = lambda name, loader: (swaps.append((name, loader)), models._loaded.update({name: object()}))
+models._loaded.clear()
+models.RESIDENT_LIMIT = 1
+assert models.preload_next() is None and not swaps, "a box that holds one model: nothing is loaded ahead"
+models.RESIDENT_LIMIT = 3
+models._loaded["i2v"] = object()
+assert [models.preload_next() for _ in range(3)] == ["t2v", "edit", None], "one per call, loaded ones skipped"
+assert swaps == [("t2v", models._load_t2v), ("edit", models._load_edit)]
+models._loaded.clear()
+models.PRELOAD_MODELS = False
+assert models.preload_next() is None and len(swaps) == 2, "PRELOAD_MODELS=0: off"
+models.PRELOAD_MODELS = True
+logged = _io.StringIO()
+with _contextlib.redirect_stdout(logged):
+    for _ in range(5):
+        worker.preload_idle()
+events = [_jsont.loads(line) for line in logged.getvalue().splitlines()]
+assert [(e["event"], e["model"]) for e in events] == [("preloaded", m) for m in ("t2v", "i2v", "edit")]
+assert len(swaps) == 5 and not worker._preload["on"], "all loaded: the idle loop stops asking"
+
+
+def no_room(name, loader):
+    raise MemoryError("no room")
+
+
+worker._preload["on"] = True
+models._loaded.clear()
+models._swap_to = no_room
+logged = _io.StringIO()
+with _contextlib.redirect_stdout(logged):
+    worker.preload_idle(), worker.preload_idle()
+events = [_jsont.loads(line) for line in logged.getvalue().splitlines()]
+assert [e["event"] for e in events] == ["preload_failed"], "a failed load is logged once and not retried"
+models._swap_to, models.RESIDENT_LIMIT, models.PRELOAD_MODELS = kept[:3]
+models._loaded.clear(), models._loaded.update(kept[3])
 print("worker tests passed")

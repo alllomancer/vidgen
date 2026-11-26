@@ -839,9 +839,75 @@ assert s3.json("datasets/m/moves/captions.json")["edited_at"] == clock[0]
 for bad in [{"items": {"nope.mp4": "x"}}, {"items": {"s0001_00.mp4": ""}}, {"items": {}}, {"items": "x"}]:
     assert h.put_captions("m", "moves", bad)["statusCode"] == 400, bad
 
+# ---------------------------------------------------------------- deleting an avatar
+def make_avatar(name, **extra):
+    s3.objects[f"avatars/m/{name}/images/1.png"] = b"img"
+    s3.objects[f"avatars/m/{name}/history/900/images/0.png"] = b"old"
+    s3.objects[f"avatars/m/{name}/media/photo_01.png"] = b"photo"
+    s3.put_json(f"avatars/m/{name}/avatar.json", dict(
+        {"name": name, "description": "", "created_at": 950, "reference_key": f"avatars/m/{name}/images/1.png",
+         "images": [{"key": f"avatars/m/{name}/images/1.png", "added_at": 950}]}, **extra))
+
+
+def make_lora(lora, avatar, model="krea2"):
+    s3.put_json(f"loras/m/{lora}/v1/lora.json", {"version": 1, "models": [model], "avatar": avatar})
+    s3.objects[f"loras/m/{lora}/v1/{model}.safetensors"] = b"w"
+    s3.put_json(f"loras/m/{lora}/current.json", {"version": 1})
+    s3.put_json(f"datasets/m/{lora}/v1/manifest.json", {"avatar": avatar})
+    s3.objects[f"datasets/m/{lora}/v1/raw/p0001.png"] = b"p"
+
+
+under = lambda prefix: sorted(k for k in s3.objects if k.startswith(prefix))  # noqa: E731
+live_jobs = []
+h.jobs = mock.MagicMock(get_item=lambda Key: {"Item": {"job_id": Key["job_id"], "status": "running"}},
+                        query=lambda **kw: {"Items": live_jobs})
+make_avatar("zed", krea_lora={"state": "ready", "lora": "avatar-zed", "job_ids": []},
+            wan_lora={"state": "ready", "lora": "avatar-zed-wan", "job_ids": []})
+make_avatar("zed2")
+make_avatar("zed-wan", krea_lora={"state": "ready", "lora": "avatar-zed-wan"})  # shares a LoRA name with zed's Wan LoRA
+make_lora("avatar-zed", "zed")
+make_lora("avatar-zed-wan", "zed-wan")
+s3.put_json("avatars/m/_default.json", {"name": "zed"})
+assert h.delete_avatar("m", "nobody", {})["statusCode"] == 404
+assert h.delete_avatar("m", "../zed", {})["statusCode"] == 404
+assert h.delete_avatar("m", "zed", {"loras": "yes"})["statusCode"] == 400
+# in use: a build of its own, or a queued/running job that renders with its images
+s3.put_json("avatars/m/zed/avatar.json", dict(s3.json("avatars/m/zed/avatar.json"), media={"state": "clips", "job_id": "j1"}))
+r = h.delete_avatar("m", "zed", {})
+assert r["statusCode"] == 409 and "j1" in r["body"], r
+h.jobs.get_item = lambda Key: {"Item": {"job_id": Key["job_id"], "status": "done"}}  # a stale busy record doesn't block
+for params in [{"avatars": [{"name": "zed", "reference_key": "avatars/m/zed/images/1.png"}]}, {"avatar": "zed"}]:
+    live_jobs[:] = [{"job_id": "j2", "status": "queued", "params": json.dumps(params)}]
+    r = h.delete_avatar("m", "zed", {})
+    assert r["statusCode"] == 409 and "j2" in r["body"], r
+live_jobs[:] = [{"job_id": "j3", "status": "done", "params": json.dumps({"avatar": "zed"})},
+                {"job_id": "j4", "status": "queued", "params": json.dumps({"avatar": "zed2"})}]
+# S3 refuses a file: nothing is reported as deleted and the avatar is still there to delete again
+s3.refuse = ("avatars/m/zed/media/",)
+r = h.delete_avatar("m", "zed", {})
+assert r["statusCode"] == 502 and "avatars/m/zed/avatar.json" in s3.objects and "avatars/m/_default.json" in s3.objects, r
+s3.refuse = ()
+# without loras: the folder and the default marker go, LoRAs and other avatars stay
+r = h.delete_avatar("m", "zed", {})
+assert r["statusCode"] == 200 and body(r)["loras"] == [] and body(r)["was_default"] is True, r
+assert not under("avatars/m/zed/") and "avatars/m/_default.json" not in s3.objects
+assert under("avatars/m/zed2/") and under("avatars/m/zed-wan/") and under("loras/m/avatar-zed/")
+assert body(h.list_avatars("m"))["default"] is None
+# with loras: only the LoRAs made for this avatar, with their training sets
+make_avatar("zed", krea_lora={"state": "ready", "lora": "avatar-zed"})
+h._authenticate = lambda *a: "m"
+r = h.handler({"routeKey": "DELETE /avatars/{name}", "pathParameters": {"name": "zed"}, "headers": {},
+               "body": json.dumps({"loras": True})}, None)
+assert r["statusCode"] == 200 and body(r)["loras"] == ["avatar-zed"] and body(r)["was_default"] is False, r
+assert not under("avatars/m/zed/") and not under("loras/m/avatar-zed/") and not under("datasets/m/avatar-zed/")
+assert under("loras/m/avatar-zed-wan/") and under("datasets/m/avatar-zed-wan/"), "zed-wan's Krea LoRA is not zed's"
+assert under("avatars/m/zed2/") and under("avatars/m/zed-wan/")
+h.jobs = mock.MagicMock(put_item=lambda Item: queued.append(Item))
+
 # ---------------------------------------------------------------- routes are wired
 h._authenticate = lambda *a: "m"
 for route, params in [("GET /avatars/{name}", {"name": "dana"}), ("PUT /loras/{name}/current", {"name": "jerk"}),
+                      ("DELETE /avatars/{name}", {"name": "nobody"}),
                       ("GET /datasets/{name}/captions", {"name": "moves"}),
                       ("PUT /datasets/{name}/captions", {"name": "moves"}),
                       ("POST /loras/{name}/uploads", {"name": "routes"}),

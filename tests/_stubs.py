@@ -79,6 +79,19 @@ class FakeS3:
                        if k.startswith(Prefix) and "/" in k[len(Prefix):]})
         return {"CommonPrefixes": [{"Prefix": p} for p in subs]}
 
+    def get_paginator(self, name):
+        return mock.MagicMock(paginate=lambda Bucket, Prefix: [{"Contents": [
+            {"Key": k, "Size": len(v)} for k, v in sorted(self.objects.items()) if k.startswith(Prefix)]}])
+
+    refuse = ()  # key prefixes delete_objects answers with an error for (as S3 does without permission)
+
+    def delete_objects(self, Bucket, Delete):
+        errors = [o for o in Delete["Objects"] if self.refuse and o["Key"].startswith(tuple(self.refuse))]
+        for o in Delete["Objects"]:
+            if o not in errors:
+                self.objects.pop(o["Key"], None)
+        return {"Errors": errors} if errors else {}
+
     def json(self, key):
         return json.loads(self.objects[key]) if key in self.objects else None
 

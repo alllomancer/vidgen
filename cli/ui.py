@@ -441,6 +441,23 @@ def job_file(job_id, index):
     return path, content_type
 
 
+def delete_avatar(name, loras=False):
+    """Delete an avatar on the server (images, earlier versions, media); loras: also its own LoRAs and their
+    training photos. Media already copied to the download folder stays."""
+    name = str(name or "").strip().lower()
+    if not THEME_NAME.match(name):
+        raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    return vidgen.api("DELETE", f"/avatars/{name}", {"loras": bool(loras)})
+
+
+def set_default_avatar(body):
+    """Make an existing avatar the default (the one videos and stories star when none is picked)."""
+    name = str(body.get("name") or "").strip().lower()
+    if not THEME_NAME.match(name):
+        raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    return vidgen.api("PUT", "/avatars/default", {"name": name})
+
+
 def get_avatar(name):
     """One avatar with 1-hour preview links to its images (the Avatars tab's thumbnails)."""
     name = str(name or "").strip().lower()
@@ -610,11 +627,16 @@ def make_handler(port, token):
                     return self._send(200, pick_candidate(self._body()))
                 if method == "POST" and path == "/api/avatars":
                     return self._send(201, create_avatar(self._body()))
+                if method == "PUT" and path == "/api/avatars/default":
+                    return self._send(200, set_default_avatar(self._body()))
                 if method == "GET" and path == "/api/loras":
                     return self._send(200, list_loras())
                 m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})", path)
                 if method == "GET" and m:
                     return self._send(200, get_avatar(m.group(1)))
+                if method == "DELETE" and m:
+                    return self._send(200, delete_avatar(
+                        m.group(1), loras="loras=1" in self.path.partition("?")[2].split("&")))
                 m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})/krea-lora", path)
                 if method == "POST" and m:
                     return self._send(202, avatar_krea_lora(m.group(1)))

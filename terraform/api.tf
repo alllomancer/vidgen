@@ -77,6 +77,7 @@ resource "aws_apigatewayv2_route" "routes" {
     "POST /avatars",
     "PUT /avatars/default",
     "GET /avatars/{name}",
+    "DELETE /avatars/{name}",
     "POST /avatars/{name}/images",
     "DELETE /avatars/{name}/images/{n}",
     "PUT /avatars/{name}/main",
