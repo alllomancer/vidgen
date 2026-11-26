@@ -46,6 +46,18 @@ variable "instance_type" {
   }
 }
 
+variable "render_instance_name" {
+  description = "Name tag of the render box (what the EC2 console lists it as). Only a label: permissions and the API go by the Project and Role tags and the instance id."
+  type        = string
+  default     = "console-render"
+}
+
+variable "trainer_instance_name" {
+  description = "Name tag of the trainer machine (what the EC2 console lists it as). Only a label."
+  type        = string
+  default     = "console-learn"
+}
+
 variable "on_demand" {
   description = "Run the render box on-demand instead of spot: for a type with no spot capacity, at the on-demand price (g6e.8xlarge ~$4.5/h). Changing this replaces the instance and its disk."
   type        = bool

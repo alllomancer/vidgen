@@ -82,7 +82,7 @@ resource "aws_instance" "gpu" {
   })
 
   tags = {
-    Name = "${var.project}-gpu"
+    Name = var.render_instance_name
     Role = "gpu-worker"
   }
 

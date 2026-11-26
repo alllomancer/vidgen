@@ -234,7 +234,7 @@ resource "aws_instance" "trainer" {
   })
 
   tags = {
-    Name = "${var.project}-trainer"
+    Name = var.trainer_instance_name
     Role = "lora-trainer"
   }
 
