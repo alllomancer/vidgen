@@ -784,6 +784,21 @@ function filesHtml(j) {
     : `<button class="small" data-preview="${id}" aria-expanded="${open}">${open ? "Hide" : "Play"}</button> `;
   return preview + `<button class="small" data-reveal="${esc((j.local.files && j.local.files[0]) || out)}" title="${esc(out)}">Show file</button>`;
 }
+// Jobs whose summary is the prompt as it was sent (a story's summary is only its first words).
+function copyable(j) { return !!j.summary && ["video", "photos", "avatar"].includes(j.type); }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch (e) { /* not allowed here: the old way below */ }
+  const box = document.createElement("textarea");
+  box.value = text;
+  box.setAttribute("readonly", "");
+  box.style.position = "fixed";
+  box.style.opacity = "0";
+  document.body.append(box);
+  box.select();
+  const ok = document.execCommand("copy");
+  box.remove();
+  if (!ok) throw new Error("Copying isn't allowed in this browser: select the prompt text and copy it");
+}
 function rowHtml(j) {
   const id = esc(j.job_id), live = j.status === "queued" || j.status === "running", stop = cancelling.has(j.job_id);
   return `<tr data-job="${id}">
@@ -795,6 +810,8 @@ function rowHtml(j) {
       <td class="num"><b>${dur(j.run_seconds)}</b></td>
       <td>${filesHtml(j)}</td>
       <td>${live ? `<button class="small" data-cancel="${id}" ${stop ? "disabled" : ""}>${stop ? "Stopping…" : "Cancel"}</button> ` : ""}<button class="small" data-rerun="${id}" ${j.type === "describe" ? "disabled title=\"needs the original upload\"" : ""}>Re-run</button>${
+        copyable(j) ? ` <button class="small" data-copy-prompt="${id}" title="Copy this job's prompt to the clipboard">Copy prompt</button>` : ""}${
+        j.type === "video" && j.summary ? ` <button class="small" data-use-prompt="${id}" title="Put this prompt into the Video form">Use prompt</button>` : ""}${
         j.type === "write" && j.local && j.local.status === "downloaded" ? ` <button class="small" data-use-story="${id}" title="Put this story into the Story form">Use in Story</button>` : ""}${
         j.type === "avatar" && j.local && j.local.status === "downloaded" ? pickButtons(j) : ""}</td>
     </tr>`;
@@ -982,6 +999,21 @@ $("jobs").onclick = async e => {
       toast(`Avatar ${r.name} saved${r.default ? " and set as default" : ""}`);
       loadCreateOptions();
     } catch (err) { showError(err.message); }
+    return;
+  }
+  if (b.dataset.copyPrompt || b.dataset.usePrompt) {
+    const j = jobs.find(x => x.job_id === (b.dataset.copyPrompt || b.dataset.usePrompt));
+    if (!j || !j.summary) return;
+    if (b.dataset.copyPrompt) {
+      try { await copyText(j.summary); toast("Prompt copied"); } catch (err) { showError(err.message); }
+      return;
+    }
+    $("tab-create").click();
+    document.querySelector('.seg button[data-kind="video"]').click();
+    const f = $("create-video");
+    f.elements.prompt.value = j.summary;
+    f.elements.prompt.focus();
+    toast("Prompt loaded into the Video form: change what you like, then make the video");
     return;
   }
   if (b.dataset.useStory) {
