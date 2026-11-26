@@ -184,8 +184,17 @@ assert popen_calls[-1]["image"] == "<first frame>@640x384", "the first frame is 
 assert not os.path.exists(os.path.dirname(arg("--image_path"))), "the work folder is removed afterwards"
 # several LoRAs, or one at another weight: our runner around the same script, which loads them all with their weights
 two = [{"path": "/l/avatar_low.safetensors", "weight": 1.0}, {"path": "/l/moves_low.safetensors", "weight": 0.8}]
-helios.generate("she dances", 5, seed=1, loras=two)
+Proc.output = 'loading\n{"event": "helios_loras", "adapters": ["default", "lora2"], "weights": [1.0, 0.8]}\nMax memory: 45.3 GB\n'
+import contextlib as _ctx  # noqa: E402
+
+_printed = io.StringIO()
+with _ctx.redirect_stdout(_printed):
+    helios.generate("she dances", 5, seed=1, loras=two)
+Proc.output = "loading\nMax memory: 45.3 GB\n"
 c = popen_calls[-1]["cmd"]
+# what the runner says it loaded reaches the worker's log line, so "both LoRAs were applied" can be read there
+_event = [__import__("json").loads(l) for l in _printed.getvalue().splitlines() if '"event": "helios"' in l][-1]
+assert _event["loras"] == 2 and _event["adapters"] == {"default": 1.0, "lora2": 0.8}, _event
 assert c[2] == helios.RUNNER and os.path.basename(helios.RUNNER) == "helios_run.py" and os.path.exists(helios.RUNNER), c[:3]
 assert popen_calls[-1]["cwd"] == helios.REPO_DIR and arg("--lora_path") == "/l/avatar_low.safetensors"
 import json as _json  # noqa: E402

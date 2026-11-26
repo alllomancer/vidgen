@@ -132,11 +132,17 @@ def generate(prompt, seconds, seed=None, image=None, loras=(), progress=lambda m
     progress(f"Helios: loading, then {seconds} s of video in one take")
     started = time.time()
     proc = subprocess.Popen(cmd, cwd=REPO_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
-    tail = []
+    tail, adapters = [], None
     try:
         try:
             for line in proc.stdout:  # progress bars end in \r: only whole lines arrive here
                 line = line.strip()
+                if line.startswith('{"event": "helios_loras"'):  # helios_run.py: the LoRAs it loaded and their weights
+                    try:
+                        loaded = json.loads(line)
+                        adapters = dict(zip(loaded["adapters"], loaded["weights"]))
+                    except (ValueError, KeyError):
+                        pass
                 if line:
                     tail = (tail + [line[-300:]])[-TAIL:]
                 models.check_cancel()
@@ -153,6 +159,7 @@ def generate(prompt, seconds, seed=None, image=None, loras=(), progress=lambda m
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(json.dumps({"event": "helios", "seconds": int(seconds), "frames": len(frames), "loras": len(loras),
+                      **({"adapters": adapters} if adapters else {}),
                       "first_frame": image is not None, "render_seconds": round(time.time() - started, 1),
                       "memory": next((l for l in reversed(tail) if "Max memory" in l), None)}), flush=True)
     return frames
