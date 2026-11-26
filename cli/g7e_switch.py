@@ -41,6 +41,19 @@ def shell(cmd):
     return p.returncode, p.stdout, p.stderr
 
 
+def shell_live(cmd, say):
+    """Run a command showing its output as it comes (Terraform's apply can take many minutes: it retries a
+    launch that is refused for capacity). Returns (code, output, "")."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=ROOT)
+    lines = []
+    for line in proc.stdout:
+        line = line.rstrip()
+        lines.append(line)
+        if line.strip() and "Refreshing state" not in line and "Reading..." not in line and "Read complete" not in line:
+            say("  " + line)
+    return proc.wait(), "\n".join(lines), ""
+
+
 # ---------------------------------------------------------------- terraform.tfvars
 
 def _value(raw):
@@ -94,8 +107,9 @@ def torch_pin(requirements):
 # ---------------------------------------------------------------- the switch
 
 class Switch:
-    def __init__(self, run, root, say, wait):
+    def __init__(self, run, root, say, wait, live=None):
         self.run, self.root, self.say, self.wait = run, root, say, wait
+        self.live = live  # runs a command showing its output as it comes; None: like `run`
         self.tfvars = os.path.join(root, "terraform", "terraform.tfvars")
         self.vars = {**read_defaults(os.path.join(root, "terraform", "variables.tf")), **read_tfvars(self.tfvars)}
         self.region = self.vars.get("region", "us-east-1")
@@ -228,8 +242,10 @@ class Switch:
             for line in out.splitlines():
                 if line.startswith("Plan:") or "must be replaced" in line or "will be destroyed" in line:
                     self.say("  " + line.strip())
-        self.say("applying (this replaces the render box and its disk)")
-        code, out, err = self.run(["terraform", "-chdir=terraform", "apply", "-input=false", "tfplan"])
+        self.say("applying (this replaces the render box and its disk; the old box goes first, and Terraform "
+                 "retries the new launch for up to ~10 minutes if AWS refuses it for capacity)")
+        cmd = ["terraform", "-chdir=terraform", "apply", "-input=false", "tfplan"]
+        code, out, err = self.live(cmd, self.say) if self.live else self.run(cmd)
         if code:
             self.say(f"terraform apply failed:\n{(err or out).strip()[-1500:]}")
         return not code
@@ -240,7 +256,7 @@ def main(argv, run=shell, root=ROOT, say=print, wait=time.sleep):
     ap.add_argument("--dry-run", action="store_true", help="probe and report; change nothing")
     ap.add_argument("--force", action="store_true", help="go on although preflight found a problem")
     a = ap.parse_args(argv)
-    sw = Switch(run, root, say, wait)
+    sw = Switch(run, root, say, wait, live=shell_live if run is shell else None)
     before = open(sw.tfvars).read()
     tried_apply = False
     try:
