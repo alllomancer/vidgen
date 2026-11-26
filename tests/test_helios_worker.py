@@ -161,7 +161,8 @@ helios.subprocess = types.SimpleNamespace(Popen=Proc, PIPE=-1, STDOUT=-2, run=ru
 sys.modules["imageio"] = types.SimpleNamespace(get_reader=lambda path: [f"frame{i}" for i in range(int(open(path).read()))])
 helios.imageio = sys.modules["imageio"]
 
-frames = helios.generate("she dances", 30, seed=7, image="<first frame>", lora="/opt/models/loras/x/t2v_low.safetensors")
+frames = helios.generate("she dances", 30, seed=7, image="<first frame>",
+                         loras=[{"path": "/opt/models/loras/x/t2v_low.safetensors", "weight": 1.0}])
 c = popen_calls[-1]["cmd"]
 assert released == [0], "the worker's models leave the GPU before Helios starts"
 assert c[0] == os.path.join(helios.VENV, "bin", "python") and "infer_helios.py" in c and popen_calls[-1]["cwd"] == helios.REPO_DIR
@@ -178,14 +179,52 @@ assert arg("--base_model_path") == helios.MODEL_DIR and arg("--transformer_path"
 assert arg("--guidance_scale") == "1.0" and arg("--pyramid_num_inference_steps_list", 3) == ["2", "2", "2"]
 assert all(flag in c for flag in ("--is_enable_stage2", "--is_amplify_first_chunk", "--disable_flash_attention"))
 assert arg("--lora_path") == "/opt/models/loras/x/t2v_low.safetensors"
+assert "HELIOS_LORAS" not in popen_calls[-1]["env"], "one LoRA at full weight: Helios's script as it is"
 assert popen_calls[-1]["image"] == "<first frame>@640x384", "the first frame is fitted to Helios's size"
 assert not os.path.exists(os.path.dirname(arg("--image_path"))), "the work folder is removed afterwards"
+# several LoRAs, or one at another weight: our runner around the same script, which loads them all with their weights
+two = [{"path": "/l/avatar_low.safetensors", "weight": 1.0}, {"path": "/l/moves_low.safetensors", "weight": 0.8}]
+helios.generate("she dances", 5, seed=1, loras=two)
+c = popen_calls[-1]["cmd"]
+assert c[2] == helios.RUNNER and os.path.basename(helios.RUNNER) == "helios_run.py" and os.path.exists(helios.RUNNER), c[:3]
+assert popen_calls[-1]["cwd"] == helios.REPO_DIR and arg("--lora_path") == "/l/avatar_low.safetensors"
+import json as _json  # noqa: E402
+
+assert _json.loads(popen_calls[-1]["env"]["HELIOS_LORAS"]) == two
+helios.generate("she dances", 5, seed=1, loras=[{"path": "/l/a.safetensors", "weight": 0.6}])
+c = popen_calls[-1]["cmd"]
+assert c[2] == helios.RUNNER and _json.loads(popen_calls[-1]["env"]["HELIOS_LORAS"]) == [{"path": "/l/a.safetensors", "weight": 0.6}]
+
+# the runner's patch: when Helios's script switches its one LoRA on, the others are loaded and all get their weights
+import helios_run  # noqa: E402
+
+
+class FakePipe:
+    def __init__(self):
+        self.loaded, self.set = [], []
+
+    def load_lora_weights(self, path, adapter_name=None):
+        self.loaded.append((path, adapter_name))
+
+    def set_adapters(self, names, adapter_weights=None):
+        self.set.append((list(names), list(adapter_weights)))
+
+
+helios_run.patch(FakePipe, two)
+pipe = FakePipe()
+pipe.load_lora_weights("/l/avatar_low.safetensors", adapter_name="default")  # what infer_helios.py does
+pipe.set_adapters(["default"], adapter_weights=[1.0])
+assert pipe.loaded == [("/l/avatar_low.safetensors", "default"), ("/l/moves_low.safetensors", "lora2")], pipe.loaded
+assert pipe.set == [(["default", "lora2"], [1.0, 0.8])], pipe.set
+pipe.set_adapters(["default", "lora2"], adapter_weights=[0.5, 0.5])  # any later call passes through untouched
+assert pipe.set[-1] == (["default", "lora2"], [0.5, 0.5]) and len(pipe.loaded) == 2
+
 assert len(frames) == 30 * 24 == 720 and frames[0] == "frame0", "cut to the length asked for (726 were rendered)"
 # text only: text-to-video, no image or LoRA arguments; no seed given, none passed
 frames = helios.generate("a beach at dawn", 5)
 c = popen_calls[-1]["cmd"]
 assert arg("--sample_type") == "t2v" and arg("--num_frames") == "132" and len(frames) == 120
-assert "--image_path" not in c and "--lora_path" not in c and "--seed" not in c
+assert "--image_path" not in c and "--lora_path" not in c and "--seed" not in c and c[2] == "infer_helios.py"
 # Helios fails: its last lines are in the error, and no frames come back (criterion 8)
 Proc.exit, Proc.output = 1, "line1\nTraceback (most recent call last):\nRuntimeError: CUDA out of memory\n"
 try:
@@ -241,8 +280,8 @@ class Frame:
 
 
 KEY = Frame()
-helios.generate = lambda prompt, seconds, seed=None, image=None, lora=None, progress=None: (
-    calls["helios"].append(dict(prompt=prompt, seconds=seconds, seed=seed, image=image, lora=lora)) or [f"f{i}" for i in range(seconds * 24)])
+helios.generate = lambda prompt, seconds, seed=None, image=None, loras=(), progress=None: (
+    calls["helios"].append(dict(prompt=prompt, seconds=seconds, seed=seed, image=image, loras=list(loras))) or [f"f{i}" for i in range(seconds * 24)])
 models.generate_video = lambda out, **kw: calls["wan"].append(kw) or out
 models.make_keyframe = lambda cast, scene, width, height, seed, best=False: calls["keyframe"].append((scene, width, height)) or KEY
 models.write_video = lambda frames, out, fps=16, grain=None, x264=None: calls["written"].append((len(frames), out, fps, grain))
@@ -264,7 +303,13 @@ res = worker.run_video(JOB, dict(P), tempfile.mkdtemp())
 assert calls["wan"] == [] and len(calls["helios"]) == 1, "Helios renders the take; Wan is not called"
 hcall = calls["helios"][0]
 assert hcall["seconds"] == 30 and hcall["seed"] == 7 and hcall["image"] is KEY
-assert hcall["lora"] == "/l/t2v_low.safetensors", "the Wan LoRA's low-noise file"
+assert hcall["loras"] == [{"path": "/l/t2v_low.safetensors", "weight": 1.0}], "the Wan LoRA's low-noise file, at its weight"
+# two Wan LoRAs on the job: both go to Helios, each with its weight
+models.set_loras([{"adapter": "a", "high": "/l/a_high.safetensors", "low": "/l/a_low.safetensors", "weight": 1.0, "trigger": "liron"},
+                  {"adapter": "b", "high": "/l/b_high.safetensors", "low": "/l/b_low.safetensors", "weight": 0.7, "trigger": ""}])
+worker.run_video(JOB, dict(P, sound=False, seconds=5), tempfile.mkdtemp())
+assert calls["helios"][-1]["loras"] == [{"path": "/l/a_low.safetensors", "weight": 1.0}, {"path": "/l/b_low.safetensors", "weight": 0.7}]
+calls["helios"].pop(); calls["written"].pop(); calls["keyframe"].pop()
 import realism  # noqa: E402
 
 realism.Grain = lambda seed: ("grain", seed)  # the real one needs numpy
@@ -286,7 +331,7 @@ worker.load_cast = lambda params, workdir: []
 models.set_loras([])
 res = worker.run_video(JOB, dict(P, upscale=True, grain=True, sound=False, shot=None, seconds=5), tempfile.mkdtemp())
 hcall = calls["helios"][0]
-assert hcall["image"] is None and hcall["lora"] is None and hcall["seconds"] == 5 and calls["keyframe"] == []
+assert hcall["image"] is None and hcall["loras"] == [] and hcall["seconds"] == 5 and calls["keyframe"] == []
 assert models.TRIPOD in hcall["prompt"], "a plain prompt keeps the tripod sentence"
 assert calls["upscaled"] == 1 and calls["written"][0][0] == 120 and calls["written"][0][3] is not None and calls["sound"] == []
 assert "keyframe_key" not in res

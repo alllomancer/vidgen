@@ -225,13 +225,14 @@ Every `video` and `story` stars your **default avatar**, so the same character a
 | Size and frame rate | 640×384 at 24 fps, always (`--upscale` doubles it to 1280×768) | 1280×704 at 16 or 32 fps |
 | Render time on a g7e | about 3.5 min for 30 s, 5 min for 60 s (plus first frame and sound) | about 1.75–2 min per 5 s segment |
 | Avatars | one person from the first frame; with two in the frame it kept one in a test | 1–3 |
-| LoRAs | one Wan LoRA (the avatar's own counts), used through its low-noise file | several, both halves |
+| LoRAs | the job's Wan LoRAs (as many as Wan takes), each at its weight, through their low-noise files only | several, both halves |
 | Beats, `vidgen plan`, `--anchor-every`, Smooth, Draft | no (the API says to use Wan) | yes |
 | Variations | any length | takes up to 5 s |
 
 - **Why 640×384**: at other sizes (512×512, 640×640, 384×640) Helios jumps at every 33rd frame; at its own size it doesn't (measured 2026-11-26). The first frame is made at 1280×768 and fitted.
 - **Longer is not always better**: in a dark scene, coloured speckle built up in the background from about 20 s and was heavy by 60 s; a bright kitchen scene was clean at 30 s. If a long Helios take degrades, shorten it or use Wan.
 - **The avatar's Wan LoRA matters**: without it the person drifts to someone else within ~15 s. Only its low-noise file is used; the high-noise file broke the colours in a test.
+- **Several LoRAs**: Helios's own script takes one LoRA at full weight; with more, or another weight, the worker runs the same script through `worker/helios_run.py`, which loads them all and sets each weight (log line `helios_loras`). Your LoRAs were trained for Wan 2.2, so each is already off its home model here: stacked, they may come out weaker or stranger than on Wan. Lower a weight, or use `--video-model wan`, if a combination doesn't hold.
 - **Look options** (`--look`, `--shot`, `--grain`, …) apply to both models.
 - **Box**: Helios has its own venv (`/opt/helios-venv`, from `worker/helios_requirements.txt`), its repository at a pinned commit in `/opt/helios`, and ~80 GB of weights in `/opt/models/helios/`; all three are prepared at first boot (or on the first Helios job) and the weights are in the [model mirror](#model-mirror). Log line: `{"event": "helios", ...}`.
 

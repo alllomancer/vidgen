@@ -11,7 +11,7 @@ Spec: docs/specs/2026-11-26-helios-default.md
 
 ## D2 — [2026-11-26] — Task 1: API accepts and defaults `video_model`
 
-**Status**: Accepted
+**Status**: Accepted (its one-LoRA part superseded by D9)
 **Decision**: A Helios job with beats, `plan_only`, `anchor_every` or more than one Wan LoRA is refused with the way out named, instead of being switched to Wan or having the extras dropped.
 **Reason**: Silently changing the model or ignoring a LoRA gives a result the user didn't ask for and can't explain.
 **Alternatives considered**: Falling back to Wan automatically; using only the first LoRA and listing the rest as unused.
@@ -57,3 +57,10 @@ Spec: docs/specs/2026-11-26-helios-default.md
 **Decision**: The switch script tries spot `g7e.4xlarge`, spot `g7e.8xlarge`, on-demand `g7e.4xlarge`, on-demand `g7e.8xlarge`.
 **Reason**: The user's order: spot first in either size, then on-demand in either size.
 **Alternatives considered**: The earlier order (spot 8xlarge, spot 4xlarge, on-demand 4xlarge).
+
+## D9 — [2026-11-26] — After deployment: several LoRAs with Helios
+
+**Status**: Accepted (supersedes the one-LoRA part of D2 and D3)
+**Decision**: A Helios job takes all of the job's Wan LoRAs with their weights: one LoRA at weight 1 still runs Helios's script as it is; anything else runs the same script through `worker/helios_run.py`, which patches the pipeline's `set_adapters` to load the others and set every weight.
+**Reason**: The user expected several LoRAs (the first live Helios job with an avatar and another LoRA was refused); a patch around the unchanged script keeps the tested path for the common case.
+**Alternatives considered**: Our own pipeline runner (more code to keep in step with upstream); keeping the refusal.

@@ -1548,8 +1548,8 @@ def video_model_flag(parser):
     """--video-model on video: helios (the server's default) or wan."""
     parser.add_argument("--video-model", choices=VIDEO_MODELS,
                         help="helios (default): the whole clip in one take from one prompt, 640x384 at 24 fps, "
-                             "30 s unless --seconds says otherwise, one Wan LoRA. wan: 5 s segments chained, "
-                             "1280x704, with --beats, plans, --anchor-every and several LoRAs")
+                             "30 s unless --seconds says otherwise. wan: 5 s segments chained, 1280x704, "
+                             "with --beats, plans and --anchor-every")
 
 
 def video_model_body(args, planning=False):

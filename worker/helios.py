@@ -5,8 +5,11 @@ from a first frame (image-to-video) or from text alone. It needs newer libraries
 runs in its own venv and its own process, like Krea 2: this module installs both on first use, then runs
 Helios's own infer_helios.py with the settings that tested clean on 2026-11-26:
 
-  640x384 at 24 fps (other sizes jump at the chunk boundaries), distilled 2-2-2 steps, no guidance, one Wan
-  LoRA through its low-noise file, the attention library off (it has no build for the g7e's GPU).
+  640x384 at 24 fps (other sizes jump at the chunk boundaries), distilled 2-2-2 steps, no guidance, Wan
+  LoRAs through their low-noise files, the attention library off (it has no build for the g7e's GPU).
+
+Helios's script takes one LoRA at full weight. With several LoRAs, or another weight, the same script runs
+through helios_run.py, which loads them all and sets each weight.
 
 First use: /opt/helios-venv from helios_requirements.txt, the Helios repository at a pinned commit in
 /opt/helios, and ~80 GB of weights (from the model mirror when it has them, else Hugging Face). The repository
@@ -36,6 +39,7 @@ MODEL_REVISION = "b991c0379a018f4de3227d95468237f56066f5bb"
 VENV = "/opt/helios-venv"
 REPO_DIR = "/opt/helios"
 REQUIREMENTS = os.path.join(HERE, "helios_requirements.txt")
+RUNNER = os.path.join(HERE, "helios_run.py")  # infer_helios.py with several LoRAs and their weights
 MODEL_DIR = f"/opt/models/helios/{MODEL_REVISION[:12]}"
 MODEL_UNIT = f"helios/{MODEL_REVISION[:12]}"  # its copy in the model mirror (mirror.py)
 # Not transformer_ode/ (57 GB): another sampler's weights, unused by this path.
@@ -95,16 +99,19 @@ def ensure_weights(progress=lambda msg: None):
     krea._ensure(MODEL_UNIT, MODEL_DIR, download, progress, "downloading Helios (first use, ~80 GB)")
 
 
-def generate(prompt, seconds, seed=None, image=None, lora=None, progress=lambda msg: None):
+def generate(prompt, seconds, seed=None, image=None, loras=(), progress=lambda msg: None):
     """One Helios take: `seconds` of video at 640x384, 24 fps, as uint8 frames (seconds x 24 of them).
     image: a PIL first frame (image-to-video; fitted to 640x384), or None for text-to-video.
-    lora: the path of one Wan LoRA file (the low-noise one), or None."""
+    loras: [{"path": a Wan LoRA file (the low-noise one), "weight": float}, ...]."""
+    loras = list(loras)
+    # One LoRA at full weight is what Helios's script does itself; anything else goes through our runner.
+    script = "infer_helios.py" if len(loras) <= 1 and all(float(l["weight"]) == 1.0 for l in loras) else RUNNER
     ensure_env(progress)
     ensure_weights(progress)
     models.release_all()  # Helios needs ~45 GB of the GPU to itself
     work = tempfile.mkdtemp(prefix="helios-")
     out = os.path.join(work, "out")
-    cmd = [os.path.join(VENV, "bin", "python"), "-u", "infer_helios.py",
+    cmd = [os.path.join(VENV, "bin", "python"), "-u", script,
            "--base_model_path", MODEL_DIR, "--transformer_path", MODEL_DIR,
            "--sample_type", "i2v" if image is not None else "t2v",
            "--num_frames", str(frames_for(seconds)), "--fps", str(FPS),
@@ -117,12 +124,14 @@ def generate(prompt, seconds, seed=None, image=None, lora=None, progress=lambda 
         first = os.path.join(work, "first_frame.png")
         models.fit(image, *SIZE).save(first)
         cmd += ["--image_path", first, "--image_noise_sigma_min", "0.111", "--image_noise_sigma_max", "0.135"]
-    if lora:
-        cmd += ["--lora_path", lora]
+    env = dict(os.environ, HF_HUB_ENABLE_HF_TRANSFER="1")
+    if loras:
+        cmd += ["--lora_path", loras[0]["path"]]
+        if script == RUNNER:
+            env["HELIOS_LORAS"] = json.dumps([{"path": l["path"], "weight": float(l["weight"])} for l in loras])
     progress(f"Helios: loading, then {seconds} s of video in one take")
     started = time.time()
-    proc = subprocess.Popen(cmd, cwd=REPO_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            env=dict(os.environ, HF_HUB_ENABLE_HF_TRANSFER="1"))
+    proc = subprocess.Popen(cmd, cwd=REPO_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     tail = []
     try:
         try:
@@ -143,7 +152,7 @@ def generate(prompt, seconds, seed=None, image=None, lora=None, progress=lambda 
         frames = frames[:int(seconds) * FPS]
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    print(json.dumps({"event": "helios", "seconds": int(seconds), "frames": len(frames), "lora": bool(lora),
+    print(json.dumps({"event": "helios", "seconds": int(seconds), "frames": len(frames), "loras": len(loras),
                       "first_frame": image is not None, "render_seconds": round(time.time() - started, 1),
                       "memory": next((l for l in reversed(tail) if "Max memory" in l), None)}), flush=True)
     return frames

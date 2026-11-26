@@ -337,15 +337,6 @@ def _video_model(body, allowed=True):
     return model
 
 
-def _check_helios_loras(params):
-    """Helios takes one Wan LoRA (the avatar's own counts). Krea LoRAs are for the first frame."""
-    loras = params.get("loras") or []
-    if params.get("video_model") == "helios" and len(loras) > 1:
-        raise ValueError("the helios video model takes one Wan LoRA, and this job has "
-                         f"{len(loras)} ({', '.join(l['name'] for l in loras)}): leave one out (avatar_lora: false / "
-                         "--no-avatar-lora drops the avatar's own), or use video model wan")
-
-
 def _shot_param(body, allowed=True):
     """{"shot": "stream" | "pov"} for a video, {} when none is asked for. One setting, so the two can't be
     combined. Other job types refuse it instead of ignoring it."""
@@ -2075,8 +2066,6 @@ def create_job(client, body):
             _job_loras(client, job_type, params, body.get("loras"))
         if job_type == "video" and body.get("avatar_lora") is not False:
             _with_avatar_wan_lora(client, params)
-        if job_type == "video":
-            _check_helios_loras(params)
         if job_type in ("video", "story"):
             _avatar_first_frame(client, job_type, params)
     except (ValueError, TypeError) as e:

@@ -237,7 +237,7 @@ form:not(.krea) .krea-text { display: none !important; }
       <form class="add create" id="create-video" data-kind="video">
         <label class="wide">Prompt<textarea name="prompt" required maxlength="2000" placeholder="walking through a night market, handheld camera"></textarea></label>
         <label>Avatar<select name="avatar" class="avatar-select"></select></label>
-        <label title="Helios: the whole clip in one take from one prompt, 640x384 at 24 fps, one Wan LoRA. Wan: 5 s segments chained, 1280x704, with beats, plans, re-anchoring and several LoRAs">Video model<select name="video_model">
+        <label title="Helios: the whole clip in one take from one prompt, 640x384 at 24 fps. Wan: 5 s segments chained, 1280x704, with beats, plans and re-anchoring">Video model<select name="video_model">
           <option value="helios" selected>Helios (default): long clips in one take, 640×384</option>
           <option value="wan">Wan: 5 s segments, beats and plans, 1280×704</option></select></label>
         <label>Seconds (1-60)<input name="seconds" type="number" min="1" max="60" value="30"></label>

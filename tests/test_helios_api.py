@@ -60,20 +60,8 @@ for extra, word in (({"beats": "0: walks in; 10: sits down"}, "beats"), ({"plan_
     except ValueError as e:
         assert word in str(e) and "wan" in str(e).lower(), e
 
-# ---- Helios takes one Wan LoRA (criterion 5)
-one = {"video_model": "helios", "loras": [{"name": "avatar-liron-wan", "version": 1, "weight": 1.0}]}
-h._check_helios_loras(one)  # the avatar's own: fine
-h._check_helios_loras({"video_model": "helios"})
-two = {"video_model": "helios", "loras": [{"name": "avatar-liron-wan", "version": 1, "weight": 1.0},
-                                           {"name": "moves", "version": 2, "weight": 0.8}]}
-try:
-    h._check_helios_loras(two)
-    raise AssertionError("two Wan LoRAs were accepted for Helios")
-except ValueError as e:
-    assert "one" in str(e) and "avatar-liron-wan" in str(e) and "moves" in str(e) and "wan" in str(e).lower(), e
-h._check_helios_loras(dict(two, video_model="wan"))  # Wan takes both
-# Krea LoRAs are for the first frame and don't count
-h._check_helios_loras({"video_model": "helios", "loras": one["loras"], "krea_loras": [{"name": "a"}, {"name": "b"}]})
+# ---- Helios takes the job's Wan LoRAs like Wan does (the worker's runner loads them all): no extra limit
+assert not hasattr(h, "_check_helios_loras"), "the one-LoRA refusal is gone"
 
 # ---- History shows the model
 assert h._summary("video", {"prompt": "x", "seconds": 30, "video_model": "helios"})[1]["video_model"] == "helios"

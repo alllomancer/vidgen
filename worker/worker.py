@@ -309,11 +309,12 @@ HELIOS_FRAME = (1280, 768)
 
 def render_helios(job_id, params, args, seed, out, tag=""):
     """One Helios take written to `out`: the whole length in one run from one prompt (the same look, shot and
-    natural-style wording as Wan), from the first frame when there is one, with the job's Wan LoRA through
-    its low-noise file. Grain and the 2x upscale work on the result; there are no segments to chain."""
-    lora = next((l["low"] for l in models._JOB_LORAS if l.get("low")), None)
+    natural-style wording as Wan), from the first frame when there is one, with the job's Wan LoRAs through
+    their low-noise files, each at its weight. Grain and the 2x upscale work on the result; there are no
+    segments to chain."""
+    loras = [{"path": l["low"], "weight": l.get("weight", 1.0)} for l in models._JOB_LORAS if l.get("low")]
     prompt, _ = models.natural_prompts(models.with_triggers(args["prompt"]))
-    frames = helios.generate(prompt, params["seconds"], seed=seed, image=args.get("image"), lora=lora,
+    frames = helios.generate(prompt, params["seconds"], seed=seed, image=args.get("image"), loras=loras,
                              progress=lambda msg: progress(job_id, msg + tag))
     if params.get("upscale"):
         import enhance

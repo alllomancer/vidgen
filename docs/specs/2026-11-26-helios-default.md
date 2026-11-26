@@ -172,3 +172,9 @@ kept local).
 - The streaming wording put a **visible ring light** in the picture (a bright circle around her). Whether
   that is wanted is the user's call; the wording can say the light is off-camera.
 - Earlier the same day a spot `g7e.8xlarge` running this test was reclaimed by AWS after five minutes.
+
+## Change after deployment (2026-11-26): several LoRAs
+
+The one-LoRA limit (design "One LoRA", criterion 5) is gone: a Helios job takes the job's Wan LoRAs with their
+weights through `worker/helios_run.py` (ADR D9). Unit-tested; two LoRAs together on a real Helios run are
+checked on the deployed box.
