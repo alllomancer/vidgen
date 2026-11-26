@@ -816,7 +816,9 @@ def generate_video(out_path, prompt, negative_prompt="", seconds=5, width=1280, 
         with _stage(spent, "upscale"):
             frames = enhance.upscale(frames, check_cancel)
     with _stage(spent, "encode"):
-        write_video(frames, out_path, fps=fps, grain=realism.Grain(seed or 0) if grain else None, x264=x264)
+        # grain: the plain switch, or a per-frame effect (realism.frame_effect: the phone look)
+        effect = grain if callable(grain) else (realism.Grain(seed or 0) if grain else None)
+        write_video(frames, out_path, fps=fps, grain=effect, x264=x264)
     print(json.dumps({"event": "video_timing", "video_seconds": seconds, "segments": len(sizes), "fps": fps,
                       "upscale": bool(upscale), **spent}), flush=True)
     return out_path

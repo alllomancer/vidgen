@@ -19,8 +19,10 @@ assert tuple(realism.SHOTS) == ("stream", "pov")
 stream, pov = realism.style_text({"shot": "stream"}), realism.style_text({"shot": "pov"})
 for word in ("webcam", "never moves", "ring light"):
     assert word in stream, (word, stream)
-for word in ("handheld", "point of view", "phone", "camera light", "moves"):
+for word in ("handheld", "point of view", "phone", "camera light", "shak", "low-resolution", "grain"):
     assert word in pov, (word, pov)
+# it is the look of phone footage: the phone and the person filming are not in the picture
+assert "never visible" in pov and "no phone" in pov, pov
 assert stream != pov
 # no option, or one the worker doesn't know (an older job): the prompt is unchanged
 assert realism.with_style("a fox", {}) == "a fox" and realism.with_style("a fox", {"shot": ""}) == "a fox"
@@ -36,6 +38,22 @@ p, neg = models.natural_prompts(realism.with_style("she waves", {"shot": "stream
 assert p.startswith(models.TRIPOD) and models.TRIPOD_NEGATIVE in neg, p
 p, _ = models.natural_prompts(realism.with_style("she waves", {}))
 assert p.startswith(models.TRIPOD)
+
+# the phone look is also made on the finished frames (soft low resolution, handheld shake, grain), whatever
+# the model did with the wording; without the option, grain stays the plain switch it was
+fx = realism.frame_effect({"shot": "pov"}, 7)
+assert isinstance(fx, realism.PhoneLook) and fx.seed == 7 and callable(fx)
+assert 0.4 <= fx.scale <= 0.7 and fx.shake >= 4 and fx.grain > realism.GRAIN_STRENGTH, (fx.scale, fx.shake, fx.grain)
+assert realism.frame_effect({"shot": "pov", "grain": True}, 7).grain == fx.grain, "grain is already part of the look"
+assert realism.frame_effect({}, 7) is False and realism.frame_effect({"shot": "stream"}, 7) is False
+assert realism.frame_effect({"grain": True}, 7) is True and realism.frame_effect({"shot": "stream", "grain": True}, 7) is True
+# the shake is smooth (a hand, not noise) and stays inside the margin that is cropped away
+offsets = [fx.offset(i) for i in range(200)]
+assert all(abs(dx) <= fx.shake and abs(dy) <= fx.shake for dx, dy in offsets), max(offsets)
+steps = [abs(a[0] - b[0]) + abs(a[1] - b[1]) for a, b in zip(offsets, offsets[1:])]
+assert max(steps) <= 3 and len(set(offsets)) > 20, (max(steps), len(set(offsets)))
+assert [realism.PhoneLook(7).offset(i) for i in range(50)] == offsets[:50], "the same seed shakes the same way"
+assert [realism.PhoneLook(8).offset(i) for i in range(50)] != offsets[:50]
 
 # ---------------------------------------------------------------- API: one validated setting, videos only
 _, v = h._validate("m", {"type": "video", "video_model": "wan", "prompt": "x", "shot": "stream"})

@@ -320,7 +320,9 @@ def render_helios(job_id, params, args, seed, out, tag=""):
 
         progress(job_id, f"upscaling{tag}")
         frames = enhance.upscale(frames, models.check_cancel)
-    models.write_video(frames, out, fps=helios.FPS, grain=realism.Grain(seed or 0) if params.get("grain") else None)
+    effect = realism.frame_effect(params, seed)  # the phone look, or the plain grain switch
+    models.write_video(frames, out, fps=helios.FPS,
+                       grain=effect if callable(effect) else (realism.Grain(seed or 0) if effect else None))
     return out
 
 
@@ -333,7 +335,7 @@ def render_take(job, params, workdir, cast, seed, index=None, count=1):
     args = {k: params[k] for k in ("prompt", "negative_prompt", "width", "height")}
     styled = realism.with_style(params["prompt"], params)  # look / natural skin / candid; unchanged without
     args.update(prompt=styled, seconds=params["seconds"], seed=seed, fps=params.get("fps", 16),
-                upscale=params.get("upscale", False), grain=bool(params.get("grain")))
+                upscale=params.get("upscale", False), grain=realism.frame_effect(params, seed))
     if params.get("_work_dir"):  # long take: saved segments, so a re-delivered job resumes
         def segment_progress(text):  # best effort: a status write failing must not end a long take
             try:

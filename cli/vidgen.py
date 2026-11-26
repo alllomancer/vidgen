@@ -1535,8 +1535,9 @@ def shot_flag(parser):
     """--shot on video: how the clip is filmed and lit (one or none)."""
     parser.add_argument("--shot", choices=SHOTS,
                         help="stream: a streaming session (fixed webcam, ring light on the face); "
-                             "pov: filmed on a handheld phone by the person holding it (the phone moves a little, "
-                             "its camera light is the main light). Adds wording to the prompt")
+                             "pov: looks shot on a handheld phone (shaky, soft low resolution, grainy, the phone's "
+                             "light; the phone and the person filming are not in the picture). Adds wording to "
+                             "the prompt; pov also shakes, softens and grains the finished frames")
 
 
 VIDEO_MODELS = ("helios", "wan")

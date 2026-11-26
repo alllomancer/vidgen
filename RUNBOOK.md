@@ -240,7 +240,7 @@ vidgen video "a red fox in fresh snow" --no-avatar
 - For cuts, use `story`.
 
 
-**How it is filmed (`--shot`, videos only; one or none):** `--shot stream` makes it look like a streaming session (a fixed webcam that never moves, the person facing it, a ring light on the face); `--shot pov` makes it look filmed on a handheld phone by the person holding it (the phone moves a little now and then, the phone's camera light is the main light). Each adds wording to the prompt and to the first frame; with `pov` the usual "static tripod" sentence is left out. Dashboard: Create → Video → Realism → **Streaming session** / **Phone camera POV** (ticking one unticks the other). Plans carry it (`vidgen plan ... --shot pov`), and the "render with" command repeats it. Stories and photos refuse it.
+**How it is filmed (`--shot`, videos only; one or none):** `--shot stream` makes it look like a streaming session (a fixed webcam that never moves, the person facing it, a ring light on the face). `--shot pov` makes it look shot on a phone by someone holding it: the wording asks for amateur handheld phone footage (the phone and the person filming are not in the picture, so don't write them into your prompt), and the finished frames get a slow hand shake, a softer low-resolution image and grain, whatever the model did with the wording; the usual "static tripod" sentence is left out. `stream` only adds wording. Dashboard: Create → Video → Realism → **Streaming session** / **Shot on a phone** (ticking one unticks the other). Plans carry it (`vidgen plan ... --shot pov`), and the "render with" command repeats it. Stories and photos refuse it.
 
 ### Long single takes (up to 60 s)
 
@@ -696,7 +696,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | `vidgen photos [--avatar NAME \| --image FILE] [-o FOLDER]` | photorealistic photos of one person (default: your default avatar) |
 | `  --series --where … [--wearing …] [--doing … ×N] [--no-anchor] --count 2-8` | a series in one place and outfit, pose and camera varied |
 | `  --look pro\|phone\|candid\|portrait\|film --natural-skin --candid --grain --best` | realism options (also on `video` and `story`) |
-| `  --shot stream\|pov` (video, plan) | filmed as a streaming session (fixed webcam, ring light) or on a handheld phone from its holder's point of view (phone light); one or none |
+| `  --shot stream\|pov` (video, plan) | filmed as a streaming session (fixed webcam, ring light), or looking shot on a phone (handheld shake, soft low resolution, grain; no phone in the picture); one or none |
 | `  --prompt "TEXT"` (repeatable) | one photo per free-form scene |
 | `  --location "PLACE"` (repeatable) | one photo per place |
 | `  --where "..." --wearing "..." --doing "..." --camera "..."` | one photo built from fields; `--wearing` replaces the outfit |

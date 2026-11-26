@@ -278,7 +278,7 @@ form:not(.krea) .krea-text { display: none !important; }
               </div>
               <div class="checks shot-options" role="group" aria-label="How it is filmed (one or none)">
                 <label title="A fixed webcam that never moves, the person facing it, lit from the front by a ring (halo) light"><input type="checkbox" name="shot" value="stream"> Streaming session (static webcam, ring light)</label>
-                <label title="Filmed on a handheld phone from the point of view of the person holding it; the phone moves a little, its camera light is the main light"><input type="checkbox" name="shot" value="pov"> Phone camera POV (handheld, phone light)</label>
+                <label title="Looks shot on a phone by someone holding it: shaky handheld framing, a soft low-resolution image, grain, the phone's light. The phone and the person filming are not in the picture"><input type="checkbox" name="shot" value="pov"> Shot on a phone (handheld, shaky, grainy, low-res)</label>
               </div>
             </fieldset>
             <label class="wide">File name (optional)<input name="out" placeholder="market.mp4" autocomplete="off"></label>
@@ -1486,7 +1486,7 @@ for (const b of document.querySelectorAll(".seg button")) {
 }
 function num(v) { return v === "" || v === undefined ? undefined : Number(v); }
 // Streaming session / Phone camera POV: two checkboxes, at most one ticked (ticking one unticks the other).
-const SHOT_LABELS = {stream: "streaming session", pov: "phone POV"};
+const SHOT_LABELS = {stream: "streaming session", pov: "shot on a phone"};
 function shotChoice(f) {
   const box = [...f.querySelectorAll('input[name="shot"]')].find(b => b.checked);
   return box ? box.value : undefined;

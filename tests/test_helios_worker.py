@@ -251,7 +251,8 @@ prompt = hcall["prompt"]
 assert "dancing in a living room" in prompt and realism.SHOTS["pov"] in prompt and "liron is a woman" in prompt
 assert models.NATURAL_STYLE in prompt and models.TRIPOD not in prompt, "the natural-look text, no tripod with the phone option"
 assert calls["keyframe"] == [(realism.with_style("dancing in a living room", P), 1280, 768)], calls["keyframe"]
-assert calls["written"][0][0] == 720 and calls["written"][0][2] == 24 and calls["written"][0][3] is None
+assert calls["written"][0][0] == 720 and calls["written"][0][2] == 24
+assert isinstance(calls["written"][0][3], realism.PhoneLook), "the phone option also works on the finished frames"
 assert calls["sound"] and calls["sound"][0][1:] == (30, 7) and calls["upscaled"] == 0
 assert calls["timeline"] == 0, "one prompt for the whole take: no planner"
 assert res["video_key"] == "outputs/video.mp4" and res["keyframe_key"] == "outputs/keyframe.png" and "segment_prompts" not in res
