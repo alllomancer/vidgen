@@ -137,3 +137,36 @@ Switch script:
 - `tests/test_worker.py` / a new `tests/test_gpu_hold.py`: criteria 1-3 with stubbed torch.
 - `tests/test_g7e_switch.py`: the script against fake `aws` / `terraform` runners (criteria 5-12).
 - The trial box run (criterion 4), results appended here.
+
+## Validation results (2026-11-26, criterion 4: partly met)
+
+Spot `g7e.8xlarge` in us-east-1b, the working tree's worker code, `GPU_HOLD` on (95 GB GPU), torch 2.9.0+cu128
+(`sm_120` listed). Worker venv from the requirements with these lines changed; it installed without conflicts:
+
+```
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.9.0+cu128
+torchvision==0.24.0+cu128
+torchaudio==2.9.0+cu128
+torchcodec==0.8.0
+tensordict==0.10.0
+```
+
+| Step (through the worker's own functions) | Result | First pass (with load) | Second pass | Peak GPU |
+|---|---|---|---|---|
+| T2V, 5 s at 1280x704, 32 fps + raw | ok | 318 s | 106 s | 74.3 GB |
+| Keyframe with the edit model (Lightning 8) | ok | 87 s | 6.2 s | 65.6 GB |
+| I2V, 5 s at 1280x704 | ok | 311 s | 115 s | 74.3 GB |
+| MMAudio sound, next to the held I2V pipeline | ok | 61 s | - | 71.3 GB |
+| VLM description | ok | 22 s | - | 65.6 GB |
+| Krea 2 image | **failed** | - | - | - |
+
+- Krea: `CUDA error: no kernel image is available for execution on the device`. The Krea venv's
+  torch 2.14.1+cu126 has no kernels for this GPU; it needs a build that lists `sm_120`. Open: which build
+  works with its diffusers 0.41 / transformers 5.20 pins on Python 3.10.
+- So `worker/requirements.txt` is **not** changed yet: with the torch pin at 2.5.1 the switch script's
+  preflight keeps refusing, which is right while Krea would be broken on a g7e.
+- A keyframe takes 6 s with the edit model held on the GPU (the RUNBOOK's figure on the g6e is ~40 s per
+  photo).
+- Capacity seen while launching (2026-11-26 00:04 UTC): no on-demand `g7e.4xlarge` or `g7e.8xlarge` and no
+  spot `g7e.4xlarge` in us-east-1a/b/d; spot `g7e.8xlarge` launched in us-east-1b.
