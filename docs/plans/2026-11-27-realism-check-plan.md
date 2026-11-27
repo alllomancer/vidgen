@@ -6,12 +6,12 @@ Jira: N/A
 
 ## Progress
 
-- [ ] Task 1: API accepts `realism_check` and lists the verdict
-- [ ] Task 2: Worker check (frames, VLM critique, cleaning, hook)
-- [ ] Task 3: CLI flag and watcher output
-- [ ] Task 4: Mac dashboard toggle, badge and Use suggestion
-- [ ] Task 5: Phone toggle, badge and Use suggestion
-- [ ] Task 6: Docs
+- [x] Task 1: API accepts `realism_check` and lists the verdict — `b6e29fc`
+- [x] Task 2: Worker check (frames, VLM critique, cleaning, hook) — `4cd2c56`, `bdaab3c`
+- [x] Task 3: CLI flag and watcher output — `1188065`
+- [x] Task 4: Mac dashboard toggle, badge and Use suggestion — `d4148b0`, fixes in `ae665f4`
+- [x] Task 5: Phone toggle, badge and Use suggestion — `a21d44c`, fixes in `ae665f4`
+- [x] Task 6: Docs — `622417f`
 - [ ] Task 7: Live check on the render box
 
 ## Tasks
