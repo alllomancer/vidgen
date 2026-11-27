@@ -541,7 +541,12 @@ def _realism_params(body):
     look = body.get("look") or "pro"
     if look not in REALISM_LOOKS:
         raise ValueError(f"look must be one of: {', '.join(REALISM_LOOKS)}")
-    return {"look": look, **{k: body.get(k) is True for k in ("natural_skin", "candid", "grain")}}
+    return {"look": look, **{k: body.get(k) is True for k in ("natural_skin", "candid", "grain")},
+            # After the render, critique how AI-made it looks (docs/specs/2026-11-27-realism-check.md).
+            **({"realism_check": True} if body.get("realism_check") is True else {})}
+
+
+REALISM_CHECK_TYPES = ("video", "photos", "story")
 
 
 def _video_model(body, allowed=True):
@@ -2337,6 +2342,8 @@ def _rerun_meta(meta, new_job_id):
 def create_job(client, body):
     try:
         meta = _validate_meta(body["meta"]) if body.get("meta") is not None else {}
+        if body.get("realism_check") not in (None, False) and body.get("type") not in REALISM_CHECK_TYPES:
+            raise ValueError(f"realism_check is for {', '.join(REALISM_CHECK_TYPES)} jobs")
         job_type, params = _validate(client, body)
         if job_type in ("video", "story"):
             params["avatars"] = _resolve_avatars(client, body.get("avatar"))
@@ -2522,11 +2529,32 @@ def list_jobs(client):
                "run_seconds": finished - started if started and finished else None,
                "wait_seconds": started - created if started and created else None,
                "summary": summary, "details": details, "meta": _meta_of(item)}
+        verdict = _realism_summary_of(item)
+        if verdict:
+            row["realism"] = verdict
         for k in ("error", "progress", "rerun_of"):
             if item.get(k):
                 row[k] = item[k]
         out.append(row)
     return _resp(200, {"jobs": out})
+
+
+def _realism_summary_of(item):
+    """{score, signs} (or {error}) of a done job's AI-look check, for History badges; None without one."""
+    if item.get("status") != "done" or not item.get("result"):
+        return None
+    try:
+        realism = json.loads(item["result"]).get("realism")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not isinstance(realism, dict):
+        return None
+    if isinstance(realism.get("score"), int) and not isinstance(realism["score"], bool):
+        signs = [str(x)[:80] for x in realism.get("signs") or [] if isinstance(x, str)][:5]
+        return {"score": max(0, min(10, realism["score"])), "signs": signs}
+    if isinstance(realism.get("error"), str):
+        return {"error": realism["error"][:300]}
+    return None
 
 
 def rerun_job(client, job_id):
