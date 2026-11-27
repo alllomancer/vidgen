@@ -23,6 +23,12 @@ assert re.search(r'function copyable\(j\) \{ return !!j\.summary && \["video", "
 # the AI-look toggle is in the video, photos and story forms, and sent with the job
 assert page.count('name="realism_check" data-remember="realism_check"') == 3
 assert 'realism_check: on("realism_check") || undefined' in script
+# Use suggestion on photos clears what would override the prompt (Series, Where/Wearing/Doing/Camera)
+use = script[script.index("function useRealism("):script.index("function rowHtml(")]
+assert 'f.elements.series.checked = false; photoForm();' in use and '"where", "wearing", "doing", "camera", "actions"' in use
+# the verdict is model output: every value goes through esc() (or Number()) before it is HTML
+dialog = script[script.index("async function showRealism("):script.index("function useRealism(")]
+assert "${esc(x)}" in dialog and "${esc(r.prompt)}" in dialog and "${esc(t)}" in dialog and "${esc(r.error)}" in dialog
 
 node = shutil.which("node")
 if node:

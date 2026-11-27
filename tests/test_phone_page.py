@@ -65,6 +65,7 @@ assert "j.saves" in app and "bucketLink(saves[name])" in app and 'u.hostname.end
 assert page.count('name="realism_check" data-remember') == 3 and page.count('class="note suggested"') == 3
 assert "body.realism_check = true" in app and "REMEMBER_CHECK" in app and 'id="job-verdict"' in page
 assert "function useSuggestion(" in app and "showVerdict(j)" in app and "realismBadge(j.realism)" in app
+assert "const options = allowedOptions(kind, raw);" in app, "suggested settings are whitelisted before they ride along"
 
 # ---- key handling: created non-extractable, only the public half is shown
 assert 'generateKey({ name: "Ed25519" }, false, ["sign"])' in sign

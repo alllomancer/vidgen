@@ -272,9 +272,23 @@ function showVerdict(job) {
   box.hidden = false;
 }
 
-function setSuggested(kind, options) {
+const LOOKS = ["pro", "phone", "candid", "portrait", "film"];
+const SHOTS = ["stream", "pov"];
+
+/** Only the realism settings the API takes for this kind of job, with the right types. */
+function allowedOptions(kind, o) {
+  const out = {};
+  if (!o || typeof o !== "object") return out;
+  if (LOOKS.includes(o.look)) out.look = o.look;
+  for (const k of ["natural_skin", "candid", "grain"]) if (typeof o[k] === "boolean") out[k] = o[k];
+  if (kind === "video" && SHOTS.includes(o.shot)) out.shot = o.shot;
+  return out;
+}
+
+function setSuggested(kind, raw) {
   const form = document.querySelector(`form[data-kind="${kind}"]`);
   if (!form) return;
+  const options = allowedOptions(kind, raw);
   const text = optionsText(options);
   if (text) suggested[kind] = options;
   else delete suggested[kind];
@@ -294,7 +308,8 @@ function useSuggestion(kind, r) {
   const f = form.elements;
   if (kind === "video" && typeof r.prompt === "string" && r.prompt) f.prompt.value = r.prompt;
   if (kind === "photos" && Array.isArray(r.scenes) && r.scenes.length) {
-    f.scenes.value = r.scenes.filter((x) => typeof x === "string").join("\n");
+    f.scenes.value = r.scenes.filter((x) => typeof x === "string").slice(0, 8).join("\n");
+    f.count.value = ""; // one photo per suggested scene
   }
   setSuggested(kind, r.options && typeof r.options === "object" ? r.options : {});
   toast("Suggestion loaded: check it, then render again");

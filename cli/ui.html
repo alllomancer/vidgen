@@ -513,7 +513,7 @@ form:not(.krea) .krea-text { display: none !important; }
   <div class="v-stage"><img id="viewer-img" alt=""></div>
 </dialog>
 <dialog id="realism-dialog" aria-labelledby="realism-h">
-  <form method="dialog" class="dialog-form">
+  <form method="dialog" class="add">
     <h2 id="realism-h" class="wide" style="margin:0;font-size:16px"></h2>
     <div id="realism-body" class="wide"></div>
     <div class="wide" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
@@ -842,8 +842,9 @@ function realismBadge(j) {
   if (!r) return "";
   if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}</div>`;
   const words = {low: "looks real", mid: "some giveaways", high: "looks AI-made"}[realismLevel(r.score)];
+  const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
   return `<button class="small realism-badge r-${realismLevel(r.score)}" data-realism="${esc(j.job_id)}"
-    title="${esc((r.signs || []).join("; "))}">AI look ${Number(r.score)}/10 · ${words}</button>`;
+    title="${esc(signs.join("; "))}" aria-label="AI look ${Number(r.score)} out of 10, ${words}: show details">AI look ${Number(r.score)}/10 · ${words}</button>`;
 }
 let realismOpen = null;  // {job, realism} shown in the dialog
 async function showRealism(jobId) {
@@ -853,12 +854,14 @@ async function showRealism(jobId) {
   realismOpen = {job, realism: r};
   const d = $("realism-dialog");
   $("realism-h").textContent = typeof r.score === "number" ? `AI look ${r.score}/10` : "AI-look check";
-  const opts = Object.entries(r.options || {}).map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : v}`);
-  const scenes = Array.isArray(r.scenes) ? r.scenes : [];
+  const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
+  const opts = Object.entries(r.options && typeof r.options === "object" ? r.options : {})
+    .map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : v}`);
+  const scenes = Array.isArray(r.scenes) ? r.scenes.map(String) : [];
   $("realism-body").innerHTML = (r.error ? `<p class="err">${esc(r.error)}</p>` : "") +
-    ((r.signs || []).length ? `<h3>What gives it away</h3><ul class="plain">${r.signs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "") +
-    (r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
-    (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}">Copy</button>${
+    (signs.length ? `<h3>What gives it away</h3><ul class="plain">${signs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "") +
+    (typeof r.prompt === "string" && r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
+    (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}" aria-label="Copy scene ${i + 1}">Copy</button>${
         r.photos && r.photos[i] ? ` <span class="hint">(${Number(r.photos[i].score)}/10)</span>` : ""}</li>`).join("")}</ol>` : "") +
     (opts.length ? `<h3>Suggested settings</h3><p>${esc(opts.join(" · "))}</p>` : "") +
     `<p class="hint">${esc(r.note || "An AI critique of visible artifacts, not a detector.")}</p>`;
@@ -875,13 +878,17 @@ function useRealism() {
   document.querySelector(`.seg button[data-kind="${kind}"]`).click();
   if (kind === "video" && r.prompt) f.elements.prompt.value = r.prompt;
   if (kind === "photos" && Array.isArray(r.scenes) && r.scenes.length && f.elements.prompt) {
-    const worst = (r.photos || []).reduce((w, p, i) => (p.score > ((r.photos[w] || {}).score ?? -1) ? i : w), 0);
-    f.elements.prompt.value = r.scenes[worst] || r.scenes[0];
+    // The prompt only counts when Series and the Where/Wearing/Doing/Camera fields are off (createBody), so clear them.
+    if (f.elements.series && f.elements.series.checked) { f.elements.series.checked = false; photoForm(); }
+    for (const k of ["where", "wearing", "doing", "camera", "actions"]) if (f.elements[k]) f.elements[k].value = "";
+    const photos = Array.isArray(r.photos) ? r.photos : [];
+    const worst = photos.reduce((w, p, i) => (Number(p && p.score) > Number((photos[w] || {}).score ?? -1) ? i : w), 0);
+    f.elements.prompt.value = String(r.scenes[worst] || r.scenes[0]);
   }
   const o = r.options || {};
   if (o.look && f.elements.look) f.elements.look.value = o.look;
   for (const k of ["natural_skin", "candid", "grain"]) if (k in o && f.elements[k]) f.elements[k].checked = !!o[k];
-  if (kind === "video" && o.shot) for (const el of f.querySelectorAll('input[name="shot"]')) el.checked = el.value === o.shot;
+  if (kind === "video") for (const el of f.querySelectorAll('input[name="shot"]')) el.checked = el.value === o.shot;  // none suggested: none
   toast("Suggestion loaded into the form: check it, then render again");
 }
 
@@ -2035,11 +2042,12 @@ $("phone-url-copy").onclick = () => copyText($("phone-url").href).then(() => toa
 api("GET", "/api/phone").then(r => { $("phone-url").href = r.url; $("phone-url").textContent = r.url; }).catch(() => {});
 loadPhones();
 
+// askDialog() opens it; Use suggestion closes it with returnValue "use" (Esc and Close leave "").
 $("realism-dialog").addEventListener("close", () => { if ($("realism-dialog").returnValue === "use") useRealism(); });
-$("realism-copy").onclick = () => copyText((realismOpen || {}).realism.prompt || "").then(() => toast("Prompt copied"), e => showError(e.message));
+$("realism-copy").onclick = () => copyText(((realismOpen || {}).realism || {}).prompt || "").then(() => toast("Prompt copied"), e => showError(e.message));
 $("realism-body").addEventListener("click", ev => {
   const b = ev.target.closest("button[data-copy-scene]"); if (!b) return;
-  copyText(((realismOpen || {}).realism.scenes || [])[Number(b.dataset.copyScene)] || "").then(() => toast("Scene copied"), e => showError(e.message));
+  copyText((((realismOpen || {}).realism || {}).scenes || [])[Number(b.dataset.copyScene)] || "").then(() => toast("Scene copied"), e => showError(e.message));
 });
 // "Check how AI it looks" is remembered on this computer (all three forms share it)
 try {
