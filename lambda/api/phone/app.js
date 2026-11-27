@@ -195,7 +195,30 @@ function jobCard(j) {
 
 let lastLoaded = null;
 
+/** The render box's state on top of History: off, starting or running, and how many jobs wait. */
+async function refreshStatus() {
+  let s;
+  try {
+    s = await call("GET", "/status");
+  } catch (e) {
+    return; // the history line already says when the server can't be reached
+  }
+  const state = String(s.instance || "unknown");
+  const queued = Number(s.queued_jobs) || 0;
+  const words = {
+    stopped: "Render box is off; it starts when a job is queued",
+    stopping: "Render box is stopping",
+    pending: "Render box is starting (a few minutes)",
+    running: `Render box is on${s.running_minutes ? ` (${roughly(s.running_minutes * 60)})` : ""}`,
+  };
+  const text = words[state] || `Render box: ${state}`;
+  $("status-text").textContent = queued ? `${text} · ${queued} job${queued > 1 ? "s" : ""} waiting` : text;
+  $("status-strip").dataset.state = ["running", "pending", "stopped", "stopping"].includes(state) ? state : "other";
+  $("status-strip").hidden = false;
+}
+
 async function refreshHistory() {
+  refreshStatus();
   const mine = ++listGen;
   const r = await call("GET", "/jobs");
   if (mine !== listGen) return; // a newer load started meanwhile; it draws
@@ -275,7 +298,7 @@ async function openJob(jobId) {
   try {
     j = await call("GET", `/jobs/${encodeURIComponent(jobId)}`); // fresh links: they last an hour
   } catch (e) {
-    if (!(e instanceof Unauthorized)) $("job-title").textContent = e.message;
+    if (openJobId === jobId && !(e instanceof Unauthorized)) $("job-title").textContent = e.message;
     return;
   }
   if (openJobId !== jobId) return;
@@ -302,6 +325,12 @@ async function openJob(jobId) {
                                            : "Nothing to show for this job.";
 }
 
+/** Leaving the Job screen: stop any video and forget the job. */
+function leaveJob() {
+  openJobId = null;
+  $("job-files").replaceChildren();
+}
+
 // ---------------------------------------------------------------- avatars
 
 const MAX_AVATAR_IMAGES = 12;
@@ -312,11 +341,12 @@ function avatarCard(a, def) {
   for (const [label, rec] of [["Krea LoRA", a.krea_lora], ["Wan LoRA", a.wan_lora]]) {
     if (rec && typeof rec.state === "string" && rec.state !== "none") states.push(`${label}: ${rec.state}`);
   }
-  const input = el("input", { type: "file", accept: "image/*", multiple: true, class: "visually-hidden",
-                              id: `add-${name}`, "aria-label": `Photos to add to ${name}` });
+  const input = el("input", { type: "file", accept: "image/*", multiple: true, hidden: true, tabindex: "-1" });
   const status = el("span", { class: "form-status", role: "status" });
-  input.addEventListener("change", () => addAvatarPhotos(name, input, status, Number(a.images) || 0));
-  const actions = [el("label", { class: "button small", for: `add-${name}` }, "Add photos"), input];
+  const add = el("button", { type: "button", class: "small", "aria-label": `Add photos to ${name}`,
+                             onclick: () => input.click() }, "Add photos");
+  input.addEventListener("change", () => addAvatarPhotos(name, input, add, status, Number(a.images) || 0));
+  const actions = [add, input];
   if (name !== def) {
     actions.push(el("button", { class: "small", onclick: (e) => busy(e.currentTarget, async () => {
       await call("PUT", "/avatars/default", { name });
@@ -331,16 +361,17 @@ function avatarCard(a, def) {
     status);
 }
 
-async function addAvatarPhotos(name, input, status, have) {
+async function addAvatarPhotos(name, input, button, status, have) {
   const files = [...input.files];
   input.value = "";
-  if (!files.length) return;
+  if (!files.length || button.disabled) return;
   if (have + files.length > MAX_AVATAR_IMAGES) {
     status.textContent = `an avatar holds at most ${MAX_AVATAR_IMAGES} photos (${name} has ${have})`;
     status.classList.add("err");
     return;
   }
   status.classList.remove("err");
+  button.disabled = true;
   try {
     const keys = [];
     for (const [i, f] of files.entries()) {
@@ -356,11 +387,17 @@ async function addAvatarPhotos(name, input, status, have) {
       status.textContent = e.message;
       status.classList.add("err");
     }
+  } finally {
+    button.disabled = false;
   }
 }
 
 async function refreshAvatars() {
-  await loadAvatars();
+  const ok = await loadAvatars();
+  if (!ok) { // keep what is shown; say it may be out of date
+    $("avatars-empty").hidden = true;
+    return;
+  }
   const list = avatarList.avatars.filter((a) => a && typeof a.name === "string");
   $("avatars-list").replaceChildren(...list.map((a) => avatarCard(a, avatarList.default)));
   $("avatars-empty").hidden = list.length > 0;
@@ -416,13 +453,16 @@ async function uploadImage(file, progress) {
 }
 
 async function loadAvatars() {
+  let ok = false;
   try {
     const r = await call("GET", "/avatars");
     avatarList = { default: r.default || null, avatars: Array.isArray(r.avatars) ? r.avatars : [] };
+    ok = true;
   } catch (e) {
     if (!(e instanceof Unauthorized)) toast(`Couldn't load the avatars: ${e.message}`);
   }
   for (const select of document.querySelectorAll("select[data-avatars]")) fillAvatars(select);
+  return ok;
 }
 
 function fillAvatars(select) {
@@ -594,12 +634,13 @@ async function main() {
   setupPairing();
   setupCreate();
   $("job-back").addEventListener("click", () => {
-    openJobId = null;
+    leaveJob();
     show("history");
     refreshHistory().catch(staleNote);
   });
   for (const b of document.querySelectorAll("nav button")) {
     b.addEventListener("click", () => {
+      leaveJob();
       show(b.dataset.view);
       if (b.dataset.view === "history") refreshHistory().catch(staleNote);
       if (b.dataset.view === "create") loadAvatars();

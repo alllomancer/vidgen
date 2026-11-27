@@ -1,5 +1,7 @@
 """The phone page: GET /m and GET /m/{file} are served without a signature, with fixed headers; every other route
 still needs one. docs/specs/2026-11-27-phone-ui.md"""
+import base64
+import json
 import os
 import sys
 
@@ -26,6 +28,13 @@ EXPECT = {"/m": "text/html; charset=utf-8", "/m/app.js": "text/javascript; chars
           "/m/sign.js": "text/javascript; charset=utf-8",
           "/m/manifest.webmanifest": "application/manifest+json"}
 
+for icon in ("icon-192.png", "icon-512.png"):  # binary: base64 through API Gateway
+    r = call("GET /m/{file}", "/m/" + icon, icon)
+    assert r["statusCode"] == 200 and r["isBase64Encoded"] is True and r["headers"]["content-type"] == "image/png", r
+    assert base64.b64decode(r["body"]).startswith(b"\x89PNG"), icon
+manifest = json.loads(call("GET /m/{file}", "/m/manifest.webmanifest", "manifest.webmanifest")["body"])
+assert {i["sizes"] for i in manifest["icons"]} == {"192x192", "512x512"}, manifest
+
 for path, ctype in EXPECT.items():
     file = path.split("/m/")[1] if "/m/" in path else None
     r = call("GET /m" if file is None else "GET /m/{file}", path, file)
@@ -35,7 +44,7 @@ for path, ctype in EXPECT.items():
     assert hd["content-security-policy"] == CSP, hd
     assert hd["cache-control"] == "no-cache" and hd["x-content-type-options"] == "nosniff"
     assert hd["referrer-policy"] == "no-referrer" and hd["cross-origin-opener-policy"] == "same-origin", hd
-    assert r["body"] and not r.get("isBase64Encoded"), path
+    assert r["body"] and r.get("isBase64Encoded") is False, path
 with open(os.path.join(h.PHONE_DIR, "m.html")) as f:
     assert call("GET /m", "/m")["body"] == f.read()
 

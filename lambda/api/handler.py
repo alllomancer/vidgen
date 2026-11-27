@@ -2369,8 +2369,9 @@ def _save_links(item, result):
         if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
             ext = ""
         fname = f"{stem}{ext}" if name == "video" else f"{stem}.{name}{ext}"
-        if not re.fullmatch(r"[A-Za-z0-9._ -]{1,200}", fname):
-            fname = f"vidgen-{item['job_id'][:8]}{ext}"
+        if not re.fullmatch(r"[A-Za-z0-9._ -]{1,200}", fname):  # e.g. an odd file name: still one per file
+            safe = re.sub(r"[^A-Za-z0-9_-]", "", name)[:40] or "file"
+            fname = f"vidgen-{item['job_id'][:8]}{ext}" if name == "video" else f"vidgen-{item['job_id'][:8]}.{safe}{ext}"
         saves[name] = s3.generate_presigned_url(
             "get_object", Params={"Bucket": BUCKET, "Key": v, "ResponseContentDisposition": f'attachment; filename="{fname}"'},
             ExpiresIn=URL_TTL)
@@ -2654,6 +2655,8 @@ PHONE_FILES = {  # served name -> content type; nothing else under /m
     "app.js": "text/javascript; charset=utf-8",
     "sign.js": "text/javascript; charset=utf-8",
     "manifest.webmanifest": "application/manifest+json",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
 }
 # Presigned links point at this bucket only (virtual-host style; with or without the region in the host name).
 PHONE_S3 = f"https://{BUCKET}.s3.amazonaws.com https://{BUCKET}.s3.{os.environ.get('AWS_REGION', 'us-east-1')}.amazonaws.com"
@@ -2673,14 +2676,16 @@ def phone_file(name):
         fname, ctype = name, PHONE_FILES[name]
     else:
         return dict(_resp(404, {"error": "not found"}), headers={"content-type": "application/json", **PHONE_HEADERS})
+    binary = not ctype.startswith(("text/", "application/"))
     try:
-        with open(os.path.join(PHONE_DIR, fname), encoding="utf-8") as f:
-            body = f.read()
-    except OSError as e:  # the bundle is missing the page (make build wasn't run)
+        with open(os.path.join(PHONE_DIR, fname), "rb") as f:
+            data = f.read()
+        body = base64.b64encode(data).decode() if binary else data.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as e:  # the bundle is missing the page (make build wasn't run)
         print(json.dumps({"event": "phone_page_missing", "file": fname, "error": str(e)}))
         return dict(_resp(500, {"error": "the phone page is not deployed"}),
                     headers={"content-type": "application/json", **PHONE_HEADERS})
-    return {"statusCode": 200, "body": body, "headers": {"content-type": ctype, **PHONE_HEADERS}}
+    return {"statusCode": 200, "body": body, "isBase64Encoded": binary, "headers": {"content-type": ctype, **PHONE_HEADERS}}
 
 
 # ---------------------------------------------------------------- entrypoint

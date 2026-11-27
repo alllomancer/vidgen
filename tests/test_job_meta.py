@@ -112,5 +112,12 @@ h.get_job("m", nameless["job_id"])
 names = sorted(p["ResponseContentDisposition"] for p in signed if "ResponseContentDisposition" in p)
 assert names == ['attachment; filename="vidgen-eeeeeeee.mp4"', 'attachment; filename="vidgen-eeeeeeee.subtitles.srt"'], names
 assert "saves" not in body(h.get_job("m", plain)), "only for done jobs"
+odd = dict(done, job_id="f" * 32, result=json.dumps({"photo_1_key": "outputs/m/f/photo_1.png", "photo 2!_key": "outputs/m/f/p2.png"}))
+table[odd["job_id"]] = odd
+signed.clear()
+h.get_job("m", odd["job_id"])
+names = sorted(p["ResponseContentDisposition"] for p in signed if "ResponseContentDisposition" in p)
+assert names == ['attachment; filename="lighthouse.photo_1.png"',
+                 'attachment; filename="vidgen-ffffffff.photo2.png"'], names
 
 print("test_job_meta: ok")

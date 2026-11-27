@@ -32,7 +32,7 @@ assert re.findall(r'^import .* from "([^"]+)";', app, re.M) == ["/m/sign.js"]
 # ---- the API calls it makes are ones the phone is meant to make
 ALLOWED = {("GET", "/jobs"), ("POST", "/jobs/{id}/cancel"), ("POST", "/jobs/{id}/rerun"), ("POST", "/jobs"),
            ("POST", "/uploads"), ("GET", "/avatars"), ("GET", "/jobs/{id}"), ("PUT", "/avatars/default"),
-           ("POST", "/avatars/{id}/images")}
+           ("POST", "/avatars/{id}/images"), ("GET", "/status")}
 calls = set()
 for method, path in re.findall(r'call\("([A-Z]+)", [`"]([^`"]+)[`"]', app):
     calls.add((method, re.sub(r"\$\{[^}]+\}", "{id}", path)))
