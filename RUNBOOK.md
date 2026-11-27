@@ -141,6 +141,7 @@ Jobs are queued grouped by model, so a g6e.4xlarge loads each big model only onc
 
 ```bash
 vidgen jobs              # local list: queued / running (with progress) / downloaded / failed / cancelled
+vidgen jobs forget ID     # drop a job (e.g. one the phone started) so the watcher doesn't download it
 vidgen cancel 3f9a       # job id or a unique prefix
 vidgen status            # instance state, queue depth, minutes running, uptime hold
 vidgen wake              # start the machine now (e.g. before a batch); also clears an uptime hold
@@ -389,7 +390,20 @@ vidgen ui --port 9000 --no-browser
 - **Photo viewer**: in a job's preview, **Full screen** under a photo (or a click on it) opens it full screen; **Previous** / **Next** or the arrow keys go through all of the job's photos, **Close** or Esc leaves.
 - **Create**: forms for video, photos and story (submitted like CLI jobs and downloaded by the watcher), each with a **Realism** section (look, natural skin, candid, film grain, best); Photos also has **Series in one place**. **Write** writes a story from a premise; **Use in Story** in History loads it into the Story form. And **Avatar**: name, optional description and 1-12 photos of the same person (png/jpg/webp, up to 25 MB each). Thumbnails show the order; ◀ ▶ reorder and ✕ removes, and photo 1 is the main image. "Make it my default avatar" is off unless you have no avatar yet. An existing name is replaced (its previous version goes into history). Same as `vidgen avatar refresh --name N --image … --image …`. Each avatar card has **Make default** and **Delete**: Delete asks first, removes the avatar's images, earlier versions and media from the server (no undo; refused while a job that uses it is queued or running) and can also delete its own LoRAs and their training photos (unticked by default). Same as `vidgen avatar delete`.
 - **Learning**: mark a folder (Choose… opens the macOS folder picker) as a theme: name, kind (character, style, motion, place) and trigger word. The folder is scanned against the clips each kind needs and problems are listed; themes live in `~/.vidgen/themes.json`. **Upload** copies the theme's clips and photos to your private S3 bucket (see "Learning datasets" below) with a progress bar; the card then shows "up to date" or "changed since upload". Train arrives with the trainer.
+- **Phones**: the phone page's link (Copy link), **Pair a phone**, waiting pairing requests and paired phones. See "Phone (Android)" below.
 - **Security**: the page is only served on 127.0.0.1, rejects other Host headers, and its API calls need a per-session token, so other websites cannot use it.
+
+### Phone (Android)
+
+A small page for the phone, served by the API at `<api_url>/m` (`make output` shows `api_url`; the dashboard's Phones panel has the link). Open it in Chrome on the phone and install it (Chrome menu → **Add to Home screen**) so it opens like an app and Chrome keeps its key. The full dashboard still runs only on the Mac.
+
+- **What it does**: History (status, progress and time left, Cancel, Re-run, Copy prompt, **Open** for a finished job's photos and videos with **Save**, which downloads to the phone's Downloads/gallery), Create (video, photos with a photo from the phone, story), Avatars (make default, add photos) and a line saying whether the render box is off, starting or on.
+- **Pairing** (once per phone): on the Mac, `vidgen ui` → Phones → **Pair a phone** (opens pairing for 10 minutes). On the phone, **Pair this phone** shows a 6-digit code and a key fingerprint; the Mac lists the same request, and **Approve** it only if the code and key match the phone in your hand. The phone then signs as you and shares your history. Approving closes pairing again.
+- **Fallback**: on the phone, "Or add the key with Terraform" shows its key line: add it to `authorized_ssh_public_keys` (with the same comment as your Mac key) and `make plan && make apply`.
+- **Remove a phone**: Phones → **Remove**. Its requests are refused within ~30 s.
+- **The Mac downloads phone jobs too**: the watcher picks up jobs started elsewhere in the last 7 days, under the file name the phone gave (never over an existing file). `vidgen jobs forget ID` stops one.
+- **Its key**: made by the phone's browser, can't be exported, kept in the page's storage. Clearing Chrome's site data (or not installing the page, when storage is short) loses it; pair again.
+- **Needs** Chrome 137 or later. Photos must be JPEG, PNG or WebP (HEIC: set the camera to JPEG). The phone's clock must be set automatically (requests carry a time).
 
 ### Learning datasets (`vidgen dataset`)
 
@@ -515,7 +529,8 @@ The queue is not strictly FIFO, so the worker may still run a job out of the pla
 
 | Limit | Value |
 |---|---|
-| Who can call the API | only holders of a private key listed in `authorized_ssh_public_keys` (ed25519 only) |
+| Who can call the API | only holders of a private key listed in `authorized_ssh_public_keys` (ed25519 only), or a phone paired from the dashboard (stored in `auth/devices.json`; can't pair or remove phones) |
+| Unsigned routes | `GET /m`, `GET /m/{file}` (the static phone page) and `POST /pair` (only while you have pairing open, 1 request/s) |
 | Request freshness | signature timestamp within ±5 min. Keep your clock synced |
 | Replay | each nonce is single-use |
 | Rate limit | 10 requests/s, bursts of 20 |
@@ -667,6 +682,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | Command | What it does |
 |---|---|
 | `vidgen jobs` | local list of jobs: pending, downloaded, where the files went |
+| `vidgen jobs forget ID...` | drop jobs from the local list and don't download them (also ones started on the phone; full id for one not downloaded yet) |
 | `vidgen cancel JOB_ID` | cancel a queued or running job (a unique prefix of the id is enough) |
 | `vidgen check` | one pass: download any finished jobs (what the watcher runs) |
 | `vidgen watch [--interval 45] [--until-done]` | check in the foreground until Ctrl-C (or until nothing is pending) |
