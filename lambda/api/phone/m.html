@@ -4,23 +4,112 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#1c1917">
 <title>vidgen</title>
 <link rel="manifest" href="/m/manifest.webmanifest">
 <style>
-  :root { --bg: #fafaf9; --fg: #1c1917; --muted: #57534e; --line: #e7e5e4; --accent: #2563eb; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #1c1917; --fg: #f5f5f4; --muted: #a8a29e; --line: #44403c; --accent: #60a5fa; } }
+  :root { --bg: #fafaf9; --card: #ffffff; --fg: #1c1917; --muted: #57534e; --line: #e7e5e4; --field: #78716c;
+          --accent: #1d4ed8; --ok: #15803d; --err: #b91c1c; --warn: #854d0e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1917; --card: #292524; --fg: #f5f5f4; --muted: #a8a29e; --line: #44403c; --field: #a8a29e;
+            --accent: #93c5fd; --ok: #86efac; --err: #fca5a5; --warn: #fcd34d; }
+  }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); }
+  header .in { max-width: 640px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; }
+  nav { display: flex; gap: 4px; margin-left: auto; }
+  nav button { background: none; border: 0; color: var(--muted); padding: 8px 10px; border-radius: 8px; font: inherit; }
+  nav button[aria-current="page"] { color: var(--fg); font-weight: 700; box-shadow: inset 0 -3px 0 var(--accent); }
   main { max-width: 640px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 20px; margin: 4px 0 16px; }
-  .muted { color: var(--muted); }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  .muted, .sub { color: var(--muted); }
+  .sub { font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+  .err { color: var(--err); }
+  button { font: inherit; min-height: 44px; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--field);
+           background: var(--card); color: var(--fg); }
+  button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  button.small { min-height: 44px; padding: 4px 14px; font-size: 14px; }
+  button:disabled { opacity: .5; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input, textarea { font: inherit; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--field);
+                    background: var(--card); color: var(--fg); }
+  textarea { font: 13px/1.4 ui-monospace, monospace; word-break: break-all; }
+  label { display: block; font-weight: 600; margin: 12px 0 6px; }
+  ol { padding-left: 20px; }
+  code { font: 13px ui-monospace, monospace; overflow-wrap: anywhere; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; }
+  h2:focus { outline: none; }
+  .toolbar .muted { font-size: 13px; margin-left: auto; }
+  ul.jobs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .job { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .job .row { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; font-size: 14px; }
+  .job .row .muted { overflow-wrap: anywhere; }
+  .job .summary { margin: 6px 0; overflow-wrap: anywhere; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px;
+          border: 1px solid currentColor; }
+  .pill.done, .pill.downloaded { color: var(--ok); }
+  .pill.failed, .pill.cancelled { color: var(--err); }
+  .pill.running, .pill.queued { color: var(--warn); }
+  .pill.other { color: var(--muted); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .bar span { display: block; height: 100%; background: var(--accent); }
+  .note { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+  #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 480px; margin: 0 auto; z-index: 3;
+           background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 12px; }
 </style>
 </head>
 <body>
-<main>
+<header><div class="in">
   <h1>vidgen</h1>
-  <p id="status" class="muted">Loading…</p>
+  <nav id="nav" hidden aria-label="Sections">
+    <button type="button" data-view="history">History</button>
+  </nav>
+</div></header>
+<main>
+  <section id="boot">
+    <p id="boot-text" class="muted">Loading…</p>
+    <button type="button" id="boot-retry" hidden>Try again</button>
+  </section>
+
+  <section id="pair" hidden>
+    <h2 tabindex="-1">Pair this phone</h2>
+    <p id="pair-reason"></p>
+    <p class="muted">This phone made its own key. Its private half never leaves this browser; you add the public half
+      to your vidgen setup once.</p>
+    <label for="pair-name">Your vidgen name</label>
+    <input id="pair-name" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="the comment on your Mac key, e.g. dan">
+    <p id="pair-name-error" class="sub err" hidden>Use letters, digits and . _ @ - only.</p>
+    <p class="sub">Use the same name as your Mac key (shown in the Mac dashboard under "Pair a phone"), so both see one history.</p>
+    <div id="pair-steps">
+      <label for="pair-line">This phone's key</label>
+      <textarea id="pair-line" rows="5" readonly></textarea>
+      <p><button type="button" id="pair-copy" class="primary">Copy key</button></p>
+      <ol>
+        <li>Add the copied line to <code>authorized_ssh_public_keys</code> in <code>terraform/terraform.tfvars</code>.</li>
+        <li>Run <code>make plan</code> and <code>make apply</code> on the Mac.</li>
+        <li>Come back here and tap <strong>Try again</strong>.</li>
+      </ol>
+    </div>
+    <button type="button" id="pair-retry">Try again</button>
+  </section>
+
+  <section id="history" hidden>
+    <div class="toolbar">
+      <h2 tabindex="-1">History</h2>
+      <button type="button" id="history-refresh" class="small">Refresh</button>
+      <span id="history-updated" class="muted"></span>
+    </div>
+    <p id="history-stale" class="note err" role="status" hidden></p>
+    <p id="install-hint" class="note" hidden>Install this page (Chrome menu → <strong>Add to Home screen</strong>) so Chrome
+      keeps this phone's key; otherwise clearing site data means pairing again.</p>
+    <p id="history-empty" class="muted" hidden>No jobs yet.</p>
+    <ul id="history-list" class="jobs"></ul>
+  </section>
 </main>
+<div id="toast" role="status" hidden></div>
 <script src="/m/app.js" type="module"></script>
 </body>
 </html>

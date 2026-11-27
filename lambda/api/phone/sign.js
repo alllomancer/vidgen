@@ -132,7 +132,12 @@ export async function loadOrCreateKey() {
   return loadKey();
 }
 
-export class Unauthorized extends Error {}
+export class Unauthorized extends Error {
+  constructor(message, clock = false) {
+    super(message);
+    this.clock = clock; // true: the key is fine, the phone's clock is off
+  }
+}
 export class Offline extends Error {}
 
 /** A signed call to this API; JSON in and out. Throws Unauthorized on 401 (not paired, or the clock is off),
@@ -152,8 +157,8 @@ export async function signedFetch(key, method, path, body) {
   if (r.status === 401) {
     const server = Date.parse(r.headers.get("date") || "");
     const skew = Number.isFinite(server) ? Math.abs(server - Date.now()) / 1000 : 0;
-    throw new Unauthorized(skew > 240 ? "this phone's clock is off; set the time automatically and retry"
-                                      : "this phone isn't paired");
+    throw skew > 240 ? new Unauthorized("this phone's clock is off; set the time automatically and retry", true)
+                     : new Unauthorized("this phone isn't paired");
   }
   let out = null;
   try {
