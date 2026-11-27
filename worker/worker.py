@@ -1395,12 +1395,27 @@ def process(job_id, receipt):
     watch.start()
     try:
         models.set_loras(prepare_loras(params) if job["type"] in ("video", "story") else [])
-        result = RUNNERS[job["type"]](job, params, workdir)
-        if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only"):
-            result["realism"] = realism_check.check(
-                job["type"], params, result, workdir, download=lambda key, path: s3.download_file(BUCKET, key, path),
-                judge=models.judge_realism, progress=lambda msg: progress(job_id, msg),
+        def check_one(p, res):  # the AI-look check of one render (docs/specs/2026-11-27-realism-check.md)
+            return realism_check.check(
+                job["type"], p, res, tempfile.mkdtemp(dir=workdir),
+                download=lambda key, path: s3.download_file(BUCKET, key, path), judge=models.judge_realism,
+                progress=lambda msg: progress(job_id, msg),
                 screen=lambda paths: any(krea.flagged(x) for x in krea.score_images(paths)))
+
+        if params.get("realism_retries") and job["type"] in realism_check.MAIN_KEY:  # retry until it looks real
+            def copy(key, name):
+                new = f"outputs/{job['client']}/{job_id}/{name}"
+                s3.copy_object(Bucket=BUCKET, Key=new, CopySource={"Bucket": BUCKET, "Key": key})
+                return new
+            result = realism_check.retry(
+                job["type"], params, run=lambda p: RUNNERS[job["type"]](job, p, tempfile.mkdtemp(dir=workdir)),
+                check_one=check_one, copy=copy, progress=lambda msg: progress(job_id, msg),
+                seeds=lambda: int.from_bytes(os.urandom(4), "big"))
+        else:
+            result = RUNNERS[job["type"]](job, params, workdir)
+        if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only") \
+                and not params.get("realism_retries"):
+            result["realism"] = check_one(params, result)
             log(event="realism_check", job_id=job_id, score=result["realism"].get("score"),
                 error=result["realism"].get("error"), answer=result["realism"].get("answer"))
         if params.get("loras"):

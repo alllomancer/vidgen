@@ -547,6 +547,27 @@ def _realism_params(body):
 
 
 REALISM_CHECK_TYPES = ("video", "photos", "story")
+MAX_REALISM_RETRIES = 25  # docs/specs/2026-11-28-realism-retry.md
+
+
+def _realism_retries(body):
+    """Tries for "retry until it looks real", or None. Videos with it are 5 s clips (the body's seconds becomes 5)."""
+    n = body.get("realism_retries")
+    if n in (None, False, 0):
+        return None
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_REALISM_RETRIES:
+        raise ValueError(f"realism_retries must be 1-{MAX_REALISM_RETRIES} (tries)")
+    if body.get("type") not in ("photos", "video"):
+        raise ValueError("realism_retries is for photos (one picture) and video (5 s clips) jobs")
+    if body.get("realism_check") is not True:
+        raise ValueError("realism_retries needs realism_check (the AI-look check scores each try)")
+    if body.get("type") == "video":
+        if body.get("seconds") not in (None, "", 5):
+            raise ValueError("retrying until it looks real renders 5 s clips; leave seconds out or send 5")
+        if int(body.get("variations") or 1) != 1 or body.get("plan_only") or body.get("beats") or body.get("anchor_every"):
+            raise ValueError("realism_retries renders one 5 s clip per try: no variations, plan first, beats or anchoring")
+        body["seconds"] = 5
+    return n
 
 
 def _video_model(body, allowed=True):
@@ -2404,7 +2425,14 @@ def create_job(client, body):
         meta = _validate_meta(body["meta"]) if body.get("meta") is not None else {}
         if body.get("realism_check") not in (None, False) and body.get("type") not in REALISM_CHECK_TYPES:
             raise ValueError(f"realism_check is for {', '.join(REALISM_CHECK_TYPES)} jobs")
+        body = dict(body)
+        retries = _realism_retries(body)
         job_type, params = _validate(client, body)
+        if retries:
+            if job_type == "photos" and (params.get("count") != 1 or len(params.get("scenes") or []) > 1
+                                         or params.get("series")):
+                raise ValueError("realism_retries makes one picture: count 1, at most one scene, no series")
+            params["realism_retries"] = retries
         if job_type in ("video", "story"):
             params["avatars"] = _resolve_avatars(client, body.get("avatar"))
             if params.get("image_model") == "auto":

@@ -314,3 +314,68 @@ def _check(job_type, params, result, workdir, download, judge, progress, screen)
             out = dict(out, takes=[{"take": n, "score": v["score"], "signs": v["signs"]} for (n, _), v in zip(takes, verdicts)])
     out.update(checked=job_type, note=NOTE)
     return out
+
+
+# ---------------------------------------------------------------- retry until it looks real
+# docs/specs/2026-11-28-realism-retry.md
+
+PATIENCE = 6  # tries in a row without a better score before giving up
+MAIN_KEY = {"photos": "photo_1_key", "video": "video_key"}
+
+
+def _next_params(job_type, params, best, seed):
+    """The params for the next try: a new seed and the best attempt's suggested prompt (scene); nothing else."""
+    p = {k: v for k, v in params.items() if k not in ("realism_check", "realism_retries")}
+    if best is not None or p.get("seed") is None:  # try 1 renders the job as asked (its own seed, if it has one)
+        p["seed"] = seed
+    if best is not None:
+        v = best["verdict"]
+        if job_type == "video" and v.get("prompt"):
+            p["prompt"] = v["prompt"]
+        if job_type == "photos" and (v.get("scenes") or [None])[0]:
+            p["scenes"] = [{"prompt": v["scenes"][0]}]
+    return p
+
+
+def retry(job_type, params, run, check_one, copy, progress, seeds):
+    """Render, check, and render again from the best attempt's suggestion until the score is 0, PATIENCE tries bring
+    nothing better, or params["realism_retries"] tries are used. run(params) -> result; check_one(params, result) ->
+    verdict (score, or skipped / error); copy(key, name) -> key of a copy named name; seeds() -> a new seed.
+    Returns the job result: the best attempt's, with its files as attempt copies, every attempt's main file, and
+    realism / realism_retry."""
+    tries = int(params["realism_retries"])
+    attempts, files, best, since, stopped = [], {}, None, 0, f"{tries} tries"
+    for n in range(1, tries + 1):
+        progress(f"try {n}/{tries}" + (f" · best {best['score']}/10" if best else ""))
+        p = _next_params(job_type, params, best, seeds())
+        result = run(p)
+        copies = {k: copy(v, f"attempt_{n}_{os.path.basename(v)}") for k, v in result.items()
+                  if k.endswith("_key") and isinstance(v, str)}
+        if MAIN_KEY[job_type] in copies:
+            files[f"attempt_{n}_key"] = copies[MAIN_KEY[job_type]]
+        verdict = check_one(p, result)
+        used = p.get("prompt") if job_type == "video" else ((p.get("scenes") or [{}])[0].get("prompt")
+                                                             or (result.get("scenes") or [{}])[0].get("text", ""))
+        attempt = {"try": n, "score": verdict.get("score"), "signs": verdict.get("signs") or [], "prompt": used,
+                   "seed": p["seed"]}
+        attempts.append(attempt)
+        entry = {"score": verdict.get("score"), "verdict": verdict, "result": dict(result, **copies), "try": n}
+        if not isinstance(verdict.get("score"), int):  # skipped (sexual content) or failed: stop, keep what we have
+            stopped = verdict.get("skipped") or verdict.get("error") or "the check gave no score"
+            if best is None:
+                best = entry
+            break
+        if best is None or best["score"] is None or verdict["score"] < best["score"]:
+            best, since = entry, 0
+        else:
+            since += 1
+        if best["score"] == 0:
+            stopped = "score 0"
+            break
+        if since >= PATIENCE:
+            stopped = f"no better score in {PATIENCE} tries"
+            break
+    out = dict(best["result"], **files)
+    out["realism"] = best["verdict"]
+    out["realism_retry"] = {"tries": len(attempts), "best_try": best["try"], "stopped": stopped, "attempts": attempts}
+    return out
