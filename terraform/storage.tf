@@ -37,6 +37,24 @@ resource "aws_s3_bucket_cors_configuration" "data" {
   }
 }
 
+# Phone pairing state starts empty (the API can't tell a missing object from a forbidden one without ListBucket on
+# the whole bucket). Terraform only creates them; the API owns their content afterwards.
+resource "aws_s3_object" "devices" {
+  bucket       = aws_s3_bucket.data.id
+  key          = "auth/devices.json"
+  content      = "{}"
+  content_type = "application/json"
+  lifecycle { ignore_changes = [content, etag, content_type, metadata] }
+}
+
+resource "aws_s3_object" "pairing_open" {
+  bucket       = aws_s3_bucket.data.id
+  key          = "auth/pairing-open.json"
+  content      = jsonencode({ until = 0 })
+  content_type = "application/json"
+  lifecycle { ignore_changes = [content, etag, content_type, metadata] }
+}
+
 resource "aws_s3_bucket_policy" "data_tls_only" {
   bucket = aws_s3_bucket.data.id
   policy = jsonencode({

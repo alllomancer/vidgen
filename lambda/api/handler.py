@@ -272,7 +272,12 @@ def _devices():
     now = time.time()
     if _devices_cache["at"] is None or now - _devices_cache["at"] > DEVICES_CACHE_SECONDS:
         keys = {}
-        for b64, rec in _devices_doc().items():
+        try:
+            doc = _devices_doc()
+        except ClientError as e:  # can't read the list: no phone gets in (computer keys don't need it)
+            print(json.dumps({"event": "devices_unreadable", "error": str(e)[:200]}))
+            doc = {}
+        for b64, rec in doc.items():
             if not isinstance(rec, dict) or not isinstance(rec.get("client"), str):
                 continue
             try:

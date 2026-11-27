@@ -258,6 +258,35 @@ data "aws_iam_policy_document" "api" {
     }
   }
 
+  # Phone pairing (docs/specs/2026-11-27-phone-pairing.md): the paired-phone list and the pairing window, and one
+  # object per waiting request. Presigned links never point here: the API only presigns uploads/ and outputs/ keys.
+  statement {
+    sid     = "PhonePairing"
+    actions = ["s3:GetObject", "s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.data.arn}/auth/devices.json",
+      "${aws_s3_bucket.data.arn}/auth/pairing-open.json",
+      "${aws_s3_bucket.data.arn}/auth/pairing/*",
+    ]
+  }
+
+  statement {
+    sid       = "PhonePairingDrop"
+    actions   = ["s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.data.arn}/auth/pairing/*"]
+  }
+
+  statement {
+    sid       = "ListPairingRequests"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.data.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["auth/pairing/*"]
+    }
+  }
+
   statement {
     sid       = "ListAvatars"
     actions   = ["s3:ListBucket"]

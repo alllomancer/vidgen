@@ -174,4 +174,16 @@ assert request("DELETE /devices/{id}", "/x", MAC, None, {"id": b["device"]["id"]
 clock[0] += 31
 assert request("GET /jobs", "/jobs", pub_blob(31)) == (200, {"client": "noa"})
 
+# ---- the device list unreadable (S3 error): phones are refused with 401, computer keys still work
+real_get = s3.get_object
+def failing_get(Bucket, Key, Range=None):
+    if Key == "auth/devices.json":
+        raise KeyError("AccessDenied")
+    return real_get(Bucket, Key)
+s3.get_object = failing_get
+h._s3_json = lambda key: (_ for _ in ()).throw(KeyError("AccessDenied")) if key == "auth/devices.json" else s3.json(key)
+clock[0] += 31
+assert request("GET /jobs", "/jobs", pub_blob(31))[0] == 401
+assert request("GET /jobs", "/jobs", MAC) == (200, {"client": "dan"})
+
 print("test_pairing: ok")
