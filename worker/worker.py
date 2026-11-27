@@ -31,6 +31,7 @@ import mirror
 import photos
 import realism
 import realism_check
+import vlm32
 
 REGION = os.environ["AWS_REGION"]
 BUCKET = os.environ["BUCKET"]
@@ -219,6 +220,8 @@ def set_status(job_id, status, **extra):
     )
 
 
+# The AI-look critic: Qwen3-VL-32B in the Krea venv (vlm32.py), or the worker's own Qwen2.5-VL-7B.
+REALISM_CRITIC = os.environ.get("REALISM_CRITIC", "qwen3-vl-32b")
 PROGRESS_PREFIX = [""]  # "try 4/25 · best 3/10 · " while retrying until it looks real
 
 
@@ -1398,12 +1401,14 @@ def process(job_id, receipt):
     watch.start()
     try:
         models.set_loras(prepare_loras(params) if job["type"] in ("video", "story") else [])
-        def check_one(p, res):  # the AI-look check of one render (docs/specs/2026-11-27-realism-check.md)
+        def check_one(p, res, best=None, history=()):  # the AI-look check of one render
+            critic = models.critic_local if REALISM_CRITIC == "qwen2.5-vl-7b" else \
+                (lambda steps: vlm32.critic(steps, lambda msg: progress(job_id, msg)))
             verdict = realism_check.check(
                 job["type"], p, res, tempfile.mkdtemp(dir=workdir),
-                download=lambda key, path: s3.download_file(BUCKET, key, path), judge=models.judge_realism,
+                download=lambda key, path: s3.download_file(BUCKET, key, path), critic=critic,
                 progress=lambda msg: progress(job_id, msg),
-                screen=lambda paths: any(krea.flagged(x) for x in krea.score_images(paths)))
+                screen=lambda paths: any(krea.flagged(x) for x in krea.score_images(paths)), best=best, history=history)
             log(event="realism_check", job_id=job_id, score=verdict.get("score"), error=verdict.get("error"),
                 skipped=verdict.get("skipped"), answer=verdict.get("answer"))
             return verdict
@@ -1423,6 +1428,7 @@ def process(job_id, receipt):
         if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only") \
                 and not params.get("realism_retries"):
             result["realism"] = check_one(params, result)
+            result["realism"].pop("_images", None)
         if params.get("loras"):
             result["loras"] = [{k: l.get(k) for k in ("name", "version", "step", "weight")} for l in params["loras"]]
         set_status(job_id, "done", result=json.dumps(result), finished_at=int(time.time()))

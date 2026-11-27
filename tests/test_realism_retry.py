@@ -15,6 +15,7 @@ import handler as h  # noqa: E402
 def fake(job_type, scores, verdict_extra=None):
     """run/check/copy/seeds fakes: try n scores scores[n-1] and suggests "better n"."""
     runs, copies, n = [], [], [0]
+    calls.clear()
 
     def run(p):
         runs.append(p)
@@ -23,11 +24,12 @@ def fake(job_type, scores, verdict_extra=None):
             return {"photo_1_key": "outputs/m/j/photo_1.png", "scenes": [{"photo": 1, "text": "x"}], "seed": p["seed"]}
         return {"video_key": "outputs/m/j/video.mp4", "keyframe_key": "outputs/m/j/keyframe.png", "seed": p["seed"]}
 
-    def check_one(p, res):
+    def check_one(p, res, best=None, history=()):
+        calls.append((best, [dict(h) for h in history]))
         s = scores[n[0] - 1]
         if isinstance(s, str):
             return {"skipped": s} if s.startswith("skipped") else {"error": s}
-        v = {"score": s, "signs": [f"sign {n[0]}"]}
+        v = {"score": s, "signs": [f"sign {n[0]}"], "_images": [f"try{n[0]}.png"]}
         v.update({"prompt": f"better {n[0]}"} if job_type == "video" else {"scenes": [f"better {n[0]}"]})
         return v
 
@@ -40,6 +42,7 @@ def fake(job_type, scores, verdict_extra=None):
 
 
 progress = []
+calls = []  # (best images, history) each check got
 # ---- photos: 7 5 6 3 then six without a better score: stops after try 10, keeps try 4
 scores = [7, 5, 6, 3, 4, 4, 4, 4, 4, 4, 1]
 run, check_one, copy, seeds, runs, copies = fake("photos", scores)
@@ -90,6 +93,29 @@ run, check_one, copy, seeds, runs, copies = fake("video", [3, "the check failed:
 out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, run, check_one, copy, progress.append, seeds)
 assert len(runs) == 2 and out["realism_retry"]["stopped"] == "the check failed: boom" and out["realism"]["score"] == 3
 
+# ---- the check gets the best try's pictures and the history (scores, prompts, which is best)
+run, check_one, copy, seeds, runs, copies = fake("photos", [6, 4, 5])
+out = rc.retry("photos", dict(params, realism_retries=3), run, check_one, copy, progress.append, seeds)
+assert [b for b, _ in calls] == [None, ["try1.png"], ["try2.png"]], calls
+assert calls[2][1] == [{"try": 1, "score": 6, "signs": ["sign 1"], "prompt": "x", "seed": 100, "best": False},
+                       {"try": 2, "score": 4, "signs": ["sign 2"], "prompt": "better 1", "seed": 101, "best": True}], calls[2][1]
+assert "_images" not in out["realism"], "internal picture paths stay out of the result"
+
+# ---- the side-by-side comparison decides; the score only when it says same or nothing
+run, check_one, copy, seeds, runs, copies = fake("photos", [5, 6, 3, 2])
+verdicts = iter([None, "B", "A", "same"])  # try 2 scored worse but looked more real; try 3 better score, lost
+def compared(p, res, best=None, history=(), real=check_one):
+    v = real(p, res, best, history)
+    c = next(verdicts)
+    if c:
+        v["compared"] = c
+    return v
+out = rc.retry("photos", dict(params, realism_retries=4), run, compared, copy, progress.append, seeds)
+assert out["realism_retry"]["best_try"] == 4, out["realism_retry"]  # 2 beat 1 (B), 3 lost (A), 4 same -> 2 < 6
+assert [a.get("compared") for a in out["realism_retry"]["attempts"]] == [None, "B", "A", "same"]
+assert rc._better({"score": 9, "compared": "B"}, {"score": 2}) and not rc._better({"score": 1, "compared": "A"}, {"score": 5})
+assert rc._better({"score": 1, "compared": "same"}, {"score": 5}) and not rc._better({"score": 5}, {"score": 5})
+
 # ---- a render failing on a later try keeps the best so far; on try 1 it fails the job
 run, check_one, copy, seeds, runs, copies = fake("photos", [5, 3, 9])
 def failing(p, real=run):
@@ -120,10 +146,10 @@ def cancel_on_3(p, real=run):
 out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, cancel_on_3, check_one, copy, progress.append, seeds)
 assert out["realism_retry"]["stopped"] == "cancelled" and out["realism"]["score"] == 4
 run, check_one, copy, seeds, runs, copies = fake("video", [6, 4])
-def check_cancel_on_2(p, res, real=check_one):
+def check_cancel_on_2(p, res, best=None, history=(), real=check_one):
     if len(runs) == 2:
         raise JobCancelled("timed out after 360 min")
-    return real(p, res)
+    return real(p, res, best, history)
 out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, run, check_cancel_on_2, copy, progress.append, seeds)
 assert out["realism_retry"]["stopped"] == "cancelled" and out["realism_retry"]["best_try"] == 1
 try:

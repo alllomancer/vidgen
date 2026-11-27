@@ -1637,8 +1637,8 @@ worker.set_status = lambda job_id, status, **kw: statuses.append(status) or (
     done_results.append(_json.loads(kw["result"])) if status == "done" else None)
 checks = []
 real_check = worker.realism_check.check
-worker.realism_check.check = lambda job_type, params, result, workdir, download, judge, progress, screen: checks.append(
-    (job_type, sorted(result))) or {"score": 4, "signs": ["x"], "checked": job_type}
+worker.realism_check.check = lambda job_type, params, result, workdir, download, critic, progress, screen, best, history: \
+    checks.append((job_type, sorted(result))) or {"score": 4, "signs": ["x"], "checked": job_type, "_images": ["p.png"]}
 worker.RUNNERS["photos"] = lambda job, params, workdir: {"photo_1_key": "k"}
 worker.RUNNERS["write"] = lambda job, params, workdir: {"story_key": "s"}
 for jid, jtype, params in [("rc1", "photos", {"realism_check": True}), ("rc2", "photos", {}),
@@ -1647,11 +1647,15 @@ for jid, jtype, params in [("rc1", "photos", {"realism_check": True}), ("rc2", "
     worker.process(jid, "r")
 assert checks == [("photos", ["photo_1_key"])], "only flagged photos/video/story jobs are checked"
 assert done_results[-3]["realism"]["score"] == 4 and "realism" not in done_results[-2] and "realism" not in done_results[-1]
+assert "_images" not in done_results[-3]["realism"], "internal picture paths stay out of the stored result"
 worker.realism_check.check = real_check  # the real one: a failing judge still leaves the job done
 real_score_images = worker.krea.score_images
 screened = []
 worker.krea.score_images = lambda paths, progress=None: screened.append(list(paths)) or [0.0] * len(paths)
-worker.models.judge_realism = lambda images, text: "not json"
+# the default critic is the 32B model (vlm32, its own process): faked here; the 7B one is the fallback
+critic_steps = []
+real_vlm32_critic = worker.vlm32.critic
+worker.vlm32.critic = lambda steps, progress=None: critic_steps.append(steps) or ["not json"] * len(steps)
 worker.s3 = mock.MagicMock(download_file=lambda b, k, p: open(p, "wb").write(b"x"))
 job_items["rc4"] = {"job_id": "rc4", "status": "queued", "type": "photos", "client": "m",
                     "params": _json.dumps({"realism_check": True})}
@@ -1659,10 +1663,24 @@ worker.process("rc4", "r")
 assert statuses[-1] == "done" and done_results[-1]["realism"]["error"] == "the check couldn't read the model's answer"
 assert screened and screened[-1][0].endswith("photo_1.png"), "the hook runs the content filter on the outputs"
 worker.krea.score_images = lambda paths, progress=None: [0.99] * len(paths)  # flagged: skipped, model not asked
-worker.models.judge_realism = lambda images, text: (_ for _ in ()).throw(AssertionError("asked about a flagged image"))
+assert critic_steps and critic_steps[-1][0]["images"][0].endswith("photo_1.png"), "the 32B critic got the picture"
+worker.vlm32.critic = lambda steps, progress=None: (_ for _ in ()).throw(AssertionError("asked about a flagged image"))
 job_items["rc5"] = dict(job_items["rc4"], job_id="rc5")
 worker.process("rc5", "r")
 assert statuses[-1] == "done" and done_results[-1]["realism"]["skipped"].startswith("skipped:"), done_results[-1]
+# REALISM_CRITIC=qwen2.5-vl-7b: the worker's own model answers instead
+worker.krea.score_images = lambda paths, progress=None: [0.0] * len(paths)
+worker.REALISM_CRITIC = "qwen2.5-vl-7b"
+local_steps = []
+real_local = worker.models.critic_local
+worker.models.critic_local = lambda steps: local_steps.append(steps) or ['{"checks": {"skin": 1}, "signs": ["s"]}',
+                                                                         '{"prompt": "better"}'][:len(steps)]
+job_items["rc6"] = dict(job_items["rc4"], job_id="rc6")
+worker.process("rc6", "r")
+assert local_steps and done_results[-1]["realism"]["score"] == 1 and done_results[-1]["realism"]["scenes"] == ["better"]
+worker.REALISM_CRITIC = "qwen3-vl-32b"
+worker.models.critic_local = real_local
+worker.vlm32.critic = real_vlm32_critic
 worker.krea.score_images = real_score_images
 worker.RUNNERS.update(real_runners)
 assert worker.take_work_dir("abc") == os.path.join(worker.WORK_ROOT, "abc")

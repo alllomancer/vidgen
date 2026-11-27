@@ -1232,12 +1232,25 @@ def count_people(image_path):
     return _parse_count(_chat(messages, max_new_tokens=8))
 
 
-def judge_realism(image_paths, text):
-    """The AI-look critique (worker/realism_check.py builds the question and reads the answer): the images, in
-    order, then the question. Greedy, short. docs/specs/2026-11-27-realism-check.md"""
-    content = [{"type": "image", "image": f"file://{p}", "max_pixels": 768 * 768} for p in image_paths]
-    messages = [{"role": "user", "content": content + [{"type": "text", "text": text}]}]
-    return _chat(messages, max_new_tokens=1024, do_sample=False)
+def critic_local(steps):
+    """The AI-look critic on the worker's own Qwen2.5-VL-7B (REALISM_CRITIC=qwen2.5-vl-7b; the default is the 32B
+    model in vlm32.py): each step's images then its text, {stepN} filled with earlier answers; sampled steps use
+    their seed. docs/specs/2026-11-27-realism-check.md"""
+    import torch
+
+    answers = []
+    for step in steps:
+        text = re.sub(r"\{step(\d+)\}", lambda m: answers[int(m.group(1))], step["text"])
+        content = [{"type": "image", "image": f"file://{p}", "max_pixels": 768 * 768} for p in step.get("images") or []]
+        messages = [{"role": "user", "content": content + [{"type": "text", "text": text}]}]
+        kw = {"max_new_tokens": int(step.get("max_new_tokens") or 1024)}
+        if step.get("sample"):
+            torch.manual_seed(int(step.get("seed") or 0))
+            kw.update(do_sample=True, temperature=0.8, top_p=0.9)
+        else:
+            kw.update(do_sample=False)
+        answers.append(_chat(messages, **kw))
+    return answers
 
 
 def describe_video(video_path, instructions=""):

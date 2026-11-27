@@ -413,6 +413,8 @@ Tick **Retry until it looks real** in the Video or Photos form (dashboard or pho
 - **Result**: the best try is the job's photo or video; every try comes along as `attempt_<n>` with its score, and the details list each try's score and prompt ("best after 9 tries", **(kept)** marks the winner); `realism.json` next to the files lists every try's score, prompt and seed.
 - **Cost**: about 1-2 minutes per try on the g7e; 25 tries is up to ~40 minutes of GPU. Progress shows "try 7/25 · best 3/10".
 - A try whose check is skipped (sexual content) or fails ends the loop; the best try so far is kept.
+- **How it improves**: each try's new prompt is written from the giveaways found and from every earlier try's prompt and score, and a try only replaces the best when the vision model, shown both side by side, says it looks more real.
+- **The critic**: Qwen3-VL-32B (downloaded on first use, ~66 GB, then kept on the disk and in the model mirror). It needs the GPU to itself, so each check adds roughly 1-2 minutes. `REALISM_CRITIC=qwen2.5-vl-7b` in `/etc/ai-video.env` (then Restart worker) uses the smaller built-in model instead.
 
 ### Phone (Android)
 

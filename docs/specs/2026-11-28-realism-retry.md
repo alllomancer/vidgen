@@ -69,3 +69,21 @@ realism settings between tries (the suggestions are prompt-only).
 
 `tests/test_realism_retry.py`: the loop with fake render/check/copy (stops, prompts, seeds, files, skip), API
 validation; page tests for the new controls.
+
+## Update: a better critic and a loop that learns (2026-11-28)
+
+The user found the improvement rate poor. Research (see the conversation's sources: artifact benchmarks show even
+frontier models are weak at spotting artifacts, Qwen2.5-VL-7B among the weaker; iterative prompt-refinement papers
+feed earlier attempts back to the rewriter) led to two changes, approved by the user:
+
+- **The loop learns.** Each try's critique is three steps in one critic call: *judge* (deterministic: the ten
+  checks and signs), *rewrite* (sampled, seeded per try, so it doesn't repeat itself; given the judge's findings and
+  every earlier try's prompt, score and signs, marked best), and *compare* (the best try's pictures and this try's,
+  side by side: which looks more real). The comparison decides whether a try beats the best; the score only when it
+  says "same" or can't be read (`_better`). The attempts list records `compared`.
+- **A stronger critic.** Qwen3-VL-32B-Instruct (Apache-2.0, ungated, revision `0cfaf48183f5`, ~66 GB bf16) runs in
+  the Krea venv (it has transformers 5.20 with Qwen3-VL) through `vlm_judge.py`: weights from the model mirror or
+  Hugging Face on first use (`vlm32.py`, mirror unit `qwen3-vl-32b/0cfaf48183f5`), the GPU freed first, one model
+  load per try for all steps. `REALISM_CRITIC=qwen2.5-vl-7b` in `/etc/ai-video.env` goes back to the worker's own 7B
+  model (`models.critic_local`). Cost: the 32B load and freeing the GPU add roughly 1-2 min per try (the render model
+  loads again afterwards); measured in the live check.
