@@ -105,6 +105,12 @@ resource "aws_apigatewayv2_route" "routes" {
     # The phone page: static files, no signature (docs/specs/2026-11-27-phone-ui.md).
     "GET /m",
     "GET /m/{file}",
+    # Phone pairing (docs/specs/2026-11-27-phone-pairing.md): POST /pair is unsigned, the rest need a computer key.
+    "POST /pair",
+    "GET /pairings",
+    "POST /pairings/{code}/approve",
+    "DELETE /pairings/{code}",
+    "DELETE /devices/{id}",
   ])
 
   api_id    = aws_apigatewayv2_api.main.id

@@ -1,10 +1,14 @@
 """Front-door API for the AI video pipeline.
 
-Every route except the phone page (GET /m, GET /m/{file}) requires a request signed with an authorized SSH
+Every route except the phone page (GET /m, GET /m/{file}) and POST /pair requires a request signed with an authorized SSH
 ed25519 key (see `_authenticate`). Routes:
   POST /jobs                     submit a job -> {job_id, status, avatars, instance}
                                  (optional meta: out_name, avatar_name, krea_lora, source; returned by the GETs)
   GET  /m, GET /m/{file}         the phone page (static, no signature; docs/specs/2026-11-27-phone-ui.md)
+  POST /pair                     a phone asks to pair (no signature) -> {code}; docs/specs/2026-11-27-phone-pairing.md
+  GET  /pairings                 waiting requests and paired phones (computer keys only)
+  POST /pairings/{code}/approve  pair that phone as this client;  DELETE /pairings/{code} declines it
+  DELETE /devices/{id}           remove a paired phone
   GET  /jobs/{job_id}            job status / result -> presigned download URLs when done
   POST /jobs/{job_id}/cancel     cancel a queued or running job
   GET  /jobs                     your latest 100 jobs: summary, status, run/wait seconds
@@ -184,7 +188,7 @@ def _verify_sshsig(armored, message):
         raise ValueError("wrong signature namespace")
     if hash_alg not in (b"sha256", b"sha512"):
         raise ValueError("unsupported hash")
-    if pubkey not in _authorized:
+    if pubkey not in _authorized and pubkey not in _devices():
         raise ValueError("key not authorized")
 
     key_type, o = _read_string(pubkey, 0)
@@ -237,7 +241,163 @@ def _authenticate(event, headers, raw_body):
             print(json.dumps({"event": "auth_failed", "reason": "replayed nonce"}))
             return None
         raise
-    return _authorized[pubkey]
+    if pubkey in _authorized:
+        return _authorized[pubkey]
+    event["_vidgen_device"] = True  # a paired phone: may not manage phones (docs/specs/2026-11-27-phone-pairing.md)
+    return _devices()[pubkey]["client"]
+
+
+# ---------------------------------------------------------------- phone pairing
+# A phone asks with POST /pair (unsigned, only its public key) and gets a 6-digit code; a computer key (from the
+# Terraform list) approves it from the dashboard, and the key is stored with the approver's client name. Paired keys
+# sign like Terraform keys but can't manage phones. docs/specs/2026-11-27-phone-pairing.md
+
+PAIRING_KEY = "auth/pairing.json"
+DEVICES_KEY = "auth/devices.json"
+PAIR_TTL = 600
+PAIR_MAX_PENDING = 5
+PAIR_MAX_BODY = 1024
+DEVICES_CACHE_SECONDS = 30
+DEVICE_NAME = re.compile(r"[A-Za-z0-9 ._-]{1,32}")
+_devices_cache = {"at": None, "keys": {}}
+
+
+def _devices():
+    """{key blob: device record} of paired phones, re-read from S3 at most every DEVICES_CACHE_SECONDS."""
+    now = time.time()
+    if _devices_cache["at"] is None or now - _devices_cache["at"] > DEVICES_CACHE_SECONDS:
+        doc = _s3_json(DEVICES_KEY) or {}
+        keys = {}
+        for b64, rec in (doc.items() if isinstance(doc, dict) else []):
+            try:
+                keys[base64.b64decode(b64, validate=True)] = rec
+            except ValueError:
+                continue
+        _devices_cache.update(at=now, keys=keys)
+    return _devices_cache["keys"]
+
+
+def _devices_doc():
+    doc = _s3_json(DEVICES_KEY) or {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _save_devices(doc):
+    _put_json(DEVICES_KEY, doc)
+    _devices_cache["at"] = None  # this container sees the change at once; others within 30 s
+
+
+def _pairing_requests():
+    """Waiting requests younger than PAIR_TTL: {code: {public_key, requested_at, agent}}."""
+    doc = _s3_json(PAIRING_KEY) or {}
+    now = time.time()
+    return {c: r for c, r in (doc.items() if isinstance(doc, dict) else [])
+            if isinstance(r, dict) and now - (r.get("requested_at") or 0) <= PAIR_TTL}
+
+
+def _parse_ed25519(text):
+    """The wire blob of an "ssh-ed25519 AAAA... [comment]" line; ValueError otherwise."""
+    parts = text.split() if isinstance(text, str) else []
+    if len(parts) < 2 or parts[0] != "ssh-ed25519":
+        raise ValueError("public_key must be an ssh-ed25519 key line")
+    try:
+        blob = base64.b64decode(parts[1], validate=True)
+        key_type, off = _read_string(blob, 0)
+        key, off = _read_string(blob, off)
+    except ValueError:
+        raise ValueError("public_key is not valid base64 key data")
+    if key_type != b"ssh-ed25519" or len(key) != 32 or off != len(blob):
+        raise ValueError("public_key is not an ed25519 key")
+    return blob
+
+
+def request_pairing(event, raw):
+    """POST /pair (unsigned)."""
+    if len(raw) > PAIR_MAX_BODY:
+        return _resp(413, {"error": "request too large"})
+    try:
+        body = json.loads(raw or b"{}")
+        blob = _parse_ed25519((body or {}).get("public_key") if isinstance(body, dict) else None)
+    except (ValueError, UnicodeDecodeError) as e:
+        return _resp(400, {"error": str(e) if isinstance(e, ValueError) and str(e).startswith("public_key")
+                           else "body must be JSON with public_key"})
+    if blob in _authorized or base64.b64encode(blob).decode() in _devices_doc():
+        return _resp(409, {"error": "already paired"})
+    b64 = base64.b64encode(blob).decode()
+    pending = {c: r for c, r in _pairing_requests().items() if r.get("public_key") != b64}  # asking again replaces
+    if len(pending) >= PAIR_MAX_PENDING:
+        return _resp(429, {"error": "too many pairing requests; try again in a few minutes"})
+    code = None
+    while code is None or code in pending:
+        code = f"{secrets.randbelow(10 ** 6):06d}"
+    agent = str(((event.get("requestContext") or {}).get("http") or {}).get("userAgent") or "")[:160]
+    now = int(time.time())
+    pending[code] = {"public_key": b64, "requested_at": now, "agent": agent}
+    _put_json(PAIRING_KEY, pending)
+    print(json.dumps({"event": "pair_requested", "pending": len(pending)}))
+    return _resp(200, {"code": code, "expires_at": now + PAIR_TTL})
+
+
+def list_pairings(client):
+    pending = [{"code": c, "requested_at": r["requested_at"], "agent": r.get("agent", "")}
+               for c, r in sorted(_pairing_requests().items(), key=lambda kv: kv[1]["requested_at"])]
+    devices = [{k: d.get(k) for k in ("id", "name", "client", "added_at")}
+               for d in _devices_doc().values() if isinstance(d, dict) and d.get("client") == client]
+    return _resp(200, {"pending": pending, "devices": sorted(devices, key=lambda d: d.get("added_at") or 0)})
+
+
+def approve_pairing(client, code, body):
+    name = body.get("name") if isinstance(body, dict) else None
+    name = "phone" if name in (None, "") else name
+    if not isinstance(name, str) or not DEVICE_NAME.fullmatch(name):
+        return _resp(400, {"error": "name: 1-32 letters, digits, spaces or . _ -"})
+    pending = _pairing_requests()
+    req = pending.pop(str(code), None)
+    if not req:
+        return _resp(404, {"error": "no waiting request with that code (they last 10 minutes)"})
+    devices = _devices_doc()
+    device = {"id": secrets.token_hex(4), "client": client, "name": name, "added_at": int(time.time())}
+    devices[req["public_key"]] = device
+    _save_devices(devices)
+    _put_json(PAIRING_KEY, pending)
+    print(json.dumps({"event": "device_paired", "client": client, "device": device["id"]}))
+    return _resp(200, {"device": device})
+
+
+def decline_pairing(code):
+    pending = _pairing_requests()
+    if pending.pop(str(code), None) is None:
+        return _resp(404, {"error": "no waiting request with that code"})
+    _put_json(PAIRING_KEY, pending)
+    return _resp(200, {"declined": True})
+
+
+def revoke_device(client, device_id):
+    devices = _devices_doc()
+    match = [k for k, d in devices.items() if isinstance(d, dict) and d.get("id") == device_id and d.get("client") == client]
+    if not match:
+        return _resp(404, {"error": "no such phone"})
+    for k in match:
+        devices.pop(k)
+    _save_devices(devices)
+    print(json.dumps({"event": "device_revoked", "client": client, "device": device_id}))
+    return _resp(200, {"removed": True})
+
+
+PAIRING_ROUTES = ("GET /pairings", "POST /pairings/{code}/approve", "DELETE /pairings/{code}", "DELETE /devices/{id}")
+
+
+def pairing_route(event, client, route, body):
+    if event.get("_vidgen_device"):
+        return _resp(403, {"error": "only a computer key can manage phones"})
+    params = event.get("pathParameters") or {}
+    if route == "GET /pairings":
+        return list_pairings(client)
+    if route == "POST /pairings/{code}/approve":
+        return approve_pairing(client, params.get("code"), body)
+    if route == "DELETE /pairings/{code}":
+        return decline_pairing(params.get("code"))
+    return revoke_device(client, params.get("id"))
 
 
 def _instance(instance_id=INSTANCE_ID):
@@ -2533,6 +2693,9 @@ def handler(event, context):
         return phone_file(None)
     if event.get("routeKey") == "GET /m/{file}":
         return phone_file((event.get("pathParameters") or {}).get("file"))
+    if event.get("routeKey") == "POST /pair":
+        raw = event.get("body") or ""
+        return request_pairing(event, base64.b64decode(raw) if event.get("isBase64Encoded") else raw.encode())
 
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     raw = event.get("body") or ""
@@ -2547,6 +2710,8 @@ def handler(event, context):
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _resp(400, {"error": "body must be JSON"})
 
+    if route in PAIRING_ROUTES:
+        return pairing_route(event, client, route, body)
     if route == "POST /jobs":
         return create_job(client, body)
     params = event.get("pathParameters") or {}
