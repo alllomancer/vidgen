@@ -15,7 +15,7 @@ Jira: N/A
 - [ ] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS
 - [ ] Task 8: Phone Job screen (results, Save) and Avatars
 - [ ] Task 9: "Pair a phone" in the dashboard, docs
-- [ ] Task 10: Live check on an iPhone
+- [ ] Task 10: Live check on the Android phone
 
 ## Tasks
 
@@ -81,7 +81,8 @@ accepted by `_verify_sshsig`, key not extractable); skipped with a message when 
 **What**: `app.js` first run: create the key, ask for the comment, show the `ssh-ed25519 ... <comment>` line with
 Copy and the "add to `authorized_ssh_public_keys`, `make apply`" steps; a 401 returns here ("This phone isn't paired
 yet"). Once paired: History from `GET /jobs` (summary, status, progress and time left, Cancel, Re-run, Copy prompt),
-refreshing every 10 s while visible. "Add to Home Screen to keep this phone paired" hint.
+refreshing every 10 s while visible. Calls `navigator.storage.persist()`; if not granted, shows "Install this page
+(Add to Home screen) to keep this phone paired".
 **Files**: `lambda/api/phone/app.js`, `lambda/api/phone/m.html`, `tests/test_phone_page.py` (new: static checks
 like `tests/test_ui_page.py` — no inline scripts, only `/m/*` and signed API paths fetched)
 **Depends on**: Task 5
@@ -91,7 +92,8 @@ with the phone key added: History matches `vidgen ui` (spec criterion 3)
 ### Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS
 
 **What**: Create screen with the dashboard's basic fields for video, photos and story, avatar picker from
-`GET /avatars`, sending `meta {source: phone, out_name}`. Photo input: HEIC/other converted to JPEG 0.92 via canvas,
+`GET /avatars`, sending `meta {source: phone, out_name}`. Photo input: png/jpg/webp as picked, other decodable formats converted to JPEG 0.92 via canvas,
+undecodable ones (HEIC) refused with the spec's message,
 `POST /uploads` presigned PUT, then `upload_keys`. Terraform: `aws_s3_bucket_cors_configuration` with the API origin
 only, PUT, `content-type`, `ETag`, 3600 s.
 **Files**: `lambda/api/phone/app.js`, `terraform/storage.tf`, `tests/test_phone_page.py`
@@ -103,24 +105,27 @@ browser PUT from another origin failing preflight)
 ### Task 8: Phone Job screen (results, Save) and Avatars
 
 **What**: Job screen re-fetches `GET /jobs/{id}` on open; photos and mp4s shown inline from presigned links, a
-Save link per file (opens the file for Share → Save). Avatars: list, set default, add reference photos (same upload
+Save button per file using the new `saves` links (`GET /jobs/{id}` returns them, presigned with
+`ResponseContentDisposition: attachment`). Avatars: list, set default, add reference photos (same upload
 path as Task 7).
-**Files**: `lambda/api/phone/app.js`, `tests/test_phone_page.py`
+**Files**: `lambda/api/phone/app.js`, `lambda/api/handler.py`, `tests/test_phone_page.py`, `tests/test_job_meta.py`
 **Depends on**: Task 7
-**Verify**: `python3 -B tests/test_phone_page.py`; on the phone a finished video plays and saves to Photos
+**Verify**: `python3 -B tests/test_phone_page.py`; `python3 -B tests/test_job_meta.py` (`saves` links carry the attachment
+disposition); on the phone a finished video plays and Save puts it in the gallery
 
 ### Task 9: "Pair a phone" in the dashboard, docs
 
 **What**: Dashboard Settings → "Pair a phone": the `/m` URL as a QR code (generated in the page, no CDN) and the
 Mac key's comment to reuse; `ui.py` adds `GET /api/phone` returning `{url, comment}` from the config. README
-(phone section), RUNBOOK (pairing, revoking, Safari storage eviction), `CHANGELOG.md` dated entry.
+(phone section), RUNBOOK (pairing, revoking, installing the page so Chrome keeps the key), `CHANGELOG.md` dated entry.
 **Files**: `cli/ui.py`, `cli/ui.html`, `README.md`, `RUNBOOK.md`, `CHANGELOG.md`
 **Depends on**: Task 6
 **Verify**: `make test` (`tests/test_ui_page.py` covers the new section); the QR opens `/m` on the phone
 
-### Task 10: Live check on an iPhone
+### Task 10: Live check on the Android phone
 
-**What**: Pair an iPhone; create a photos job from the phone; watch it on both devices; Save a photo to Photos;
+**What**: Pair the Android phone in Chrome and install the page; create a photos job from the phone; watch it on
+both devices; Save a photo and find it in the gallery;
 confirm the Mac watcher downloaded it as `adopted`; re-run from the Mac; revoke the key → 401 and pairing screen.
 Record results in the spec's Live check section.
 **Files**: `docs/specs/2026-11-27-phone-ui.md`
