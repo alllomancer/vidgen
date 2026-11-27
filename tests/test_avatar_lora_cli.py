@@ -59,6 +59,14 @@ for args, msg in [((high,), "not a Krea 2 LoRA"), ((None, krea), "not a Wan LoRA
         raise AssertionError(args)
     except vidgen.ApiError as e:
         assert msg in str(e) and not calls and not puts, (args, e, calls)
+# a good Krea file with a bad Wan one: nothing at all is uploaded (no half-done result)
+calls.clear()
+puts.clear()
+try:
+    vidgen.avatar_lora_upload("dana", krea, krea)
+    raise AssertionError("wrong Wan kind")
+except vidgen.ApiError as e:
+    assert "not a Wan LoRA" in str(e) and not calls and not puts, (e, calls)
 for args in [(), (None, None, low)]:
     try:
         vidgen.avatar_lora_upload("dana", *args)

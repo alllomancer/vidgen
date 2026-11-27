@@ -1071,6 +1071,8 @@ def avatar_command(args):
     elif args.action == "lora":
         if not args.name:
             raise ApiError("usage: vidgen.py avatar lora --name N [--krea FILE] [--wan FILE | --wan-high F --wan-low F]")
+        if args.wan and (args.wan_high or args.wan_low):
+            raise ApiError("give --wan (one file) or --wan-high with --wan-low, not both")
         for r in avatar_lora_upload(args.name, args.krea, args.wan or args.wan_high, args.wan_low):
             what = "Krea 2" if r.get("model") == "krea2" else "Wan"
             print(f"{what} LoRA for '{r['avatar']}' is now {r['name']} v{r['version']} (trigger '{r['trigger']}')")
@@ -1359,18 +1361,18 @@ def avatar_lora_upload(name, krea=None, wan=None, wan_low=None):
         raise ApiError("give a Krea 2 LoRA (--krea) and/or a Wan LoRA (--wan, or --wan-high with --wan-low)")
     if wan_low and not wan:
         raise ApiError("--wan-low needs --wan-high")
-    out = []
-    for kind, high, low, want in (("krea", krea, None, "krea2"), ("wan", wan, wan_low, "t2v")):
-        if not high:
-            continue
-        r = _upload_lora(f"/avatars/{name.lower()}/loras/{kind}", high, low, None, expect=want)
-        out.append(r)
-    return out
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name.lower()):
+        raise ApiError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    slots = [(kind, high, low, want) for kind, high, low, want in
+             (("krea", krea, None, "krea2"), ("wan", wan, wan_low, "t2v")) if high]
+    for _, high, low, want in slots:  # every file checked before any is uploaded: no half-done upload
+        _check_lora_files([os.path.expanduser(p) for p in ([high, low] if low else [high])], want)
+    return [_upload_lora(f"/avatars/{name.lower()}/loras/{kind}", high, low, None, expect=want)
+            for kind, high, low, want in slots]
 
 
-def _upload_lora(base, high, low, register_body, expect=None):
-    """Check the file(s) here, reserve at <base>/uploads, PUT them, register at <base>/versions/<N>."""
-    paths = [os.path.expanduser(p) for p in ([high, low] if low else [high])]
+def _check_lora_files(paths, expect=None):
+    """The files' kinds (krea2 | t2v) after the local checks; ApiError for a bad file or one of the wrong kind."""
     for p in paths:
         if not p.lower().endswith(".safetensors"):
             raise ApiError(f"{p}: must be a .safetensors file")
@@ -1384,6 +1386,13 @@ def _upload_lora(base, high, low, register_body, expect=None):
         raise ApiError(f"{os.path.basename(wrong[0])} is not {'a Krea 2 LoRA' if expect == 'krea2' else 'a Wan LoRA'}")
     if "krea2" in kinds and len(paths) > 1:
         raise ApiError("Krea 2 LoRAs are one file; use --file")
+    return kinds
+
+
+def _upload_lora(base, high, low, register_body, expect=None):
+    """Check the file(s) here, reserve at <base>/uploads, PUT them, register at <base>/versions/<N>."""
+    paths = [os.path.expanduser(p) for p in ([high, low] if low else [high])]
+    kinds = _check_lora_files(paths, expect)
     model = kinds[0]
     sizes = {part: os.path.getsize(path) for part, path in zip(("high", "low"), paths)}
     r = api("POST", f"{base}/uploads", {"files": "pair" if low else "single", "model": model, "sizes": sizes})

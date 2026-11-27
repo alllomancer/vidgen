@@ -27,6 +27,9 @@ assert all(f'name="{n}"' in page for n in ("krea", "wan", "wan_low")) and "`${pa
 # the Phones panel draws the link's QR code from ui.py's rows, as SVG elements (no HTML, no outside script)
 assert 'id="phone-qr"' in page and "function drawQr(" in script and "drawQr(r.qr)" in script
 assert "/^[01]+$/.test(r)" in script
+# an <svg> has no .hidden property: the QR shows only if the attribute is removed
+qr_fn = script[script.index("function drawQr("):script.index("api(\"GET\", \"/api/phone\")")]
+assert 'svg.removeAttribute("hidden")' in qr_fn and "svg.hidden = false" not in qr_fn
 
 # the AI-look toggle is in the video, photos and story forms, and sent with the job
 assert page.count('name="realism_check" data-remember="realism_check"') == 3

@@ -525,14 +525,14 @@ form:not(.krea) .krea-text { display: none !important; }
     <p class="hint wide">LoRAs trained elsewhere for this person. Each becomes the next version of the avatar's own LoRA and
       is used right away (trigger word: the avatar's name). Fill one or both.</p>
     <label class="wide">Krea 2 LoRA (one .safetensors; Krea photos and first frames)
-      <span class="row"><input name="krea" placeholder="/full/path/krea.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="krea">Choose…</button></span></label>
+      <span class="row"><input name="krea" placeholder="/full/path/krea.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="krea" aria-label="Choose the Krea 2 file">Choose…</button></span></label>
     <label class="wide">Wan LoRA (one file for both experts, or the high-noise file; videos)
-      <span class="row"><input name="wan" placeholder="/full/path/wan_high.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan">Choose…</button></span></label>
+      <span class="row"><input name="wan" placeholder="/full/path/wan_high.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan" aria-label="Choose the Wan file">Choose…</button></span></label>
     <label class="wide">Wan low-noise file (optional, with a high-noise file above)
-      <span class="row"><input name="wan_low" placeholder="/full/path/wan_low.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan_low">Choose…</button></span></label>
+      <span class="row"><input name="wan_low" placeholder="/full/path/wan_low.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan_low" aria-label="Choose the Wan low-noise file">Choose…</button></span></label>
     <p class="hint wide err" id="avatar-lora-err" role="alert"></p>
     <div class="wide" style="display:flex;gap:8px;justify-content:flex-end">
-      <button value="upload" class="primary">Upload</button>
+      <button value="upload" class="primary" id="avatar-lora-upload">Upload</button>
       <button value="">Cancel</button>
     </div>
   </form>
@@ -1171,6 +1171,13 @@ function renderUploadedLoras() {
   }
   $("uploaded-loras").innerHTML = rows.length ? `<h3 style="font-size:13px;margin:12px 0 4px">Uploaded</h3><ul class="plain">${rows.join("")}</ul>` : "";
 }
+$("avatar-lora-upload").addEventListener("click", e => {  // nothing chosen: say so and keep the dialog open
+  const f = $("avatar-lora-form");
+  if (!f.elements.krea.value.trim() && !f.elements.wan.value.trim()) {
+    e.preventDefault();
+    $("avatar-lora-err").textContent = "Choose a Krea 2 file and/or a Wan file";
+  }
+});
 $("avatar-lora-form").addEventListener("click", async e => {
   const b = e.target.closest("button[data-pick-lora]");
   if (!b) return;
@@ -2101,7 +2108,7 @@ function drawQr(rows) {
   svg.setAttribute("viewBox", `0 0 ${side} ${side}`);
   svg.setAttribute("shape-rendering", "crispEdges");
   svg.replaceChildren(bg, path);
-  svg.hidden = false;
+  svg.removeAttribute("hidden");  // an <svg> has no .hidden property: only removing the attribute shows it
 }
 api("GET", "/api/phone").then(r => {
   $("phone-url").href = r.url; $("phone-url").textContent = r.url; drawQr(r.qr);
