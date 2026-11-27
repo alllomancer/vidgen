@@ -79,22 +79,33 @@ for bad in [None, {}, {"public_key": 5}, {"public_key": "ssh-rsa AAAA"}, {"publi
     assert st == 400, (bad, st, b)
 st, b = request("POST /pair", "/pair", body={"public_key": "x" * 2000})
 assert st == 413, (st, b)
-assert request("POST /pair", "/pair", body={"public_key": line(MAC)})[0] == 409, "already authorized"
+# ---- closed until the dashboard opens pairing (a computer key)
+st, b = request("POST /pair", "/pair", body={"public_key": line(PHONE)})
+assert st == 403 and "Pair a phone" in b["error"], (st, b)
+assert request("POST /pairings/open", "/pairings/open", PHONE)[0] == 401, "not paired yet"
+st, b = request("POST /pairings/open", "/pairings/open", MAC)
+assert st == 200 and b["open_until"] == clock[0] + 600, b
+
+# an authorized key gets the same answer shape as a new one, and nothing is stored (no "is this key paired?" oracle)
+st, b = request("POST /pair", "/pair", body={"public_key": line(MAC)})
+assert st == 200 and len(b["code"]) == 6 and h._pairing_requests() == {}, (st, b)
 
 st, b = request("POST /pair", "/pair", body={"public_key": line(PHONE)})
 assert st == 200 and len(b["code"]) == 6 and b["code"].isdigit() and b["expires_at"] == clock[0] + 600, b
+assert b["fingerprint"] == h.fingerprint(PHONE) and b["fingerprint"].startswith("SHA256:"), b
 code = b["code"]
 st, again = request("POST /pair", "/pair", body={"public_key": line(PHONE)})  # asking again replaces it
 assert st == 200
 pending = h._pairing_requests()
 assert len(pending) == 1 and again["code"] in pending, pending
 code = again["code"]
-assert "Android" in pending[code]["agent"]
+assert "Android" in pending[code]["agent"] and pending[code]["fingerprint"] == h.fingerprint(PHONE)
 
 # ---- the pairing routes are for computer keys only
 assert request("GET /pairings", "/pairings")[0] == 401
 st, b = request("GET /pairings", "/pairings", MAC)
 assert st == 200 and [p["code"] for p in b["pending"]] == [code] and b["devices"] == [], b
+assert b["pending"][0]["fingerprint"] == h.fingerprint(PHONE) and b["open_until"] == clock[0] + 600
 assert request("POST /pairings/{code}/approve", f"/pairings/{code}/approve", MAC, {}, {"code": "000000"})[0] == 404
 
 # ---- approve: the phone now signs as "dan"
@@ -102,10 +113,12 @@ st, b = request("POST /pairings/{code}/approve", f"/pairings/{code}/approve", MA
 assert st == 200 and b["device"]["name"] == "Pixel 9" and b["device"]["client"] == "dan", b
 assert h._pairing_requests() == {}
 assert request("GET /jobs", "/jobs", PHONE) == (200, {"client": "dan"})
-assert request("POST /pair", "/pair", body={"public_key": line(PHONE)})[0] == 409, "already paired"
+assert request("GET /pairings", "/pairings", MAC)[1]["open_until"] is None, "approving closes the window"
+assert request("POST /pair", "/pair", body={"public_key": line(OTHER)})[0] == 403
 dev_id = b["device"]["id"]
 # a phone can't manage phones
 for route, path, params, body in [("GET /pairings", "/pairings", {}, None),
+                                  ("POST /pairings/open", "/pairings/open", {}, None),
                                   ("POST /pairings/{code}/approve", "/pairings/123456/approve", {"code": "123456"}, {}),
                                   ("DELETE /pairings/{code}", "/pairings/123456", {"code": "123456"}, None),
                                   ("DELETE /devices/{id}", f"/devices/{dev_id}", {"id": dev_id}, None)]:
@@ -115,6 +128,8 @@ assert [d["id"] for d in request("GET /pairings", "/pairings", MAC)[1]["devices"
 assert request("GET /pairings", "/pairings", MAC)[1]["devices"][0]["name"] == "Pixel 9"
 
 # ---- bad names
+request("POST /pairings/open", "/pairings/open", MAC)
+assert request("POST /pair", "/pair", body={"public_key": line(PHONE)})[1]["code"] not in h._pairing_requests()
 code2 = request("POST /pair", "/pair", body={"public_key": line(OTHER)})[1]["code"]
 for bad in ["x" * 33, "a\nb", "<b>", 5]:
     assert request("POST /pairings/{code}/approve", f"/pairings/{code2}/approve", MAC, {"name": bad},
@@ -125,7 +140,7 @@ assert code2 not in h._pairing_requests()
 assert request("DELETE /pairings/{code}", f"/pairings/{code2}", MAC, None, {"code": code2})[0] == 404
 
 # ---- limits: 5 waiting at most, and requests expire after 10 minutes
-for n in range(10, 15):
+for n in range(10, 15):  # none waiting before this: five fill the list
     assert request("POST /pair", "/pair", body={"public_key": line(pub_blob(n))})[0] == 200
 st, b = request("POST /pair", "/pair", body={"public_key": line(pub_blob(20))})
 assert st == 429 and "too many" in b["error"], (st, b)
@@ -133,7 +148,13 @@ old = next(iter(h._pairing_requests()))
 clock[0] += 601
 assert h._pairing_requests() == {}
 assert request("POST /pairings/{code}/approve", f"/pairings/{old}/approve", MAC, {}, {"code": old})[0] == 404
+assert request("POST /pair", "/pair", body={"public_key": line(pub_blob(20))})[0] == 403, "the window closed too"
+request("POST /pairings/open", "/pairings/open", MAC)
 assert request("POST /pair", "/pair", body={"public_key": line(pub_blob(20))})[0] == 200
+# a poisoned or odd object under auth/pairing/ is ignored, not a crash
+s3.objects["auth/pairing/999999.json"] = b'["x"]'
+s3.objects["auth/pairing/notacode.json"] = b"{}"
+assert request("GET /pairings", "/pairings", MAC)[0] == 200
 
 # ---- revoke: refused after the 30 s cache
 assert request("DELETE /devices/{id}", "/devices/ffffffff", MAC, None, {"id": "ffffffff"})[0] == 404
@@ -144,6 +165,7 @@ assert request("GET /jobs", "/jobs", PHONE)[0] == 401
 
 # ---- a device approved by another client's computer key isn't listed for, or removable by, this one
 h._authorized[pub_blob(30)] = "noa"
+request("POST /pairings/open", "/pairings/open", pub_blob(30))
 code3 = request("POST /pair", "/pair", body={"public_key": line(pub_blob(31))})[1]["code"]
 st, b = request("POST /pairings/{code}/approve", f"/pairings/{code3}/approve", pub_blob(30), {}, {"code": code3})
 assert st == 200 and b["device"]["client"] == "noa" and b["device"]["name"] == "phone"

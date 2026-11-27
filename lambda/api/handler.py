@@ -6,7 +6,8 @@ ed25519 key (see `_authenticate`). Routes:
                                  (optional meta: out_name, avatar_name, krea_lora, source; returned by the GETs)
   GET  /m, GET /m/{file}         the phone page (static, no signature; docs/specs/2026-11-27-phone-ui.md)
   POST /pair                     a phone asks to pair (no signature) -> {code}; docs/specs/2026-11-27-phone-pairing.md
-  GET  /pairings                 waiting requests and paired phones (computer keys only)
+  POST /pairings/open            accept POST /pair for 10 minutes (computer keys only, like the routes below)
+  GET  /pairings                 waiting requests and paired phones
   POST /pairings/{code}/approve  pair that phone as this client;  DELETE /pairings/{code} declines it
   DELETE /devices/{id}           remove a paired phone
   GET  /jobs/{job_id}            job status / result -> presigned download URLs when done
@@ -243,8 +244,11 @@ def _authenticate(event, headers, raw_body):
         raise
     if pubkey in _authorized:
         return _authorized[pubkey]
+    device = _devices().get(pubkey)
+    if not device:  # revoked between the signature check and here
+        return None
     event["_vidgen_device"] = True  # a paired phone: may not manage phones (docs/specs/2026-11-27-phone-pairing.md)
-    return _devices()[pubkey]["client"]
+    return device["client"]
 
 
 # ---------------------------------------------------------------- phone pairing
@@ -252,9 +256,10 @@ def _authenticate(event, headers, raw_body):
 # Terraform list) approves it from the dashboard, and the key is stored with the approver's client name. Paired keys
 # sign like Terraform keys but can't manage phones. docs/specs/2026-11-27-phone-pairing.md
 
-PAIRING_KEY = "auth/pairing.json"
+PAIRING_PREFIX = "auth/pairing/"  # one object per waiting request: auth/pairing/<code>.json
+PAIRING_OPEN_KEY = "auth/pairing-open.json"  # {"until": unix, "client": who opened it}
 DEVICES_KEY = "auth/devices.json"
-PAIR_TTL = 600
+PAIR_TTL = 600  # a waiting request, and the window the dashboard opens, last 10 minutes
 PAIR_MAX_PENDING = 5
 PAIR_MAX_BODY = 1024
 DEVICES_CACHE_SECONDS = 30
@@ -266,9 +271,10 @@ def _devices():
     """{key blob: device record} of paired phones, re-read from S3 at most every DEVICES_CACHE_SECONDS."""
     now = time.time()
     if _devices_cache["at"] is None or now - _devices_cache["at"] > DEVICES_CACHE_SECONDS:
-        doc = _s3_json(DEVICES_KEY) or {}
         keys = {}
-        for b64, rec in (doc.items() if isinstance(doc, dict) else []):
+        for b64, rec in _devices_doc().items():
+            if not isinstance(rec, dict) or not isinstance(rec.get("client"), str):
+                continue
             try:
                 keys[base64.b64decode(b64, validate=True)] = rec
             except ValueError:
@@ -287,12 +293,37 @@ def _save_devices(doc):
     _devices_cache["at"] = None  # this container sees the change at once; others within 30 s
 
 
+def fingerprint(blob):
+    """OpenSSH-style SHA256 fingerprint, shortened to what a person compares: SHA256:<first 10 chars>."""
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")[:10]
+
+
 def _pairing_requests():
-    """Waiting requests younger than PAIR_TTL: {code: {public_key, requested_at, agent}}."""
-    doc = _s3_json(PAIRING_KEY) or {}
+    """Waiting requests younger than PAIR_TTL: {code: {public_key, requested_at, agent, fingerprint}}."""
+    out = {}
     now = time.time()
-    return {c: r for c, r in (doc.items() if isinstance(doc, dict) else [])
-            if isinstance(r, dict) and now - (r.get("requested_at") or 0) <= PAIR_TTL}
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=PAIRING_PREFIX):
+        for obj in page.get("Contents") or []:
+            code = obj["Key"][len(PAIRING_PREFIX):].removesuffix(".json")
+            if not re.fullmatch(r"\d{6}", code):
+                continue
+            rec = _s3_json(obj["Key"])
+            if not isinstance(rec, dict) or not isinstance(rec.get("requested_at"), (int, float)) \
+                    or not isinstance(rec.get("public_key"), str):
+                continue
+            if now - rec["requested_at"] <= PAIR_TTL:
+                out[code] = rec
+    return out
+
+
+def _drop_requests(codes):
+    if codes:
+        s3.delete_objects(Bucket=BUCKET, Delete={"Objects": [{"Key": f"{PAIRING_PREFIX}{c}.json"} for c in codes]})
+
+
+def _pairing_open():
+    doc = _s3_json(PAIRING_OPEN_KEY) or {}
+    return isinstance(doc, dict) and isinstance(doc.get("until"), (int, float)) and doc["until"] > time.time()
 
 
 def _parse_ed25519(text):
@@ -312,7 +343,7 @@ def _parse_ed25519(text):
 
 
 def request_pairing(event, raw):
-    """POST /pair (unsigned)."""
+    """POST /pair (unsigned): only while the dashboard has pairing open."""
     if len(raw) > PAIR_MAX_BODY:
         return _resp(413, {"error": "request too large"})
     try:
@@ -321,29 +352,48 @@ def request_pairing(event, raw):
     except (ValueError, UnicodeDecodeError) as e:
         return _resp(400, {"error": str(e) if isinstance(e, ValueError) and str(e).startswith("public_key")
                            else "body must be JSON with public_key"})
-    if blob in _authorized or base64.b64encode(blob).decode() in _devices_doc():
-        return _resp(409, {"error": "already paired"})
+    if not _pairing_open():
+        return _resp(403, {"error": "pairing is closed: on your Mac, open vidgen ui → Phones → Pair a phone, "
+                                    "then try again"})
+    now = int(time.time())
     b64 = base64.b64encode(blob).decode()
-    pending = {c: r for c, r in _pairing_requests().items() if r.get("public_key") != b64}  # asking again replaces
+    answer = {"expires_at": now + PAIR_TTL, "fingerprint": fingerprint(blob)}
+    if blob in _authorized or b64 in _devices_doc():
+        # Already allowed: the phone's own signed calls work. Same answer shape, nothing stored, so this can't be
+        # used to learn which keys are paired.
+        return _resp(200, dict(answer, code=f"{secrets.randbelow(10 ** 6):06d}"))
+    pending = _pairing_requests()
+    _drop_requests([c for c, r in pending.items() if r.get("public_key") == b64])  # asking again replaces
+    pending = {c: r for c, r in pending.items() if r.get("public_key") != b64}
     if len(pending) >= PAIR_MAX_PENDING:
         return _resp(429, {"error": "too many pairing requests; try again in a few minutes"})
     code = None
     while code is None or code in pending:
         code = f"{secrets.randbelow(10 ** 6):06d}"
-    agent = str(((event.get("requestContext") or {}).get("http") or {}).get("userAgent") or "")[:160]
-    now = int(time.time())
-    pending[code] = {"public_key": b64, "requested_at": now, "agent": agent}
-    _put_json(PAIRING_KEY, pending)
-    print(json.dumps({"event": "pair_requested", "pending": len(pending)}))
-    return _resp(200, {"code": code, "expires_at": now + PAIR_TTL})
+    agent = str(((event.get("requestContext") or {}).get("http") or {}).get("userAgent") or "")
+    agent = re.sub(r"[^\x20-\x7e]", "", agent)[:160]  # shown in the dashboard (as text): printable ASCII only
+    _put_json(f"{PAIRING_PREFIX}{code}.json", {"public_key": b64, "requested_at": now, "agent": agent,
+                                              "fingerprint": answer["fingerprint"]})
+    print(json.dumps({"event": "pair_requested", "pending": len(pending) + 1}))
+    return _resp(200, dict(answer, code=code))
+
+
+def open_pairing(client):
+    until = int(time.time()) + PAIR_TTL
+    _put_json(PAIRING_OPEN_KEY, {"until": until, "client": client})
+    return _resp(200, {"open_until": until})
 
 
 def list_pairings(client):
-    pending = [{"code": c, "requested_at": r["requested_at"], "agent": r.get("agent", "")}
+    pending = [{"code": c, "requested_at": r["requested_at"], "agent": r.get("agent", ""),
+                "fingerprint": r.get("fingerprint", "")}
                for c, r in sorted(_pairing_requests().items(), key=lambda kv: kv[1]["requested_at"])]
     devices = [{k: d.get(k) for k in ("id", "name", "client", "added_at")}
                for d in _devices_doc().values() if isinstance(d, dict) and d.get("client") == client]
-    return _resp(200, {"pending": pending, "devices": sorted(devices, key=lambda d: d.get("added_at") or 0)})
+    doc = _s3_json(PAIRING_OPEN_KEY) or {}
+    open_until = doc.get("until") if isinstance(doc, dict) and _pairing_open() else None
+    return _resp(200, {"pending": pending, "devices": sorted(devices, key=lambda d: d.get("added_at") or 0),
+                       "open_until": open_until})
 
 
 def approve_pairing(client, code, body):
@@ -351,24 +401,23 @@ def approve_pairing(client, code, body):
     name = "phone" if name in (None, "") else name
     if not isinstance(name, str) or not DEVICE_NAME.fullmatch(name):
         return _resp(400, {"error": "name: 1-32 letters, digits, spaces or . _ -"})
-    pending = _pairing_requests()
-    req = pending.pop(str(code), None)
+    req = _pairing_requests().get(str(code))
     if not req:
         return _resp(404, {"error": "no waiting request with that code (they last 10 minutes)"})
     devices = _devices_doc()
     device = {"id": secrets.token_hex(4), "client": client, "name": name, "added_at": int(time.time())}
     devices[req["public_key"]] = device
     _save_devices(devices)
-    _put_json(PAIRING_KEY, pending)
+    _drop_requests([str(code)])
+    _put_json(PAIRING_OPEN_KEY, {"until": 0, "client": client})  # one phone per window
     print(json.dumps({"event": "device_paired", "client": client, "device": device["id"]}))
     return _resp(200, {"device": device})
 
 
 def decline_pairing(code):
-    pending = _pairing_requests()
-    if pending.pop(str(code), None) is None:
+    if str(code) not in _pairing_requests():
         return _resp(404, {"error": "no waiting request with that code"})
-    _put_json(PAIRING_KEY, pending)
+    _drop_requests([str(code)])
     return _resp(200, {"declined": True})
 
 
@@ -384,7 +433,8 @@ def revoke_device(client, device_id):
     return _resp(200, {"removed": True})
 
 
-PAIRING_ROUTES = ("GET /pairings", "POST /pairings/{code}/approve", "DELETE /pairings/{code}", "DELETE /devices/{id}")
+PAIRING_ROUTES = ("GET /pairings", "POST /pairings/open", "POST /pairings/{code}/approve", "DELETE /pairings/{code}",
+                  "DELETE /devices/{id}")
 
 
 def pairing_route(event, client, route, body):
@@ -393,6 +443,8 @@ def pairing_route(event, client, route, body):
     params = event.get("pathParameters") or {}
     if route == "GET /pairings":
         return list_pairings(client)
+    if route == "POST /pairings/open":
+        return open_pairing(client)
     if route == "POST /pairings/{code}/approve":
         return approve_pairing(client, params.get("code"), body)
     if route == "DELETE /pairings/{code}":

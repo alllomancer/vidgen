@@ -26,24 +26,30 @@ type. Only Terraform keys can approve or revoke. The Terraform list keeps workin
 
 - `auth/devices.json`: `{"<key blob base64>": {"id": <8 hex>, "client": <approver's client>, "name": <label>,
   "added_at": <unix>}}`.
-- `auth/pairing.json`: `{"<code>": {"public_key": <blob base64>, "requested_at": <unix>, "agent": <short UA>}}`,
-  entries older than `PAIR_TTL = 600` s dropped on every read and write.
+- `auth/pairing/<code>.json`: one object per waiting request, `{"public_key": <blob base64>, "requested_at": <unix>,
+  "agent": <printable-ASCII user agent, 160 chars>, "fingerprint": "SHA256:<10 chars>"}`; older than `PAIR_TTL = 600` s
+  is ignored. Separate objects, so concurrent requests can't overwrite each other.
+- `auth/pairing-open.json`: `{"until": <unix>, "client": ...}`: the pairing window the dashboard opens.
 
 ### API
 
+- `POST /pairings/open` (signed, computer key only): opens the pairing window for 10 minutes; approving a phone closes
+  it. The dashboard calls it when you press **Pair a phone**.
 - `POST /pair` (unsigned): `{"public_key": "ssh-ed25519 AAAA..."}` (comment ignored). The blob must decode to an
-  ssh-ed25519 key (type string + 32-byte key). A key already authorized (Terraform or device) → 409 `already
-  paired`. At most `PAIR_MAX_PENDING = 5` waiting requests: a 6th → 429 `too many pairing requests; try again in a
-  few minutes`. The same key asking again replaces its earlier request. Returns `{"code": "123456", "expires_at":
-  ...}`; the code is 6 random digits (`secrets.randbelow`), unique among waiting requests. Body over 1 KB → 413.
-- `GET /pairings` (signed, Terraform key only): `{"pending": [{code, requested_at, agent}], "devices": [{id, name,
-  client, added_at}]}`; devices are filtered to the caller's client.
+  ssh-ed25519 key (type string + 32-byte key), else 400. Outside the window → 403 `pairing is closed: on your Mac, open
+  vidgen ui → Phones → Pair a phone, then try again`. At most `PAIR_MAX_PENDING = 5` waiting requests: a 6th → 429.
+  The same key asking again replaces its earlier request. Returns `{"code": "123456", "expires_at": ...,
+  "fingerprint": "SHA256:..."}`; the code is 6 random digits (`secrets.randbelow`), unique among waiting requests. A
+  key that is already authorized gets the same answer shape with a random code and nothing stored (no oracle for
+  which keys are paired; its signed calls already work). Body over 1 KB → 413. Its own throttle: 1 rps, burst 5.
+- `GET /pairings` (signed, Terraform key only): `{"pending": [{code, requested_at, agent, fingerprint}], "devices":
+  [{id, name, client, added_at}], "open_until": <unix or null>}`; devices are filtered to the caller's client.
 - `POST /pairings/{code}/approve` (signed, Terraform key only) `{"name": <label, optional>}`: moves the request into
   `devices.json` with `client` = the caller's client; unknown or expired code → 404. Name: 1-32 chars
   `[A-Za-z0-9 ._-]`, default `phone`.
 - `DELETE /pairings/{code}` (signed, Terraform key only): declines a waiting request.
 - `DELETE /devices/{id}` (signed, Terraform key only, own client's devices): revokes a device.
-- A phone key calling any of the four signed routes → 403 `only a computer key can manage phones`.
+- A phone key calling any of the five signed routes → 403 `only a computer key can manage phones`.
 
 ### Authentication
 
@@ -53,8 +59,9 @@ device record's `client`. Everything else in the signature check is unchanged.
 
 ### Phone page
 
-The pairing screen shows **Pair this phone**: it sends `POST /pair` and shows the code large, with "On your Mac, open
-`vidgen ui` → Phones and approve this code". It retries `GET /jobs` every 5 s while the code is valid and opens
+The pairing screen shows **Pair this phone**: it sends `POST /pair` and shows the code and the key fingerprint large,
+with "On your Mac, open `vidgen ui` → Phones and approve this code" (and, when the window is closed, "press Pair a
+phone there first"). It retries `GET /jobs` every 5 s while the code is valid and opens
 History once approved; after 10 minutes it offers a new code. The Terraform steps (name + key line) stay below as
 "Or add the key with Terraform".
 
@@ -80,7 +87,10 @@ while a request is waiting. `ui.py` proxies `GET /api/pairings`, `POST /api/pair
   approver's client (its `GET /jobs` returns the approver's jobs).
 - If a phone key calls `GET /pairings`, approve, decline or `DELETE /devices/{id}`, then the API shall return 403.
 - When a device is revoked, requests signed by its key shall be rejected with 401 once the cache (30 s) expires.
-- If a key that is already authorized asks to pair, then the API shall return 409.
+- If a key that is already authorized asks to pair, then the API shall answer like a new request (200, a code) and
+  store nothing.
+- While the pairing window is closed, `POST /pair` shall return 403; `POST /pairings/open` (computer key) opens it for
+  600 s, and approving a phone closes it.
 - The unsigned `POST /pair` shall never grant access by itself: until approved, the phone's signed requests return 401.
 
 ## Out of Scope
@@ -90,10 +100,12 @@ QR codes; naming devices after approval; per-device permissions; pairing more th
 
 ## Risks & Open Questions
 
-- `POST /pair` is unsigned and writes to S3. Bounded by 1 KB bodies, 5 waiting requests and the stage throttle; a
-  flood can only block pairing for 10 minutes, never grant access. (Resolved.)
+- `POST /pair` is unsigned and writes to S3. It only works for 10 minutes after the owner presses Pair a phone, with
+  1 KB bodies, 5 waiting requests and a 1 rps throttle; a flood can only delay pairing, never grant access.
+  (Resolved.)
 - An attacker could submit their own key hoping the user approves the wrong code. The user approves only the code on
-  their own phone's screen; the dashboard shows each request's time and browser. (Resolved.)
+  their own phone's screen, and the dashboard shows each request's key fingerprint (also on the phone), time and
+  browser. (Resolved.)
 - `devices.json` writes are read-modify-write without a lock; approvals are rare and manual. (Deferred: accept.)
 - A stolen unlocked phone signs as the user until revoked; Remove in the dashboard fixes it within ~30 s. (Resolved.)
 

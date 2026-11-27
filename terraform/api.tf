@@ -108,6 +108,7 @@ resource "aws_apigatewayv2_route" "routes" {
     # Phone pairing (docs/specs/2026-11-27-phone-pairing.md): POST /pair is unsigned, the rest need a computer key.
     "POST /pair",
     "GET /pairings",
+    "POST /pairings/open",
     "POST /pairings/{code}/approve",
     "DELETE /pairings/{code}",
     "DELETE /devices/{id}",
@@ -134,6 +135,13 @@ resource "aws_apigatewayv2_stage" "default" {
     throttling_rate_limit  = 10
   }
 
+  # The unsigned pairing request gets a tighter limit of its own.
+  route_settings {
+    route_key              = "POST /pair"
+    throttling_burst_limit = 5
+    throttling_rate_limit  = 1
+  }
+
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.apigw.arn
     format = jsonencode({
@@ -144,6 +152,8 @@ resource "aws_apigatewayv2_stage" "default" {
       latency   = "$context.responseLatency"
     })
   }
+
+  depends_on = [aws_apigatewayv2_route.routes] # route_settings names a route
 }
 
 resource "aws_lambda_permission" "apigw" {
