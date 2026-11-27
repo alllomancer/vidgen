@@ -30,6 +30,7 @@ import krea
 import mirror
 import photos
 import realism
+import realism_check
 
 REGION = os.environ["AWS_REGION"]
 BUCKET = os.environ["BUCKET"]
@@ -1395,6 +1396,12 @@ def process(job_id, receipt):
     try:
         models.set_loras(prepare_loras(params) if job["type"] in ("video", "story") else [])
         result = RUNNERS[job["type"]](job, params, workdir)
+        if params.get("realism_check") and job["type"] in realism_check.TYPES:
+            result["realism"] = realism_check.check(
+                job["type"], params, result, workdir, download=lambda key, path: s3.download_file(BUCKET, key, path),
+                judge=models.judge_realism, progress=lambda msg: progress(job_id, msg))
+            log(event="realism_check", job_id=job_id, score=result["realism"].get("score"),
+                error=result["realism"].get("error"))
         if params.get("loras"):
             result["loras"] = [{k: l.get(k) for k in ("name", "version", "step", "weight")} for l in params["loras"]]
         set_status(job_id, "done", result=json.dumps(result), finished_at=int(time.time()))

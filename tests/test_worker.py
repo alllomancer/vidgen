@@ -1631,6 +1631,30 @@ for outcome in ("done", "failed", "cancelled"):
     assert not os.path.exists(worker.take_work_dir("lt-" + outcome)), f"work folder removed when {outcome}"
 assert {"done", "failed", "cancelled"} <= set(statuses), statuses
 worker.RUNNERS.update(real_runners)
+# ---------------------------------------------------------------- process: the AI-look check after the render
+done_results = []
+worker.set_status = lambda job_id, status, **kw: statuses.append(status) or (
+    done_results.append(_json.loads(kw["result"])) if status == "done" else None)
+checks = []
+real_check = worker.realism_check.check
+worker.realism_check.check = lambda job_type, params, result, workdir, download, judge, progress: checks.append(
+    (job_type, sorted(result))) or {"score": 4, "signs": ["x"], "checked": job_type}
+worker.RUNNERS["photos"] = lambda job, params, workdir: {"photo_1_key": "k"}
+worker.RUNNERS["write"] = lambda job, params, workdir: {"story_key": "s"}
+for jid, jtype, params in [("rc1", "photos", {"realism_check": True}), ("rc2", "photos", {}),
+                           ("rc3", "write", {"realism_check": True})]:
+    job_items[jid] = {"job_id": jid, "status": "queued", "type": jtype, "client": "m", "params": _json.dumps(params)}
+    worker.process(jid, "r")
+assert checks == [("photos", ["photo_1_key"])], "only flagged photos/video/story jobs are checked"
+assert done_results[-3]["realism"]["score"] == 4 and "realism" not in done_results[-2] and "realism" not in done_results[-1]
+worker.realism_check.check = real_check  # the real one: a failing judge still leaves the job done
+worker.models.judge_realism = lambda images, text: "not json"
+worker.s3 = mock.MagicMock(download_file=lambda b, k, p: open(p, "wb").write(b"x"))
+job_items["rc4"] = {"job_id": "rc4", "status": "queued", "type": "photos", "client": "m",
+                    "params": _json.dumps({"realism_check": True})}
+worker.process("rc4", "r")
+assert statuses[-1] == "done" and done_results[-1]["realism"]["error"] == "the check couldn't read the model's answer"
+worker.RUNNERS.update(real_runners)
 assert worker.take_work_dir("abc") == os.path.join(worker.WORK_ROOT, "abc")
 # a photo-set job cancelled before it (re)starts releases the avatar's Krea build and media (no stuck "photos")
 worker.s3 = fs3

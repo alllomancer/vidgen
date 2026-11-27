@@ -1232,6 +1232,14 @@ def count_people(image_path):
     return _parse_count(_chat(messages, max_new_tokens=8))
 
 
+def judge_realism(image_paths, text):
+    """The AI-look critique (worker/realism_check.py builds the question and reads the answer): the images, in
+    order, then the question. Greedy, short. docs/specs/2026-11-27-realism-check.md"""
+    content = [{"type": "image", "image": f"file://{p}", "max_pixels": 768 * 768} for p in image_paths]
+    messages = [{"role": "user", "content": content + [{"type": "text", "text": text}]}]
+    return _chat(messages, max_new_tokens=600, do_sample=False)
+
+
 def describe_video(video_path, instructions=""):
     prompt = (
         "Watch this video and write metadata for publishing it. Respond with JSON only: "
