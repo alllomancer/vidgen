@@ -265,6 +265,24 @@ def pick_file():
 LORA_NAME = THEME_NAME
 
 
+def add_avatar_loras(name, body):
+    """Avatars > Upload LoRAs: the avatar's Krea 2 file and/or Wan file (or high + low), by path, uploaded as its own
+    LoRAs and marked ready. docs/specs/2026-11-27-avatar-lora-upload.md"""
+    name = str(name or "").strip().lower()
+    if not THEME_NAME.match(name):
+        raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
+    paths = {k: str(body.get(k) or "").strip() or None for k in ("krea", "wan", "wan_low")}
+    for p in filter(None, paths.values()):
+        if not os.path.isabs(os.path.expanduser(p)):
+            raise ValueError(f"{p}: give the full path")
+    try:
+        return {"uploaded": vidgen.avatar_lora_upload(name, paths["krea"], paths["wan"], paths["wan_low"])}
+    except vidgen.ApiError as e:
+        if e.status is None:  # a local check (wrong kind, missing file): the user's input, not the server
+            raise ValueError(str(e))
+        raise
+
+
 def add_lora(body):
     """Learning > Add a LoRA file: upload a local .safetensors (or a high/low pair) as a new version."""
     name = str(body.get("name") or "").strip().lower()
@@ -730,6 +748,9 @@ def make_handler(port, token):
                     return self._send(200, {"folder": pick_folder()})
                 if method == "POST" and path == "/api/pick-file":
                     return self._send(200, {"file": pick_file()})
+                m = re.fullmatch(r"/api/avatars/([a-z0-9][a-z0-9_-]{0,31})/loras", path)
+                if m and method == "POST":
+                    return self._send(201, add_avatar_loras(m.group(1), self._body()))
                 if method == "POST" and path == "/api/loras":
                     return self._send(201, add_lora(self._body()))
                 return self._send(404, {"error": "not found"})

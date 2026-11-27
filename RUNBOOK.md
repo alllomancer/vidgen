@@ -176,6 +176,7 @@ Every `video` and `story` stars your **default avatar**, so the same character a
 - **One person per photo**: every photo set (Krea, media, Wan) is checked by the planner model; photos that don't show exactly one person are dropped, and fewer than 16 left fails the set ("use reference images of just this person"). Avatars whose reference photos look very different, or show other people, can fail here: use photos of just this person, similar in look.
 - **Used automatically**: a `video` starring the avatar gets its ready Wan LoRA first at weight 1.0 (counted in the 2 Wan LoRAs per job); `--no-avatar-lora` (dashboard: untick "Avatar's Wan LoRA") leaves it out; `--lora avatar-<name>-wan:0.8` sets another weight. Stories don't use it yet. Re-running an old job reuses the LoRA version it was made with.
 - **State / on demand**: `vidgen avatar list` and the dashboard show `queued`, `photos`, `training`, `ready` or `failed`; `--no-wan-lora` on create skips it; `vidgen avatar wan-train --name N` (dashboard "Train Wan LoRA") builds one from the avatar's stored media (needs ready media), e.g. for avatars made before this. Replacing an avatar drops the previous person's Wan LoRA link.
+- **LoRAs made elsewhere**: avatar card **Upload LoRAs** (or `vidgen avatar lora --name N --krea F --wan F`, with `--wan-high F --wan-low F` for a pair) uploads a Krea 2 file and/or a Wan file as the next version of the avatar's own `avatar-<name>` / `avatar-<name>-wan`, checked like any uploaded LoRA (a Wan file in the Krea 2 slot is refused), trigger word = the avatar's name, and marks it ready: the next photos/videos starring the avatar use it. Refused while that LoRA is being trained for the avatar (wait for it to finish).
 - **Local copies of every LoRA**: Wan and Krea, trained, uploaded or avatar LoRAs are copied to `<download dir>/loras/<name>/v<N>/` by the watcher (final files and `lora.json`; `vidgen lora pull [NAME] [--checkpoints]` on demand). `vidgen lora list` marks them `[on this Mac]` and shows the total size.
 
 **First run:** if no avatar exists, `vidgen video …` / `vidgen story …` asks before submitting:
@@ -746,6 +747,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 |---|---|
 | `vidgen avatar list` | your avatars, image counts, the default (*), Krea LoRA state |
 | `vidgen avatar krea-train --name N` | build (a new version of) the avatar's Krea 2 LoRA (~1.5 h GPU) |
+| `vidgen avatar lora --name N [--krea F] [--wan F \| --wan-high F --wan-low F]` | upload the avatar's own Krea 2 / Wan LoRA made elsewhere and use it right away |
 | `vidgen avatar wan-train --name N` | build (a new version of) the avatar's Wan LoRA from its media (~1 h trainer); attached to its videos when ready |
 | `  --no-avatar-lora` (video) | leave out the avatar's own Wan LoRA |
 | `vidgen avatar media --name N` | photos + four 2 s clips of the avatar (made for every new avatar; this is for existing ones), copied to `<download dir>/avatars/N/` |

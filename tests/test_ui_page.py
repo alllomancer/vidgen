@@ -20,6 +20,10 @@ for needed in ('data-copy-prompt=', 'data-use-prompt=', "function copyText(", "n
 # copying is offered for the job kinds whose summary is the prompt as sent
 assert re.search(r'function copyable\(j\) \{ return !!j\.summary && \["video", "photos", "avatar"\]\.includes\(j\.type\); \}', script)
 
+# avatar cards: Upload LoRAs opens the dialog with the Krea 2, Wan and Wan low-noise paths
+assert 'data-avatar-loras="${name}"' in script and 'id="avatar-lora-dialog"' in page
+assert all(f'name="{n}"' in page for n in ("krea", "wan", "wan_low")) and "`${path}/loras`" in script
+
 # the Phones panel draws the link's QR code from ui.py's rows, as SVG elements (no HTML, no outside script)
 assert 'id="phone-qr"' in page and "function drawQr(" in script and "drawQr(r.qr)" in script
 assert "/^[01]+$/.test(r)" in script

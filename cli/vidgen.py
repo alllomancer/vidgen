@@ -1068,6 +1068,12 @@ def avatar_command(args):
         api("POST", "/avatars", {"name": name, "job_id": job_id, "candidate": int(a[1]), "make_default": True,
                                  "krea_lora": krea_lora})
         print(f"avatar '{name}' saved from candidate {a[1]} and set as default")
+    elif args.action == "lora":
+        if not args.name:
+            raise ApiError("usage: vidgen.py avatar lora --name N [--krea FILE] [--wan FILE | --wan-high F --wan-low F]")
+        for r in avatar_lora_upload(args.name, args.krea, args.wan or args.wan_high, args.wan_low):
+            what = "Krea 2" if r.get("model") == "krea2" else "Wan"
+            print(f"{what} LoRA for '{r['avatar']}' is now {r['name']} v{r['version']} (trigger '{r['trigger']}')")
     elif args.action == "krea-train":
         if not args.name:
             raise ApiError("usage: vidgen.py avatar krea-train --name <avatar>")
@@ -1342,6 +1348,28 @@ def lora_upload(name, high, low=None, trigger="", description="", make_current=T
     """Add a LoRA file made elsewhere as a new version of NAME. The kind comes from the file: a Krea 2
     LoRA is one file; for Wan one file serves both Wan 2.2 experts, or with two, `high` goes to the
     high-noise expert and `low` to the low-noise one."""
+    return _upload_lora(f"/loras/{name.lower()}", high, low,
+                        {"trigger": trigger, "description": description, "make_current": make_current})
+
+
+def avatar_lora_upload(name, krea=None, wan=None, wan_low=None):
+    """Upload an avatar's own LoRAs made elsewhere: the Krea 2 file and/or the Wan file (or high + low pair) become
+    the next versions of avatar-<name> / avatar-<name>-wan, ready on the avatar. docs/specs/2026-11-27-avatar-lora-upload.md"""
+    if not (krea or wan):
+        raise ApiError("give a Krea 2 LoRA (--krea) and/or a Wan LoRA (--wan, or --wan-high with --wan-low)")
+    if wan_low and not wan:
+        raise ApiError("--wan-low needs --wan-high")
+    out = []
+    for kind, high, low, want in (("krea", krea, None, "krea2"), ("wan", wan, wan_low, "t2v")):
+        if not high:
+            continue
+        r = _upload_lora(f"/avatars/{name.lower()}/loras/{kind}", high, low, None, expect=want)
+        out.append(r)
+    return out
+
+
+def _upload_lora(base, high, low, register_body, expect=None):
+    """Check the file(s) here, reserve at <base>/uploads, PUT them, register at <base>/versions/<N>."""
     paths = [os.path.expanduser(p) for p in ([high, low] if low else [high])]
     for p in paths:
         if not p.lower().endswith(".safetensors"):
@@ -1351,12 +1379,14 @@ def lora_upload(name, high, low=None, trigger="", description="", make_current=T
         if os.path.getsize(p) > MAX_LORA_BYTES:
             raise ApiError(f"{p}: larger than 2 GB")
     kinds = [lora_kind(read_safetensors_header(p)) for p in paths]
+    wrong = [p for p, k in zip(paths, kinds) if expect and k != expect]  # an avatar's slot wants one kind
+    if wrong:
+        raise ApiError(f"{os.path.basename(wrong[0])} is not {'a Krea 2 LoRA' if expect == 'krea2' else 'a Wan LoRA'}")
     if "krea2" in kinds and len(paths) > 1:
         raise ApiError("Krea 2 LoRAs are one file; use --file")
     model = kinds[0]
     sizes = {part: os.path.getsize(path) for part, path in zip(("high", "low"), paths)}
-    r = api("POST", f"/loras/{name.lower()}/uploads", {"files": "pair" if low else "single", "model": model,
-                                                       "sizes": sizes})
+    r = api("POST", f"{base}/uploads", {"files": "pair" if low else "single", "model": model, "sizes": sizes})
     for part, path in zip(("high", "low"), paths):
         label = f"{part}-noise file" if low else ("Krea 2 LoRA" if model == "krea2" else "LoRA")
         if part in (r.get("multipart") or {}):  # big file: parallel parts
@@ -1365,8 +1395,7 @@ def lora_upload(name, high, low=None, trigger="", description="", make_current=T
             upload_multipart(r["multipart"][part], path)
         else:
             put_file(r["urls"][part], path, label)
-    return api("PUT", f"/loras/{name.lower()}/versions/{r['version']}",
-               {"trigger": trigger, "description": description, "make_current": make_current})
+    return api("PUT", f"{base}/versions/{r['version']}", register_body)
 
 
 # Local copies of every LoRA (trained, uploaded, avatar): <download dir>/loras/<name>/v<N>/. `.files.json`
@@ -2004,11 +2033,16 @@ def main():
                                    "pick <job_id> <n> | use --name N | history | restore <version> | "
                                    "krea-train --name N | media --name N (photos + 2 s clips) | "
                                    "wan-train --name N (Wan LoRA from its media) | "
+                                   "lora --name N --krea F --wan F (upload its LoRAs made elsewhere) | "
                                    "delete --name N [--with-loras] (no undo). "
                                    "An avatar holds up to 12 images of the same person; photos and "
                                    "keyframes use the first 3 (best: full-length, face close-up, another angle).")
     a.add_argument("action", choices=["list", "refresh", "add", "images", "remove", "main", "pick", "use",
-                                      "history", "restore", "krea-train", "media", "wan-train", "delete"])
+                                      "history", "restore", "krea-train", "media", "wan-train", "delete", "lora"])
+    a.add_argument("--krea", help="lora: the avatar's Krea 2 LoRA (.safetensors)")
+    a.add_argument("--wan", help="lora: the avatar's Wan LoRA, one file for both experts (.safetensors)")
+    a.add_argument("--wan-high", help="lora: the Wan LoRA's high-noise file (with --wan-low)")
+    a.add_argument("--wan-low", help="lora: the Wan LoRA's low-noise file")
     a.add_argument("--with-loras", action="store_true",
                    help="delete: also delete the avatar's own LoRAs and their training photos")
     a.add_argument("--yes", action="store_true", help="delete: don't ask")

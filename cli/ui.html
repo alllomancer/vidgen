@@ -176,6 +176,8 @@ form:not(.krea) .krea-text { display: none !important; }
   #realism-body .suggest { white-space: pre-wrap; }
   .phone-link { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
   #phone-qr { width: 176px; height: 176px; flex: none; border-radius: 6px; }
+  #avatar-lora-form .row { display: flex; gap: 6px; margin-top: 4px; }
+  #avatar-lora-form .row input { flex: 1; min-width: 0; }
 </style>
 </head>
 <body>
@@ -516,6 +518,24 @@ form:not(.krea) .krea-text { display: none !important; }
     <button type="button" id="viewer-close" title="Esc">Close</button>
   </div>
   <div class="v-stage"><img id="viewer-img" alt=""></div>
+</dialog>
+<dialog id="avatar-lora-dialog" aria-labelledby="avatar-lora-h">
+  <form method="dialog" class="add" id="avatar-lora-form">
+    <h2 id="avatar-lora-h" class="wide" style="margin:0;font-size:16px"></h2>
+    <p class="hint wide">LoRAs trained elsewhere for this person. Each becomes the next version of the avatar's own LoRA and
+      is used right away (trigger word: the avatar's name). Fill one or both.</p>
+    <label class="wide">Krea 2 LoRA (one .safetensors; Krea photos and first frames)
+      <span class="row"><input name="krea" placeholder="/full/path/krea.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="krea">Choose…</button></span></label>
+    <label class="wide">Wan LoRA (one file for both experts, or the high-noise file; videos)
+      <span class="row"><input name="wan" placeholder="/full/path/wan_high.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan">Choose…</button></span></label>
+    <label class="wide">Wan low-noise file (optional, with a high-noise file above)
+      <span class="row"><input name="wan_low" placeholder="/full/path/wan_low.safetensors" autocomplete="off"><button type="button" class="small" data-pick-lora="wan_low">Choose…</button></span></label>
+    <p class="hint wide err" id="avatar-lora-err" role="alert"></p>
+    <div class="wide" style="display:flex;gap:8px;justify-content:flex-end">
+      <button value="upload" class="primary">Upload</button>
+      <button value="">Cancel</button>
+    </div>
+  </form>
 </dialog>
 <dialog id="realism-dialog" aria-labelledby="realism-h">
   <form method="dialog" class="add">
@@ -1151,6 +1171,12 @@ function renderUploadedLoras() {
   }
   $("uploaded-loras").innerHTML = rows.length ? `<h3 style="font-size:13px;margin:12px 0 4px">Uploaded</h3><ul class="plain">${rows.join("")}</ul>` : "";
 }
+$("avatar-lora-form").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-pick-lora]");
+  if (!b) return;
+  try { const r = await api("POST", "/api/pick-file"); if (r.file) $("avatar-lora-form").elements[b.dataset.pickLora].value = r.file; }
+  catch (err) { $("avatar-lora-err").textContent = err.message; }
+});
 $("add-lora").onclick = async e => {
   const b = e.target.closest("button[data-pick]");
   if (!b) return;
@@ -1435,6 +1461,7 @@ function avatarCard(a) {
     <div class="media-preview" data-media-for="${name}"></div>
     <div class="actions">${createOptions.def === a.name ? "" :
       `<button class="small" data-avatar-default="${name}" aria-label="Make ${name} the default avatar">Make default</button>`}
+      <button class="small" data-avatar-loras="${name}" aria-label="Upload LoRAs made elsewhere for ${name}">Upload LoRAs</button>
       <button class="small" data-avatar-delete="${name}" aria-label="Delete avatar ${name}">Delete</button></div>
   </article>`;
 }
@@ -1464,13 +1491,29 @@ function loadAvatarThumbs() {
 $("avatars").onclick = async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  const d = b.dataset, name = d.kreaTrain || d.wanTrain || d.mediaPlay || d.mediaMake || d.avatarDefault || d.avatarDelete;
+  const d = b.dataset, name = d.kreaTrain || d.wanTrain || d.mediaPlay || d.mediaMake || d.avatarDefault || d.avatarDelete ||
+    d.avatarLoras;
   const path = `/api/avatars/${encodeURIComponent(name)}`;
   try {
     if (d.avatarDefault) {
       b.disabled = true;
       await api("PUT", "/api/avatars/default", {name});
       toast(`${name} is now the default avatar`);
+      await loadCreateOptions();
+      return;
+    }
+    if (d.avatarLoras) {  // docs/specs/2026-11-27-avatar-lora-upload.md
+      const f = $("avatar-lora-form");
+      f.reset();
+      $("avatar-lora-h").textContent = `Upload LoRAs for ${name}`;
+      $("avatar-lora-err").textContent = "";
+      if (await askDialog($("avatar-lora-dialog")) !== "upload") return;
+      const body = {krea: f.elements.krea.value.trim(), wan: f.elements.wan.value.trim(), wan_low: f.elements.wan_low.value.trim()};
+      if (!body.krea && !body.wan) { showError("Choose a Krea 2 file and/or a Wan file"); return; }
+      b.disabled = true;
+      toast(`Uploading ${name}'s LoRAs… (big files take a while)`);
+      const r = await api("POST", `${path}/loras`, body);
+      toast((r.uploaded || []).map(u => `${u.model === "krea2" ? "Krea 2" : "Wan"} LoRA v${u.version}`).join(" and ") + ` ready for ${name}`);
       await loadCreateOptions();
       return;
     }
