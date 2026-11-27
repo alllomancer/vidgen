@@ -767,6 +767,12 @@ def check_once():
                             continue
                     log(f"{job_id}: download failed, will retry: {e}")
                     continue
+                try:
+                    extra = save_realism(local, remote)
+                    if extra:
+                        saved = saved + [extra]
+                except OSError as e:
+                    log(f"{job_id}: couldn't save the AI-look verdict: {e}")
                 local["status"] = "downloaded"
                 local["files"] = saved
                 local.pop("progress", None)
@@ -1720,6 +1726,9 @@ def realism_flags(parser, what):
             "make avatar keyframes with the full 40-step image model (about +1.5 min per keyframe); "
             "the video model is unchanged")
     parser.add_argument("--best", action="store_true", help=f"best quality: {best}")
+    parser.add_argument("--realism-check", action="store_true",
+                        help="after the render, have the vision model rate how AI-made it looks and suggest a prompt "
+                             "and settings that look more real (about 1-2 min more; a critique, not a detector)")
 
 
 def photos_body(args):
@@ -1764,7 +1773,28 @@ def photos_body(args):
 
 
 def realism_body(args):
-    return {"look": args.look, "natural_skin": args.natural_skin, "candid": args.candid, "grain": args.grain}
+    body = {"look": args.look, "natural_skin": args.natural_skin, "candid": args.candid, "grain": args.grain}
+    if getattr(args, "realism_check", False):
+        body["realism_check"] = True
+    return body
+
+
+def save_realism(local, remote):
+    """The AI-look verdict of a downloaded job: logged, and saved as realism.json next to its files (in a photos
+    folder; <base>.realism.json beside a video). docs/specs/2026-11-27-realism-check.md"""
+    verdict = (remote.get("result") or {}).get("realism")
+    if not isinstance(verdict, dict):
+        return None
+    out = local["out"]
+    path = os.path.join(out, "realism.json") if os.path.isdir(out) else os.path.splitext(out)[0] + ".realism.json"
+    with open(path, "w") as f:
+        json.dump(verdict, f, indent=2)
+    if isinstance(verdict.get("score"), int):
+        signs = "; ".join(str(s) for s in verdict.get("signs") or [])
+        log(f"AI look {verdict['score']}/10{': ' + signs if signs else ''} (suggestion in {os.path.basename(path)})")
+    else:
+        log(f"AI-look check: {verdict.get('error', 'no verdict')}")
+    return path
 
 
 def video_quality(args):
