@@ -1885,36 +1885,51 @@ for (const tab of document.querySelectorAll('[role="tab"]')) {
 $("refresh").onclick = () => { loadStatus(); loadJobs(); loadThemes(); loadCreateOptions(); };
 loadStatus(); loadJobs(); loadThemes(); loadCreateOptions();
 // ---------------------------------------------------------------- phones (docs/specs/2026-11-27-phone-pairing.md)
-let pairTimer = null;
+let pairTimer = null, pendingShown = "";
+const setText = (id, text) => { if ($(id).textContent !== text) $(id).textContent = text; };  // no re-announcing
+const pairWhen = (t, opts) => Number.isFinite(Number(t)) && t ? new Date(t * 1000).toLocaleString([], opts) : "?";
 async function loadPhones() {
-  let r;
-  try { r = await api("GET", "/api/pairings"); $("pair-err").textContent = ""; }
-  catch (e) { $("pair-err").textContent = `Phones unavailable: ${e.message}`; return; }
+  clearTimeout(pairTimer);
+  let r, busy = false;
+  try {
+    r = await api("GET", "/api/pairings");
+    setText("pair-err", "");
+  } catch (e) {
+    setText("pair-err", `Phones unavailable: ${e.message}`);
+    pairTimer = setTimeout(loadPhones, 15000);
+    return;
+  }
   const now = Date.now() / 1000;
   const open = r.open_until && r.open_until > now;
-  $("pair-window").textContent = open
+  setText("pair-window", open
     ? `Waiting for a phone for ${Math.max(1, Math.round((r.open_until - now) / 60))} more min: on the phone, tap Pair this phone.`
-    : "";
-  $("pair-open").textContent = open ? "Keep waiting (10 more min)" : "Pair a phone";
-  const pending = r.pending || [];
-  $("pair-pending").innerHTML = pending.map(p => `<div class="pair-req">
+    : "");
+  setText("pair-open", open ? "Keep waiting (10 more min)" : "Pair a phone");
+  const pending = (r.pending || []).filter(p => /^[0-9]{6}$/.test(String(p.code)));
+  busy = pending.length > 0;
+  const key = pending.map(p => p.code).join(",");
+  if (key !== pendingShown) {  // only when requests come or go: a name being typed and the focus stay put
+    pendingShown = key;
+    $("pair-pending").innerHTML = pending.map(p => `<div class="pair-req">
       <div><strong class="pair-code">${esc(String(p.code).replace(/(\d{3})(\d{3})/, "$1 $2"))}</strong>
-        <span class="hint">key ${esc(p.fingerprint)} · asked ${esc(new Date(p.requested_at * 1000).toLocaleTimeString([], {timeStyle: "short"}))}</span></div>
+        <span class="hint">key ${esc(p.fingerprint)} · asked ${esc(pairWhen(p.requested_at, {timeStyle: "short"}))}</span></div>
       <div class="hint">${esc(p.agent || "unknown browser")}</div>
       <p class="hint">Approve only if the phone in your hand shows this code and key.</p>
       <label class="hint" for="pair-name-${esc(p.code)}">Name</label>
       <input id="pair-name-${esc(p.code)}" class="pair-name" maxlength="32" placeholder="phone" autocomplete="off">
       <div style="display:flex;gap:8px;margin-top:6px">
-        <button class="small primary" data-pair-approve="${esc(p.code)}">Approve</button>
-        <button class="small" data-pair-decline="${esc(p.code)}">Decline</button>
+        <button class="small primary" data-pair-approve="${esc(p.code)}" aria-label="Approve ${esc(String(p.code).replace(/(\d{3})(\d{3})/, "$1 $2"))}">Approve</button>
+        <button class="small" data-pair-decline="${esc(p.code)}" aria-label="Decline ${esc(String(p.code).replace(/(\d{3})(\d{3})/, "$1 $2"))}">Decline</button>
       </div></div>`).join("");
-  const devices = r.devices || [];
-  $("pair-devices").innerHTML = devices.length ? devices.map(d => `<li>${esc(d.name)} <span class="hint">since ${
-      esc(new Date(d.added_at * 1000).toLocaleDateString())}</span>
+  }
+  const devices = (r.devices || []).filter(d => /^[0-9a-f]{8}$/.test(String(d.id)));
+  const html = devices.length ? devices.map(d => `<li>${esc(d.name)} <span class="hint">since ${
+      esc(pairWhen(d.added_at, {dateStyle: "medium"}))}</span>
       <button class="small" data-device-remove="${esc(d.id)}" aria-label="Remove ${esc(d.name)}">Remove</button></li>`).join("")
     : `<li class="hint">No phones yet.</li>`;
-  clearTimeout(pairTimer);
-  if (open || pending.length) pairTimer = setTimeout(loadPhones, 5000);  // fast while a phone may be asking
+  if ($("pair-devices").innerHTML !== html && !$("pair-devices").contains(document.activeElement)) $("pair-devices").innerHTML = html;
+  // fast while a phone may be asking, else every 30 s (a phone paired with Terraform, or from another window)
+  pairTimer = setTimeout(loadPhones, open || busy ? 5000 : 30000);
 }
 $("pair-open").onclick = async () => {
   try { await api("POST", "/api/pairings"); loadPhones(); }
@@ -1926,20 +1941,21 @@ $("pair-pending").addEventListener("click", async (ev) => {
   try {
     if (b.dataset.pairApprove) {
       const name = ($(`pair-name-${b.dataset.pairApprove}`).value || "").trim();
-      const r = await api("POST", `/api/pairings/${b.dataset.pairApprove}/approve`, {name});
+      const r = await api("POST", `/api/pairings/${encodeURIComponent(b.dataset.pairApprove)}/approve`, {name});
       toast(`${r.device.name} is paired`);
     } else if (b.dataset.pairDecline) {
-      await api("DELETE", `/api/pairings/${b.dataset.pairDecline}`);
+      await api("DELETE", `/api/pairings/${encodeURIComponent(b.dataset.pairDecline)}`);
       toast("Declined");
     }
-  } catch (e) { showError(e.message); }
+  } catch (e) { showError(e.message); b.disabled = false; }
+  pendingShown = "";  // redraw: one request is gone
   loadPhones();
 });
 $("pair-devices").addEventListener("click", async (ev) => {
   const b = ev.target.closest("button[data-device-remove]"); if (!b) return;
   if (!confirm("Remove this phone? It stops working within a minute and has to be paired again.")) return;
   b.disabled = true;
-  try { await api("DELETE", `/api/devices/${b.dataset.deviceRemove}`); toast("Removed"); }
+  try { await api("DELETE", `/api/devices/${encodeURIComponent(b.dataset.deviceRemove)}`); toast("Removed"); }
   catch (e) { showError(e.message); }
   loadPhones();
 });

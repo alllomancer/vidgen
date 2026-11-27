@@ -448,7 +448,7 @@ def job_file(job_id, index):
     return path, content_type
 
 
-PAIR_CODE = re.compile(r"\d{6}")
+PAIR_CODE = re.compile(r"[0-9]{6}")
 DEVICE_ID = re.compile(r"[0-9a-f]{8}")
 
 
@@ -470,7 +470,8 @@ def pairing(method, code=None, device=None, body=None):
     if device is not None:
         return vidgen.api("DELETE", f"/devices/{device}")
     if code is not None and method == "POST":
-        return vidgen.api("POST", f"/pairings/{code}/approve", {"name": str((body or {}).get("name") or "").strip()})
+        name = body.get("name") if isinstance(body, dict) else None
+        return vidgen.api("POST", f"/pairings/{code}/approve", {"name": str(name or "").strip()[:32]})
     if code is not None:
         return vidgen.api("DELETE", f"/pairings/{code}")
     if method == "POST":

@@ -109,6 +109,7 @@ async function startPairing(button) {
   $("pair-error").textContent = "";
   button.disabled = true;
   let p;
+  const asked = session;
   try {
     p = await requestPairing(key);
   } catch (e) {
@@ -117,6 +118,7 @@ async function startPairing(button) {
     return;
   }
   button.disabled = false;
+  if (asked !== session) return; // the page moved on meanwhile
   $("pair-code").textContent = `${p.code.slice(0, 3)} ${p.code.slice(3)}`;
   $("pair-fingerprint").textContent = String(p.fingerprint || "");
   $("pair-wait").hidden = false;
@@ -137,7 +139,9 @@ async function startPairing(button) {
       start();
       return;
     } catch (e) {
-      if (!(e instanceof Unauthorized) && !(e instanceof Offline)) $("pair-error").textContent = e.message;
+      // not approved yet: say nothing; the clock off: say so (approving won't help until it's fixed)
+      if (e instanceof Unauthorized) $("pair-error").textContent = e.clock ? e.message : "";
+      else if (!(e instanceof Offline)) $("pair-error").textContent = e.message;
     }
     pairPoll = setTimeout(check, 5000);
   };

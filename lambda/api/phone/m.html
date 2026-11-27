@@ -120,7 +120,7 @@
     <label for="pair-name">Your vidgen name</label>
     <input id="pair-name" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="the comment on your Mac key, e.g. dan">
     <p id="pair-name-error" class="sub err" hidden>Use letters, digits and . _ @ - only.</p>
-    <p class="sub">Use the same name as your Mac key (shown in the Mac dashboard under "Pair a phone"), so both see one history.</p>
+    <p class="sub">Use the same name as your Mac key (the comment at the end of its .pub line), so both see one history.</p>
     <div id="pair-steps">
       <label for="pair-line">This phone's key</label>
       <textarea id="pair-line" rows="5" readonly></textarea>
@@ -131,8 +131,8 @@
         <li>Come back here and tap <strong>Try again</strong>.</li>
       </ol>
     </div>
-    <button type="button" id="pair-retry">Try again</button>
     </details>
+    <p><button type="button" id="pair-retry">Try again</button></p>
   </section>
 
   <section id="history" hidden>
