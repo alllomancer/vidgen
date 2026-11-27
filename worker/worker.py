@@ -1396,7 +1396,7 @@ def process(job_id, receipt):
     try:
         models.set_loras(prepare_loras(params) if job["type"] in ("video", "story") else [])
         result = RUNNERS[job["type"]](job, params, workdir)
-        if params.get("realism_check") and job["type"] in realism_check.TYPES:
+        if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only"):
             result["realism"] = realism_check.check(
                 job["type"], params, result, workdir, download=lambda key, path: s3.download_file(BUCKET, key, path),
                 judge=models.judge_realism, progress=lambda msg: progress(job_id, msg))

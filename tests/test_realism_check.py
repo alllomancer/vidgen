@@ -32,11 +32,12 @@ assert a["options"] == {"look": "phone", "natural_skin": True}, "shot is for vid
 assert rc.clean('{"score": 3, "options": {"shot": "pov", "look": "neon"}}', "video")["options"] == {"shot": "pov"}
 assert rc.clean('{"score": 12}', "video")["score"] == 10 and rc.clean('{"score": -4}', "video")["score"] == 0
 assert "prompt" not in rc.clean('{"score": 2, "prompt": "x"}', "story")
-for bad in ["no json here", '{"signs": []}', '{"score": true}', '["score", 3]', '{"score": "high"}']:
+for bad in ["no json here", '{"signs": []}', '{"score": true}', '["score", 3]', '{"score": "high"}',
+            '{"score": Infinity}', '{"score": NaN}', '{"score": 3,}']:
     try:
         rc.clean(bad, "video")
         raise AssertionError(bad)
-    except ValueError:
+    except rc.BadAnswer:
         pass
 
 # ---- photos: worst score, most frequent signs, options any photo asked for
@@ -89,6 +90,21 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
     assert '"shot": "stream"' in asked[0][1] and "a boat" in asked[0][1]
     assert out == {"score": 6, "signs": ["too clean"], "prompt": "a boat, shaky phone video", "options": {"shot": "pov"},
                    "checked": "video", "note": rc.NOTE}, out
+    # variations: each take judged, the worst counts
+    store["outputs/m/j/video_2.mp4"] = store["outputs/m/j/video.mp4"]
+    scores = iter([3, 8])
+    asked.clear()
+    out = rc.check("video", {"prompt": "a boat"}, {"video_1_key": "outputs/m/j/video.mp4", "video_2_key": "outputs/m/j/video_2.mp4"},
+                   tempfile.mkdtemp(), download, lambda images, text: asked.append(images) or
+                   json.dumps({"score": next(scores), "signs": ["s"], "prompt": "p"}))
+    assert len(asked) == 2 and out["score"] == 8 and out["takes"] == [{"take": 1, "score": 3, "signs": ["s"]},
+                                                                      {"take": 2, "score": 8, "signs": ["s"]}], out
+    # a 2 s video with a longer audio track: frames still come from the picture
+    long_audio = os.path.join(tmp, "audio.mp4")
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=10:duration=2",
+                    "-f", "lavfi", "-i", "sine=duration=6", "-pix_fmt", "yuv420p", long_audio], check=True)
+    frames = rc.extract_frames(long_audio, 4, tempfile.mkdtemp(), "f")
+    assert len(frames) == 4 and all(os.path.getsize(p) > 0 for p in frames)
     out = rc.check("story", {"look": "film"}, {"video_key": "outputs/m/j/video.mp4"}, tempfile.mkdtemp(), download,
                    lambda images, text: asked.append((images, text)) or '{"score": 1, "prompt": "x"}')
     assert len(asked[-1][0]) == 6 and "prompt" not in out and out["score"] == 1
