@@ -132,6 +132,19 @@ export async function loadOrCreateKey() {
   return loadKey();
 }
 
+/** PUT a file to a presigned S3 link from POST /uploads (the bucket allows this page's origin by CORS). */
+export async function putUpload(putUrl, blob) {
+  const u = new URL(putUrl);
+  if (u.protocol !== "https:" || !u.hostname.endsWith(".amazonaws.com")) throw new Error("unexpected upload link");
+  let r;
+  try {
+    r = await fetch(u.href, { method: "PUT", body: blob, headers: { "content-type": blob.type || "application/octet-stream" } });
+  } catch (e) {
+    throw new Offline("the upload didn't go through; check the connection");
+  }
+  if (!r.ok) throw new Error(`the upload failed (HTTP ${r.status})`);
+}
+
 export class Unauthorized extends Error {
   constructor(message, clock = false) {
     super(message);

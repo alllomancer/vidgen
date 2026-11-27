@@ -57,6 +57,16 @@
   .bar { height: 6px; background: var(--line); border-radius: 3px; margin-top: 6px; overflow: hidden; }
   .bar span { display: block; height: 100%; background: var(--accent); }
   .note { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+  .seg { display: flex; gap: 6px; margin-bottom: 12px; }
+  .seg button { flex: 1; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  select { font: inherit; width: 100%; min-height: 44px; padding: 8px; border-radius: 10px; border: 1px solid var(--field);
+           background: var(--card); color: var(--fg); }
+  .check { display: flex; align-items: center; gap: 10px; font-weight: 400; min-height: 44px; margin: 4px 0; }
+  .check input { width: 22px; height: 22px; }
+  form.create .go { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  form.create .go button { flex: 0 0 auto; }
+  .form-status { font-size: 14px; }
   #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 480px; margin: 0 auto; z-index: 3;
            background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 12px; }
 </style>
@@ -66,6 +76,7 @@
   <h1>vidgen</h1>
   <nav id="nav" hidden aria-label="Sections">
     <button type="button" data-view="history">History</button>
+    <button type="button" data-view="create">Create</button>
   </nav>
 </div></header>
 <main>
@@ -107,6 +118,53 @@
       keeps this phone's key; otherwise clearing site data means pairing again.</p>
     <p id="history-empty" class="muted" hidden>No jobs yet.</p>
     <ul id="history-list" class="jobs"></ul>
+  </section>
+  <section id="create" hidden>
+    <h2 tabindex="-1">Create</h2>
+    <div class="seg" id="create-kinds" role="group" aria-label="What to make">
+      <button type="button" data-kind="video">Video</button>
+      <button type="button" data-kind="photos">Photos</button>
+      <button type="button" data-kind="story">Story</button>
+    </div>
+
+    <form class="create" data-kind="video" novalidate>
+      <label for="video-prompt">What happens</label>
+      <textarea id="video-prompt" name="prompt" rows="4" maxlength="2000" required></textarea>
+      <label for="video-seconds">Length in seconds (optional)</label>
+      <input id="video-seconds" name="seconds" type="number" inputmode="numeric" step="1" min="1" max="60" placeholder="the default for the model">
+      <label for="video-avatar">Starring</label>
+      <select id="video-avatar" name="avatar" data-avatars="video"></select>
+      <label for="video-out">File name (optional)</label>
+      <input id="video-out" name="out" autocomplete="off" autocapitalize="off" placeholder="e.g. night market.mp4">
+      <div class="go"><button type="submit" class="primary">Render</button><span class="form-status" role="status"></span></div>
+    </form>
+
+    <form class="create" data-kind="photos" novalidate hidden>
+      <label for="photos-subject">Who</label>
+      <select id="photos-subject" name="subject" data-avatars="photos"></select>
+      <div id="photos-upload" hidden>
+        <label for="photos-photo">Photo of the person</label>
+        <input id="photos-photo" name="photo" type="file" accept="image/*">
+        <p class="sub">A sharp, well-lit photo of one person works best.</p>
+      </div>
+      <label for="photos-scenes">Scenes, one per line (optional; up to 8)</label>
+      <textarea id="photos-scenes" name="scenes" rows="4" placeholder="reading in a Lisbon café&#10;on a beach at sunset"></textarea>
+      <label for="photos-count">How many photos</label>
+      <input id="photos-count" name="count" type="number" inputmode="numeric" step="1" min="1" max="8" placeholder="one per scene, or 4">
+      <label for="photos-out">Folder name (optional)</label>
+      <input id="photos-out" name="out" autocomplete="off" autocapitalize="off" placeholder="e.g. cafe">
+      <div class="go"><button type="submit" class="primary">Make photos</button><span class="form-status" role="status"></span></div>
+    </form>
+
+    <form class="create" data-kind="story" novalidate hidden>
+      <label for="story-text">Story</label>
+      <textarea id="story-text" name="story" rows="8" maxlength="20000" required></textarea>
+      <label class="check"><input type="checkbox" name="subtitles" checked> Subtitles</label>
+      <label class="check"><input type="checkbox" name="narration" checked> Narration</label>
+      <label for="story-out">File name (optional)</label>
+      <input id="story-out" name="out" autocomplete="off" autocapitalize="off">
+      <div class="go"><button type="submit" class="primary">Film it</button><span class="form-status" role="status"></span></div>
+    </form>
   </section>
 </main>
 <div id="toast" role="status" hidden></div>

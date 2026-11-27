@@ -23,6 +23,20 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
   }
 }
 
+# The phone page (served by the API at /m) uploads photos straight to presigned PUT links, so the bucket lets
+# that one origin PUT. Presigned GETs (previews, Save) are plain navigations/media loads and need no CORS.
+# docs/specs/2026-11-27-phone-ui.md
+resource "aws_s3_bucket_cors_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+  cors_rule {
+    allowed_origins = [aws_apigatewayv2_api.main.api_endpoint]
+    allowed_methods = ["PUT"]
+    allowed_headers = ["content-type"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
+  }
+}
+
 resource "aws_s3_bucket_policy" "data_tls_only" {
   bucket = aws_s3_bucket.data.id
   policy = jsonencode({

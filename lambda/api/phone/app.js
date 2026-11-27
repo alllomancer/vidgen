@@ -1,6 +1,6 @@
 // vidgen phone page. Talks only to this API, signing every call with a key that never leaves this browser.
 // Everything shown from the server goes in as text (textContent / text nodes), never parsed as HTML. docs/specs/2026-11-27-phone-ui.md
-import { COMMENT, Offline, Unauthorized, loadOrCreateKey, publicKeyLine, signedFetch } from "/m/sign.js";
+import { COMMENT, Offline, Unauthorized, loadOrCreateKey, publicKeyLine, putUpload, signedFetch } from "/m/sign.js";
 
 const REFRESH_MS = 10000;
 const NAME_KEY = "vidgen.keyName";
@@ -242,6 +242,175 @@ function startRefresh() {
   }, REFRESH_MS);
 }
 
+// ---------------------------------------------------------------- create
+
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // the API's limit for avatar and photo inputs
+const AS_IS = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
+const OUT_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._ -]{0,126}[A-Za-z0-9_-])?$/; // the API's meta.out_name rule
+let avatarList = { default: null, avatars: [] };
+
+/** A picked photo ready to upload: png/jpg/webp as they are; anything else Chrome can open (e.g. AVIF) becomes a
+ *  JPEG; a photo it can't open (HEIC on most Android builds) is refused with what to do. */
+export async function prepareImage(file) {
+  if (file.size > 2 * MAX_IMAGE_BYTES) throw new Error(`the photo is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+  let blob = file;
+  let ext = AS_IS[file.type];
+  if (!ext) {
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch (e) {
+      const kind = (file.type || file.name.split(".").pop() || "this kind of file").replace("image/", "")
+        .replace(/\+xml$/, "").toUpperCase();
+      throw new Error(`this photo is ${kind}; set the camera to JPEG or pick another photo`);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0);
+    bitmap.close();
+    blob = await new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("couldn't convert the photo"))),
+                                                            "image/jpeg", 0.92));
+    ext = "jpg";
+  }
+  if (blob.size > MAX_IMAGE_BYTES) throw new Error(`the photo is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+  return { blob, ext };
+}
+
+/** Upload one picked photo; returns its upload_key for a job or avatar. The same file is uploaded once: a retry
+ *  after the job was refused reuses it. */
+const uploaded = new WeakMap(); // File -> upload_key
+async function uploadImage(file, progress) {
+  if (uploaded.has(file)) return uploaded.get(file);
+  progress("preparing the photo…");
+  const { blob, ext } = await prepareImage(file);
+  const up = await call("POST", "/uploads", { extension: ext });
+  progress("uploading the photo…");
+  await putUpload(up.put_url, blob);
+  uploaded.set(file, up.upload_key);
+  return up.upload_key;
+}
+
+async function loadAvatars() {
+  try {
+    const r = await call("GET", "/avatars");
+    avatarList = { default: r.default || null, avatars: Array.isArray(r.avatars) ? r.avatars : [] };
+  } catch (e) {
+    if (!(e instanceof Unauthorized)) toast(`Couldn't load the avatars: ${e.message}`);
+  }
+  for (const select of document.querySelectorAll("select[data-avatars]")) fillAvatars(select);
+}
+
+function fillAvatars(select) {
+  const keep = select.value;
+  const opts = [];
+  const def = avatarList.default;
+  opts.push(el("option", { value: "" }, def ? `Default (${def})` : "Default avatar"));
+  if (select.dataset.avatars === "video") opts.push(el("option", { value: "none" }, "No avatar"));
+  for (const a of avatarList.avatars) {
+    if (a && typeof a.name === "string") opts.push(el("option", { value: a.name }, a.name));
+  }
+  if (select.dataset.avatars === "photos") opts.push(el("option", { value: "upload" }, "A photo from this phone"));
+  select.replaceChildren(...opts);
+  if ([...select.options].some((o) => o.value === keep)) select.value = keep;
+  select.dispatchEvent(new Event("change"));
+}
+
+function showKind(kind) {
+  for (const f of document.querySelectorAll("form[data-kind]")) f.hidden = f.dataset.kind !== kind;
+  for (const b of document.querySelectorAll("#create-kinds button")) b.setAttribute("aria-pressed", b.dataset.kind === kind);
+}
+
+function outName(form) {
+  const name = form.elements.out.value.trim();
+  if (name && !OUT_NAME.test(name)) {
+    throw new Error("file name: letters, digits, spaces and . _ - only (no folders), up to 128 characters");
+  }
+  return name || undefined;
+}
+
+function wholeNumber(value, what) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${what}: a whole number`);
+  return n;
+}
+
+function lines(text) {
+  return text.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+async function jobBody(form, progress) {
+  const f = form.elements;
+  const kind = form.dataset.kind;
+  if (kind === "video") {
+    const body = { type: "video", prompt: f.prompt.value.trim() };
+    if (!body.prompt) throw new Error("describe the video");
+    if (f.seconds.value) body.seconds = wholeNumber(f.seconds.value, "length");
+    if (f.avatar.value) body.avatar = f.avatar.value;
+    return body;
+  }
+  if (kind === "photos") {
+    const scenes = lines(f.scenes.value);
+    if (scenes.length > 8) throw new Error("at most 8 scenes");
+    const body = { type: "photos", count: f.count.value ? wholeNumber(f.count.value, "how many") : scenes.length || 4 };
+    if (scenes.length) body.scenes = scenes.map((prompt) => ({ prompt }));
+    if (f.subject.value === "upload") {
+      const file = f.photo.files[0];
+      if (!file) throw new Error("pick a photo of the person");
+      body.upload_key = await uploadImage(file, progress);
+    } else if (f.subject.value) {
+      body.avatar = f.subject.value;
+    }
+    return body;
+  }
+  const story = f.story.value.trim();
+  if (!story) throw new Error("write or paste the story");
+  return { type: "story", story, subtitles: f.subtitles.checked, narration: f.narration.checked };
+}
+
+async function submitCreate(form, button) {
+  const status = form.querySelector(".form-status");
+  const progress = (text) => { status.textContent = text; status.classList.remove("err"); };
+  progress("");
+  button.disabled = true;
+  try {
+    const out = outName(form);
+    const body = await jobBody(form, progress);
+    progress("sending…");
+    const meta = { source: "phone" };
+    if (out) meta.out_name = out;
+    const r = await call("POST", "/jobs", { ...body, meta });
+    progress("");
+    toast(`Queued (${String(r.job_id || "").slice(0, 8)})`);
+    form.reset();
+    for (const s of form.querySelectorAll("select[data-avatars]")) fillAvatars(s);
+    show("history");
+    refreshHistory().catch(staleNote);
+  } catch (e) {
+    if (!(e instanceof Unauthorized)) { // shown once, next to the button (the pairing screen covers a 401)
+      status.textContent = e.message;
+      status.classList.add("err");
+    } else {
+      progress("");
+    }
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setupCreate() {
+  for (const b of document.querySelectorAll("#create-kinds button")) b.addEventListener("click", () => showKind(b.dataset.kind));
+  for (const form of document.querySelectorAll("form[data-kind]")) {
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      submitCreate(form, form.querySelector("button[type=submit]"));
+    });
+  }
+  const subject = $("photos-subject");
+  subject.addEventListener("change", () => { $("photos-upload").hidden = subject.value !== "upload"; });
+  showKind("video");
+}
+
 // ---------------------------------------------------------------- start
 
 async function persistHint() {
@@ -299,10 +468,12 @@ async function main() {
     return;
   }
   setupPairing();
+  setupCreate();
   for (const b of document.querySelectorAll("nav button")) {
     b.addEventListener("click", () => {
       show(b.dataset.view);
       if (b.dataset.view === "history") refreshHistory().catch(staleNote);
+      if (b.dataset.view === "create") loadAvatars();
     });
   }
   $("history-refresh").addEventListener("click", (e) => busy(e.currentTarget, refreshHistory));

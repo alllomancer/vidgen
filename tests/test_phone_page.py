@@ -24,10 +24,14 @@ assert 'name="viewport"' in page and 'rel="manifest"' in page
 for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
     assert banned not in app, f"app.js must not use {banned}"
 assert not re.search(r"(?<![A-Za-z])fetch\(", app), "app.js calls the API only through signedFetch"
+# sign.js makes exactly two kinds of request: signed API calls (same origin) and the presigned S3 PUT
+assert len(re.findall(r"await fetch\(", sign)) == len(re.findall(r"(?<![A-Za-z.])fetch\((?!\))", sign)) == 2, "sign.js: signedFetch and putUpload only"
+assert 'u.hostname.endsWith(".amazonaws.com")' in sign and 'u.protocol !== "https:"' in sign
 assert re.findall(r'^import .* from "([^"]+)";', app, re.M) == ["/m/sign.js"]
 
 # ---- the API calls it makes are ones the phone is meant to make
-ALLOWED = {("GET", "/jobs"), ("POST", "/jobs/{id}/cancel"), ("POST", "/jobs/{id}/rerun")}
+ALLOWED = {("GET", "/jobs"), ("POST", "/jobs/{id}/cancel"), ("POST", "/jobs/{id}/rerun"), ("POST", "/jobs"),
+           ("POST", "/uploads"), ("GET", "/avatars")}
 calls = set()
 for method, path in re.findall(r'call\("([A-Z]+)", [`"]([^`"]+)[`"]', app):
     calls.add((method, re.sub(r"\$\{[^}]+\}", "{id}", path)))
@@ -39,6 +43,17 @@ used = set(re.findall(r'\$\("([^"]+)"\)', app))
 assert used <= ids, used - ids
 for view in re.findall(r'data-view="([^"]+)"', page):
     assert view in ids, f"nav button for a missing section: {view}"
+
+# ---- Create: jobs carry meta {source: phone}; the client file-name rule is the API's; HEIC gets the spec's message
+assert 'meta = { source: "phone" }' in app
+api_src = open(os.path.join(ROOT, "lambda", "api", "handler.py")).read()
+api_rule = re.search(r'OUT_NAME = re\.compile\(r"(.+?)" %', api_src).group(1) % (128 - 2)
+assert f"const OUT_NAME = /^{api_rule}$/;" in app, "phone file-name rule must match the API's"
+assert "set the camera to JPEG or pick another photo" in app
+for form_field in ('name="prompt"', 'name="seconds"', 'name="avatar"', 'name="subject"', 'name="photo"',
+                   'name="scenes"', 'name="count"', 'name="story"', 'name="subtitles"', 'name="narration"'):
+    assert form_field in page, form_field
+assert page.count('name="out"') == 3
 
 # ---- key handling: created non-extractable, only the public half is shown
 assert 'generateKey({ name: "Ed25519" }, false, ["sign"])' in sign
