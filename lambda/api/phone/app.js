@@ -226,6 +226,96 @@ function statusPart(j) {
 
 const COPYABLE = ["video", "photos", "avatar"];
 
+// ---------------------------------------------------------------- AI-look check (docs/specs/2026-11-27-realism-check.md)
+
+const REMEMBER_CHECK = "vidgen.realismCheck";
+const suggested = {}; // form kind -> realism settings carried into its next job (from Use suggestion)
+
+function realismLevel(score) {
+  return score <= 3 ? "low" : score <= 6 ? "mid" : "high";
+}
+
+function realismBadge(r) {
+  if (!r || typeof r !== "object") return null;
+  if (typeof r.score !== "number") return el("div", { class: "sub" }, `AI-look check: ${String(r.error || "no verdict")}`);
+  const words = { low: "looks real", mid: "some giveaways", high: "looks AI-made" }[realismLevel(r.score)];
+  return el("span", { class: `badge r-${realismLevel(r.score)}` }, `AI look ${Number(r.score)}/10 · ${words}`);
+}
+
+function optionsText(o) {
+  return Object.entries(o && typeof o === "object" ? o : {})
+    .map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : String(v)}`).join(" · ");
+}
+
+function showVerdict(job) {
+  const box = $("job-verdict");
+  const r = job.result && job.result.realism && typeof job.result.realism === "object" ? job.result.realism : null;
+  if (!r) { box.hidden = true; box.replaceChildren(); return; }
+  const parts = [el("h3", {}, typeof r.score === "number" ? `AI look ${Number(r.score)}/10` : "AI-look check")];
+  if (r.error) parts.push(el("p", { class: "err" }, String(r.error)));
+  const signs = Array.isArray(r.signs) ? r.signs.filter((x) => typeof x === "string") : [];
+  if (signs.length) parts.push(el("h3", {}, "What gives it away"), el("ul", {}, signs.map((x) => el("li", {}, x))));
+  const prompt = typeof r.prompt === "string" ? r.prompt : "";
+  if (prompt) parts.push(el("h3", {}, "Suggested prompt"), el("p", { class: "suggest" }, prompt));
+  const scenes = Array.isArray(r.scenes) ? r.scenes.filter((x) => typeof x === "string") : [];
+  if (scenes.length) parts.push(el("h3", {}, "Suggested scenes"), el("ol", {}, scenes.map((x) => el("li", { class: "suggest" }, x))));
+  const opts = optionsText(r.options);
+  if (opts) parts.push(el("h3", {}, "Suggested settings"), el("p", {}, opts));
+  parts.push(el("p", { class: "sub" }, String(r.note || "An AI critique of visible artifacts, not a detector.")));
+  const actions = [];
+  if (prompt || scenes.length || opts) {
+    actions.push(el("button", { class: "small primary", onclick: () => useSuggestion(job.type, r) }, "Use suggestion"));
+  }
+  if (prompt) actions.push(el("button", { class: "small", onclick: () => copyText(prompt) }, "Copy prompt"));
+  if (actions.length) parts.push(el("div", { class: "actions" }, actions));
+  box.replaceChildren(...parts);
+  box.hidden = false;
+}
+
+function setSuggested(kind, options) {
+  const form = document.querySelector(`form[data-kind="${kind}"]`);
+  if (!form) return;
+  const text = optionsText(options);
+  if (text) suggested[kind] = options;
+  else delete suggested[kind];
+  const note = form.querySelector(".suggested");
+  note.querySelector(".suggested-text").textContent = text ? `Suggested settings for the next job: ${text}` : "";
+  note.hidden = !text;
+}
+
+/** Fill the Create form of the job's kind with the suggestion (not sent until you tap the button there). */
+function useSuggestion(kind, r) {
+  const form = document.querySelector(`form[data-kind="${kind}"]`);
+  if (!form) return;
+  leaveJob();
+  show("create");
+  showKind(kind);
+  loadAvatars();
+  const f = form.elements;
+  if (kind === "video" && typeof r.prompt === "string" && r.prompt) f.prompt.value = r.prompt;
+  if (kind === "photos" && Array.isArray(r.scenes) && r.scenes.length) {
+    f.scenes.value = r.scenes.filter((x) => typeof x === "string").join("\n");
+  }
+  setSuggested(kind, r.options && typeof r.options === "object" ? r.options : {});
+  toast("Suggestion loaded: check it, then render again");
+}
+
+function setupRealismToggle() {
+  let remembered = false;
+  try { remembered = localStorage.getItem(REMEMBER_CHECK) === "1"; } catch (e) { /* not remembered */ }
+  const boxes = document.querySelectorAll('input[name="realism_check"][data-remember]');
+  for (const b of boxes) {
+    b.checked = remembered;
+    b.addEventListener("change", () => {
+      for (const other of boxes) other.checked = b.checked;
+      try { localStorage.setItem(REMEMBER_CHECK, b.checked ? "1" : "0"); } catch (e) { /* not remembered */ }
+    });
+  }
+  for (const btn of document.querySelectorAll(".suggested-clear")) {
+    btn.addEventListener("click", () => setSuggested(btn.closest("form").dataset.kind, {}));
+  }
+}
+
 function jobCard(j) {
   const actions = [];
   if (j.status === "queued" || j.status === "running") {
@@ -245,6 +335,7 @@ function jobCard(j) {
     el("div", { class: "row" }, el("strong", {}, j.type || "job"), el("span", { class: "muted" }, when + source)),
     el("div", { class: "summary" }, String(j.summary || "")),
     el("div", { class: "status" }, statusPart(j)),
+    realismBadge(j.realism),
     actions.length ? el("div", { class: "actions" }, actions) : null);
 }
 
@@ -358,6 +449,7 @@ async function openJob(jobId) {
   }
   if (openJobId !== jobId) return;
   $("job-title").textContent = `${j.type || "job"} · ${j.status || ""}`;
+  showVerdict(j);
   const downloads = j.downloads && typeof j.downloads === "object" ? j.downloads : {};
   const saves = j.saves && typeof j.saves === "object" ? j.saves : {};
   const names = Object.keys(downloads).sort((a, b) => (a === "video" ? -1 : b === "video" ? 1 : a.localeCompare(b)));
@@ -384,6 +476,8 @@ async function openJob(jobId) {
 function leaveJob() {
   openJobId = null;
   $("job-files").replaceChildren();
+  $("job-verdict").replaceChildren();
+  $("job-verdict").hidden = true;
 }
 
 // ---------------------------------------------------------------- avatars
@@ -559,6 +653,12 @@ function lines(text) {
 }
 
 async function jobBody(form, progress) {
+  const body = await kindBody(form, progress);
+  if (form.elements.realism_check.checked) body.realism_check = true;
+  return { ...(suggested[form.dataset.kind] || {}), ...body };
+}
+
+async function kindBody(form, progress) {
   const f = form.elements;
   const kind = form.dataset.kind;
   if (kind === "video") {
@@ -601,7 +701,10 @@ async function submitCreate(form, button) {
     const r = await call("POST", "/jobs", { ...body, meta });
     progress("");
     toast(`Queued (${String(r.job_id || "").slice(0, 8)})`);
+    const keepCheck = form.elements.realism_check.checked;
     form.reset();
+    form.elements.realism_check.checked = keepCheck; // remembered, not reset
+    setSuggested(form.dataset.kind, {});
     for (const s of form.querySelectorAll("select[data-avatars]")) fillAvatars(s);
     show("history");
     refreshHistory().catch(staleNote);
@@ -689,6 +792,7 @@ async function main() {
   }
   setupPairing();
   setupCreate();
+  setupRealismToggle();
   $("job-back").addEventListener("click", () => {
     leaveJob();
     show("history");

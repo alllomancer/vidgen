@@ -80,6 +80,14 @@
   .pair-code { font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: 3px; margin: 4px 0 8px; }
   details.fallback { margin-top: 24px; }
   details.fallback summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--muted); }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px;
+           border: 1px solid currentColor; margin-top: 6px; }
+  .badge.r-low { color: var(--ok); }
+  .badge.r-mid { color: var(--warn); }
+  .badge.r-high { color: var(--err); }
+  .verdict { margin-top: 16px; }
+  .verdict h3 { font-size: 15px; margin: 12px 0 4px; }
+  .verdict .suggest { white-space: pre-wrap; overflow-wrap: anywhere; }
   #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 480px; margin: 0 auto; z-index: 3;
            background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 12px; }
 </style>
@@ -153,6 +161,7 @@
       <button type="button" id="job-back" class="small">← History</button>
       <h2 tabindex="-1" id="job-title"></h2>
     </div>
+    <div id="job-verdict" class="verdict note" hidden></div>
     <ul id="job-files" class="files"></ul>
     <p id="job-note" class="sub"></p>
   </section>
@@ -180,6 +189,8 @@
       <select id="video-avatar" name="avatar" data-avatars="video"></select>
       <label for="video-out">File name (optional)</label>
       <input id="video-out" name="out" autocomplete="off" autocapitalize="off" placeholder="e.g. night market.mp4">
+      <label class="check"><input type="checkbox" name="realism_check" data-remember> Check how AI it looks (about 1-2 min more)</label>
+      <p class="note suggested" hidden><span class="suggested-text"></span> <button type="button" class="small suggested-clear">Remove</button></p>
       <div class="go"><button type="submit" class="primary">Render</button><span class="form-status" role="status"></span></div>
     </form>
 
@@ -197,6 +208,8 @@
       <input id="photos-count" name="count" type="number" inputmode="numeric" step="1" min="1" max="8" placeholder="one per scene, or 4">
       <label for="photos-out">Folder name (optional)</label>
       <input id="photos-out" name="out" autocomplete="off" autocapitalize="off" placeholder="e.g. cafe">
+      <label class="check"><input type="checkbox" name="realism_check" data-remember> Check how AI it looks (about 1-2 min more)</label>
+      <p class="note suggested" hidden><span class="suggested-text"></span> <button type="button" class="small suggested-clear">Remove</button></p>
       <div class="go"><button type="submit" class="primary">Make photos</button><span class="form-status" role="status"></span></div>
     </form>
 
@@ -207,6 +220,8 @@
       <label class="check"><input type="checkbox" name="narration" checked> Narration</label>
       <label for="story-out">File name (optional)</label>
       <input id="story-out" name="out" autocomplete="off" autocapitalize="off">
+      <label class="check"><input type="checkbox" name="realism_check" data-remember> Check how AI it looks (about 1-2 min more)</label>
+      <p class="note suggested" hidden><span class="suggested-text"></span> <button type="button" class="small suggested-clear">Remove</button></p>
       <div class="go"><button type="submit" class="primary">Film it</button><span class="form-status" role="status"></span></div>
     </form>
   </section>
