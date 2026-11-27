@@ -888,17 +888,14 @@ async function showRealism(jobId) {
   const d = $("realism-dialog");
   $("realism-h").textContent = typeof r.score === "number" ? `AI look ${r.score}/10` : "AI-look check";
   const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
-  const opts = Object.entries(r.options && typeof r.options === "object" ? r.options : {})
-    .map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : v}`);
   const scenes = Array.isArray(r.scenes) ? r.scenes.map(String) : [];
   $("realism-body").innerHTML = (r.error ? `<p class="err">${esc(r.error)}</p>` : "") +
     (signs.length ? `<h3>What gives it away</h3><ul class="plain">${signs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "") +
     (typeof r.prompt === "string" && r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
     (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}" aria-label="Copy scene ${i + 1}">Copy</button>${
         r.photos && r.photos[i] ? ` <span class="hint">(${Number(r.photos[i].score)}/10)</span>` : ""}</li>`).join("")}</ol>` : "") +
-    (opts.length ? `<h3>Suggested settings</h3><p>${esc(opts.join(" · "))}</p>` : "") +
     `<p class="hint">${esc(r.note || "An AI critique of visible artifacts, not a detector.")}</p>`;
-  $("realism-use").disabled = !(r.prompt || scenes.length || opts.length);
+  $("realism-use").disabled = !(r.prompt || scenes.length);
   $("realism-copy").hidden = !r.prompt;
   askDialog(d);
 }
@@ -918,11 +915,7 @@ function useRealism() {
     const worst = photos.reduce((w, p, i) => (Number(p && p.score) > Number((photos[w] || {}).score ?? -1) ? i : w), 0);
     f.elements.prompt.value = String(r.scenes[worst] || r.scenes[0]);
   }
-  const o = r.options || {};
-  if (o.look && f.elements.look) f.elements.look.value = o.look;
-  for (const k of ["natural_skin", "candid", "grain"]) if (k in o && f.elements[k]) f.elements[k].checked = !!o[k];
-  if (kind === "video") for (const el of f.querySelectorAll('input[name="shot"]')) el.checked = el.value === o.shot;  // none suggested: none
-  toast("Suggestion loaded into the form: check it, then render again");
+  toast("Suggested prompt loaded into the form: check it, then render again");
 }
 
 function rowHtml(j) {

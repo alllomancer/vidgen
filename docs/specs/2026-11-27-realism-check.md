@@ -106,3 +106,19 @@ candidates, LoRA previews or avatar media; per-shot story verdicts; a realism hi
 Unit: `tests/test_realism_check.py` (frame times, answer cleaning, photo aggregation, failure → error, job without
 the flag untouched, worker hook with the VLM mocked), API flag/list summary in `tests/test_realism_api.py`, page
 checks in `tests/test_ui_page.py` / `tests/test_phone_page.py`. Live: a checked photos job and video job on the g7e.
+
+## Update: suggestions in the prompt, score from checks (2026-11-27)
+
+After the first real runs the user found the suggestions weak and the score always 7/10:
+
+- **No settings suggested.** The model rewrites the prompt with the fixes in the words themselves (camera or phone
+  and lens, the real light source and time of day, natural imperfections, ordinary framing), keeping subject, place,
+  action and mood, at most twice the original length; buzzwords that make results look more generated
+  ("photorealistic", "8k", "masterpiece", "ultra detailed", "perfect skin", ...) are banned in the instruction and
+  removed from the answer (`AI_WORDS`). `result.realism` has no `options`; **Use suggestion** fills only the prompt
+  or scenes and leaves the form's settings alone. This replaces the `options` parts of Design and the criteria
+  above.
+- **Score from checks.** The model rates ten giveaways one by one, 0 (none), 1 (slight) or 2 (clear): skin, hands,
+  face, text, light, background, colour, symmetry, physics, polish (`CHECKS`); the score is 3 per clear plus 1 per
+  slight, up to 10 (`score_from_checks`), and `result.realism.checks` keeps the ratings. A holistic 0-10 answer
+  from a 7B vision model sat at 7 almost every time. An answer with only a `score` still reads.

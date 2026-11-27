@@ -17,35 +17,44 @@ import realism_check as rc  # noqa: E402
 assert rc.frame_times(8.0, 4) == [1.0, 3.0, 5.0, 7.0]  # 12.5 / 37.5 / 62.5 / 87.5 %
 assert rc.frame_times(12.0, 6) == [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
 
-# ---- the question names the prompt, the settings and only allowed values
+# ---- the question: the prompt, the settings, every check; the suggestion goes in the prompt, no vidgen settings
 q = rc.instruction("video", "a woman walks in the rain", {"look": "pro"})
-assert "a woman walks in the rain" in q and '"look": "pro"' in q and "stream, pov" in q and '"prompt"' in q
-assert "shot" not in rc.instruction("photo", "x", {}) and '"prompt"' not in rc.instruction("story", None, {})
+assert "a woman walks in the rain" in q and '"look": "pro"' in q and '"prompt"' in q and '"checks"' in q
+assert all(f'"{k}": 0|1|2' in q for k in rc.CHECKS) and '"options"' not in q and '"score"' not in q
+assert "camera or phone" in q and "photorealistic" in q  # concrete camera words in; buzzwords named as banned
+assert '"prompt"' not in rc.instruction("story", None, {})
+
+# ---- the score comes from the checks: 3 per clear giveaway, 1 per slight one, up to 10
+assert rc.score_from_checks({}) == 0 and rc.score_from_checks({"skin": 1}) == 1 and rc.score_from_checks({"hands": 2}) == 3
+assert rc.score_from_checks({"skin": 2, "hands": 1, "polish": 2}) == 7
+assert rc.score_from_checks({k: 2 for k in rc.CHECKS}) == 10
+assert rc.score_from_checks({"skin": "2", "hands": True, "face": 7, "text": -1, "light": float("nan")}) == 6
 
 # ---- reading answers
-a = rc.clean('Sure! {"score": 7.6, "signs": ["waxy skin", "  too-perfect\\nlight ", "", 5, "' + "x" * 200 + '",'
-             '"a", "b", "c"], "prompt": "candid phone photo of a woman in the rain", '
-             '"options": {"look": "phone", "natural_skin": true, "grain": "yes", "shot": "pov", "evil": 1}}', "photo")
-assert a["score"] == 8 and a["signs"][:2] == ["waxy skin", "too-perfect light"] and len(a["signs"]) == 5, a
-assert len(a["signs"][2]) == 80 and a["prompt"].startswith("candid")
-assert a["options"] == {"look": "phone", "natural_skin": True}, "shot is for videos; bad values dropped"
-assert rc.clean('{"score": 3, "options": {"shot": "pov", "look": "neon"}}', "video")["options"] == {"shot": "pov"}
+a = rc.clean('Sure! {"checks": {"skin": 2, "light": 1, "colour": 0}, "signs": ["waxy skin", "  too-perfect\\nlight ", '
+             '"", 5, "' + "x" * 200 + '", "a", "b", "c"], "prompt": "A hyperrealistic 8k photo of a woman in the rain, '
+             'masterpiece, shot on a phone at dusk, wet hair, street light from the left", "options": {"look": "phone"}}',
+             "photo")
+assert a["score"] == 4 and a["checks"]["skin"] == 2 and a["checks"]["hands"] == 0, a
+assert a["signs"][:2] == ["waxy skin", "too-perfect light"] and len(a["signs"]) == 5 and len(a["signs"][2]) == 80
+assert a["prompt"] == "A photo of a woman in the rain, shot on a phone at dusk, wet hair, street light from the left", a
+assert "options" not in a, "no vidgen settings are suggested"
+assert rc.clean('{"score": 3}', "video")["score"] == 3, "an answer with only a score still reads"
 assert rc.clean('{"score": 12}', "video")["score"] == 10 and rc.clean('{"score": -4}', "video")["score"] == 0
-assert "prompt" not in rc.clean('{"score": 2, "prompt": "x"}', "story")
+assert "prompt" not in rc.clean('{"checks": {"skin": 1}, "prompt": "x"}', "story")
+assert "prompt" not in rc.clean('{"checks": {"skin": 1}, "prompt": "8k, masterpiece"}', "photo"), "only buzzwords: none"
 for bad in ["no json here", '{"signs": []}', '{"score": true}', '["score", 3]', '{"score": "high"}',
-            '{"score": Infinity}', '{"score": NaN}', '{"score": 3,}']:
+            '{"score": Infinity}', '{"score": NaN}', '{"score": 3,}', '{"checks": {"nope": 2}}']:
     try:
         rc.clean(bad, "video")
         raise AssertionError(bad)
     except rc.BadAnswer:
         pass
 
-# ---- photos: worst score, most frequent signs, options any photo asked for
-agg = rc.aggregate_photos([
-    {"score": 3, "signs": ["Waxy skin"], "options": {"look": "candid", "grain": False}},
-    {"score": 8, "signs": ["waxy skin", "warped fingers"], "options": {"look": "phone", "grain": True}},
-    {"score": 5, "signs": ["warped fingers", "waxy skin"], "options": {"look": "phone"}}])
-assert agg == {"score": 8, "signs": ["Waxy skin", "warped fingers"], "options": {"look": "phone", "grain": True}}, agg
+# ---- photos: worst score, most frequent signs
+agg = rc.aggregate_photos([{"score": 3, "signs": ["Waxy skin"]}, {"score": 8, "signs": ["waxy skin", "warped fingers"]},
+                           {"score": 5, "signs": ["warped fingers", "waxy skin"]}])
+assert agg == {"score": 8, "signs": ["Waxy skin", "warped fingers"]}, agg
 
 # ---- check(): photos job end to end with fakes
 tmp = tempfile.mkdtemp()
@@ -64,17 +73,16 @@ asked = []
 def judge(images, text):
     asked.append((list(images), text))
     n = len(asked)
-    return json.dumps({"score": 2 + n * 3, "signs": [f"sign {n}"], "prompt": f"better scene {n}",
-                       "options": {"natural_skin": n == 2}})
+    return json.dumps({"checks": {"skin": 2, "hands": n}, "signs": [f"sign {n}"], "prompt": f"better scene {n}"})
 
 
 result = {"photo_1_key": "outputs/m/j/photo_1.png", "photo_2_key": "outputs/m/j/photo_2.png",
           "scenes": [{"photo": 1, "text": "in a cafe"}, {"photo": 2, "text": "on a beach"}]}
 out = rc.check("photos", {"look": "pro", "natural_skin": False}, result, tmp, download, judge)
 assert [len(i) for i, _ in asked] == [1, 1] and "in a cafe" in asked[0][1] and "on a beach" in asked[1][1]
-assert out["score"] == 8 and out["scenes"] == ["better scene 1", "better scene 2"], out
-assert out["photos"] == [{"photo": 1, "score": 5, "signs": ["sign 1"]}, {"photo": 2, "score": 8, "signs": ["sign 2"]}]
-assert out["options"] == {"natural_skin": True} and out["checked"] == "photos" and out["note"] == rc.NOTE
+assert out["score"] == 6 and out["scenes"] == ["better scene 1", "better scene 2"], out
+assert out["photos"] == [{"photo": 1, "score": 4, "signs": ["sign 1"]}, {"photo": 2, "score": 6, "signs": ["sign 2"]}]
+assert "options" not in out and out["checked"] == "photos" and out["note"] == rc.NOTE
 
 # ---- check(): a video, frames taken at the spec's moments (real ffmpeg when available)
 if shutil.which("ffmpeg") and shutil.which("ffprobe"):
@@ -85,11 +93,11 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
     asked.clear()
     out = rc.check("video", {"prompt": "a boat", "look": "pro", "shot": "stream"}, {"video_key": "outputs/m/j/video.mp4"},
                    tempfile.mkdtemp(), download, lambda images, text: asked.append((images, text)) or
-                   '{"score": 6, "signs": ["too clean"], "prompt": "a boat, shaky phone video", "options": {"shot": "pov"}}')
+                   '{"checks": {"background": 2, "polish": 2}, "signs": ["too clean"], "prompt": "a boat, shaky phone video"}')
     assert len(asked[0][0]) == 4 and all(os.path.getsize(p) > 0 for p in asked[0][0])
     assert '"shot": "stream"' in asked[0][1] and "a boat" in asked[0][1]
-    assert out == {"score": 6, "signs": ["too clean"], "prompt": "a boat, shaky phone video", "options": {"shot": "pov"},
-                   "checked": "video", "note": rc.NOTE}, out
+    assert out["score"] == 6 and out["signs"] == ["too clean"] and out["prompt"] == "a boat, shaky phone video", out
+    assert out["checks"]["background"] == 2 and out["checked"] == "video" and out["note"] == rc.NOTE and "options" not in out
     # variations: each take judged, the worst counts
     store["outputs/m/j/video_2.mp4"] = store["outputs/m/j/video.mp4"]
     scores = iter([3, 8])

@@ -398,11 +398,11 @@ vidgen ui --port 9000 --no-browser
 
 Tick **Check how AI it looks** in the Video, Photos or Story form (dashboard or phone; remembered on that device), or add `--realism-check` to `vidgen video`, `photos` or `story`. After the render, the vision model (Qwen2.5-VL, already on the box) looks at each photo, or 4 frames of a video (each take of a job with variations) or 6 frames of a story, and returns:
 
-- a **score** from 0 (could pass as real) to 10 (obviously AI), shown as a badge in History ("AI look 7/10 · looks AI-made");
+- a **score** from 0 (could pass as real) to 10 (obviously AI), shown as a badge in History ("AI look 7/10 · looks AI-made"). It is counted from ten giveaways the model rates one by one (plastic skin, hands, eyes and teeth, text, light and shadows, background, colour, symmetry, physics, overall polish): 3 points for each clear one and 1 for each slight one;
 - up to 5 **giveaways** it sees (waxy skin, too-perfect light, warped fingers, garbled text, a background that's too clean, ...);
-- a **suggested prompt** (videos), **scenes** (photos) and **settings** (look, natural skin, candid, grain, and for videos the shot).
+- a **suggested prompt** (videos) or **scenes** (photos): your prompt rewritten with the fixes in the words themselves (camera or phone, the real light source and time of day, natural imperfections such as skin texture, flyaway hair, clutter or slight blur), without "photorealistic / 8k / masterpiece"-style words, which make results look more generated. It doesn't change any vidgen settings.
 
-**Use suggestion** (in the badge's details on the Mac, on the job's screen on the phone) puts the suggestion into the Create form; nothing renders until you send it. On the phone, the suggested settings are listed above the button and go with that form's next job (**Remove** drops them). The watcher logs the verdict and saves it as `realism.json` next to the files.
+**Use suggestion** (in the badge's details on the Mac, on the job's screen on the phone) puts the suggested prompt (or scenes) into the Create form; nothing renders until you send it, and your settings stay as they are. The watcher logs the verdict and saves it as `realism.json` next to the files.
 
 It adds about 1-2 minutes (the vision model is loaded after the render). It's a critique of what's visible by a general vision model, not an AI detector: the score varies between runs, and the giveaways are the useful part. If the check fails, the job is still done and the badge says why.
 

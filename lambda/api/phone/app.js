@@ -229,7 +229,6 @@ const COPYABLE = ["video", "photos", "avatar"];
 // ---------------------------------------------------------------- AI-look check (docs/specs/2026-11-27-realism-check.md)
 
 const REMEMBER_CHECK = "vidgen.realismCheck";
-const suggested = {}; // form kind -> realism settings carried into its next job (from Use suggestion)
 
 function realismLevel(score) {
   return score <= 3 ? "low" : score <= 6 ? "mid" : "high";
@@ -240,11 +239,6 @@ function realismBadge(r) {
   if (typeof r.score !== "number") return el("div", { class: "sub" }, `AI-look check: ${String(r.error || "no verdict")}`);
   const words = { low: "looks real", mid: "some giveaways", high: "looks AI-made" }[realismLevel(r.score)];
   return el("span", { class: `badge r-${realismLevel(r.score)}` }, `AI look ${Number(r.score)}/10 · ${words}`);
-}
-
-function optionsText(o) {
-  return Object.entries(o && typeof o === "object" ? o : {})
-    .map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : String(v)}`).join(" · ");
 }
 
 function showVerdict(job) {
@@ -259,42 +253,15 @@ function showVerdict(job) {
   if (prompt) parts.push(el("h3", {}, "Suggested prompt"), el("p", { class: "suggest" }, prompt));
   const scenes = Array.isArray(r.scenes) ? r.scenes.filter((x) => typeof x === "string") : [];
   if (scenes.length) parts.push(el("h3", {}, "Suggested scenes"), el("ol", {}, scenes.map((x) => el("li", { class: "suggest" }, x))));
-  const opts = optionsText(r.options);
-  if (opts) parts.push(el("h3", {}, "Suggested settings"), el("p", {}, opts));
   parts.push(el("p", { class: "sub" }, String(r.note || "An AI critique of visible artifacts, not a detector.")));
   const actions = [];
-  if (prompt || scenes.length || opts) {
+  if (prompt || scenes.length) {
     actions.push(el("button", { class: "small primary", onclick: () => useSuggestion(job.type, r) }, "Use suggestion"));
   }
   if (prompt) actions.push(el("button", { class: "small", onclick: () => copyText(prompt) }, "Copy prompt"));
   if (actions.length) parts.push(el("div", { class: "actions" }, actions));
   box.replaceChildren(...parts);
   box.hidden = false;
-}
-
-const LOOKS = ["pro", "phone", "candid", "portrait", "film"];
-const SHOTS = ["stream", "pov"];
-
-/** Only the realism settings the API takes for this kind of job, with the right types. */
-function allowedOptions(kind, o) {
-  const out = {};
-  if (!o || typeof o !== "object") return out;
-  if (LOOKS.includes(o.look)) out.look = o.look;
-  for (const k of ["natural_skin", "candid", "grain"]) if (typeof o[k] === "boolean") out[k] = o[k];
-  if (kind === "video" && SHOTS.includes(o.shot)) out.shot = o.shot;
-  return out;
-}
-
-function setSuggested(kind, raw) {
-  const form = document.querySelector(`form[data-kind="${kind}"]`);
-  if (!form) return;
-  const options = allowedOptions(kind, raw);
-  const text = optionsText(options);
-  if (text) suggested[kind] = options;
-  else delete suggested[kind];
-  const note = form.querySelector(".suggested");
-  note.querySelector(".suggested-text").textContent = text ? `Suggested settings for the next job: ${text}` : "";
-  note.hidden = !text;
 }
 
 /** Fill the Create form of the job's kind with the suggestion (not sent until you tap the button there). */
@@ -311,8 +278,7 @@ function useSuggestion(kind, r) {
     f.scenes.value = r.scenes.filter((x) => typeof x === "string").slice(0, 8).join("\n");
     f.count.value = ""; // one photo per suggested scene
   }
-  setSuggested(kind, r.options && typeof r.options === "object" ? r.options : {});
-  toast("Suggestion loaded: check it, then render again");
+  toast("Suggested prompt loaded: check it, then render again");
 }
 
 function setupRealismToggle() {
@@ -325,9 +291,6 @@ function setupRealismToggle() {
       for (const other of boxes) other.checked = b.checked;
       try { localStorage.setItem(REMEMBER_CHECK, b.checked ? "1" : "0"); } catch (e) { /* not remembered */ }
     });
-  }
-  for (const btn of document.querySelectorAll(".suggested-clear")) {
-    btn.addEventListener("click", () => setSuggested(btn.closest("form").dataset.kind, {}));
   }
 }
 
@@ -670,7 +633,7 @@ function lines(text) {
 async function jobBody(form, progress) {
   const body = await kindBody(form, progress);
   if (form.elements.realism_check.checked) body.realism_check = true;
-  return { ...(suggested[form.dataset.kind] || {}), ...body };
+  return body;
 }
 
 async function kindBody(form, progress) {
@@ -719,7 +682,6 @@ async function submitCreate(form, button) {
     const keepCheck = form.elements.realism_check.checked;
     form.reset();
     form.elements.realism_check.checked = keepCheck; // remembered, not reset
-    setSuggested(form.dataset.kind, {});
     for (const s of form.querySelectorAll("select[data-avatars]")) fillAvatars(s);
     show("history");
     refreshHistory().catch(staleNote);
