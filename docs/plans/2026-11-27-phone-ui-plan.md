@@ -11,7 +11,7 @@ Jira: N/A
 - [x] Task 3: Watcher adopts jobs from other devices (`jobs forget`, 7-day cut-off) — `8c48a4f`
 - [x] Task 4: Unauthenticated `/m` routes serving a placeholder page — `2480cce`
 - [x] Task 5: Browser SSHSIG signer with ssh-keygen parity test — `47f6301`
-- [ ] Task 6: Phone pairing screen and History
+- [x] Task 6: Phone pairing screen and History — `7984e5c`
 - [ ] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS
 - [ ] Task 8: Phone Job screen (results, Save) and Avatars
 - [ ] Task 9: "Pair a phone" in the dashboard, docs
