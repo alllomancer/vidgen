@@ -25,9 +25,11 @@ for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
     assert banned not in app, f"app.js must not use {banned}"
 assert not re.search(r"(?<![A-Za-z])fetch\(", app), "app.js calls the API only through signedFetch"
 # sign.js makes exactly two kinds of request: signed API calls (same origin) and the presigned S3 PUT
-assert len(re.findall(r"await fetch\(", sign)) == len(re.findall(r"(?<![A-Za-z.])fetch\((?!\))", sign)) == 2, "sign.js: signedFetch and putUpload only"
+assert len(re.findall(r"await fetch\(", sign)) == len(re.findall(r"(?<![A-Za-z.])fetch\((?!\))", sign)) == 3, \
+    "sign.js: signedFetch, putUpload and requestPairing only"
+assert 'fetch("/pair", { method: "POST"' in sign and "public_key: publicKeyLine(key.pubRaw)" in sign
 assert 'u.hostname.endsWith(".amazonaws.com")' in sign and 'u.protocol !== "https:"' in sign
-assert re.findall(r'^import .* from "([^"]+)";', app, re.M) == ["/m/sign.js"]
+assert re.findall(r'^import\b[^;]*?from "([^"]+)";', app, re.M | re.S) == ["/m/sign.js"]
 
 # ---- the API calls it makes are ones the phone is meant to make
 ALLOWED = {("GET", "/jobs"), ("POST", "/jobs/{id}/cancel"), ("POST", "/jobs/{id}/rerun"), ("POST", "/jobs"),

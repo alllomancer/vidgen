@@ -132,6 +132,22 @@ export async function loadOrCreateKey() {
   return loadKey();
 }
 
+/** Ask to pair (unsigned POST /pair with only the public key). {code, fingerprint, expires_at}, or an Error with the
+ *  server's message (e.g. pairing isn't open on the Mac yet). docs/specs/2026-11-27-phone-pairing.md */
+export async function requestPairing(key) {
+  let r;
+  try {
+    r = await fetch("/pair", { method: "POST", headers: { "content-type": "application/json" },
+                               body: JSON.stringify({ public_key: publicKeyLine(key.pubRaw) }) });
+  } catch (e) {
+    throw new Offline("can't reach the server; check the connection");
+  }
+  const out = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(out && typeof out.error === "string" ? out.error : `HTTP ${r.status}`);
+  if (!out || !/^\d{6}$/.test(String(out.code))) throw new Error("unexpected answer from the server");
+  return out;
+}
+
 /** PUT a file to a presigned S3 link from POST /uploads (the bucket allows this page's origin by CORS). */
 export async function putUpload(putUrl, blob) {
   const u = new URL(putUrl);

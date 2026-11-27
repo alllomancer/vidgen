@@ -77,6 +77,9 @@
   .status-strip .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--muted); }
   .status-strip[data-state="running"] .dot { background: var(--ok); }
   .status-strip[data-state="pending"] .dot { background: var(--warn); }
+  .pair-code { font: 700 34px/1.2 ui-monospace, monospace; letter-spacing: 3px; margin: 4px 0 8px; }
+  details.fallback { margin-top: 24px; }
+  details.fallback summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; color: var(--muted); }
   #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 480px; margin: 0 auto; z-index: 3;
            background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 12px; }
 </style>
@@ -99,8 +102,21 @@
   <section id="pair" hidden>
     <h2 tabindex="-1">Pair this phone</h2>
     <p id="pair-reason"></p>
-    <p class="muted">This phone made its own key. Its private half never leaves this browser; you add the public half
-      to your vidgen setup once.</p>
+    <p class="muted">This phone made its own key. Its private half never leaves this browser.</p>
+    <ol>
+      <li>On your Mac, open <code>vidgen ui</code> and press <strong>Pair a phone</strong> (Phones panel).</li>
+      <li>Tap the button below, then approve the code on the Mac.</li>
+    </ol>
+    <p><button type="button" id="pair-start" class="primary">Pair this phone</button></p>
+    <p id="pair-error" class="err" role="alert"></p>
+    <div id="pair-wait" class="note" hidden>
+      <p class="sub" style="margin:0">Code to approve on the Mac</p>
+      <p id="pair-code" class="pair-code"></p>
+      <p class="sub" style="margin:0">Key <span id="pair-fingerprint"></span> (the Mac shows the same)</p>
+      <p class="sub" role="status">Waiting for the Mac… this page opens your history once it's approved.</p>
+    </div>
+    <details class="fallback">
+    <summary>Or add the key with Terraform</summary>
     <label for="pair-name">Your vidgen name</label>
     <input id="pair-name" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="the comment on your Mac key, e.g. dan">
     <p id="pair-name-error" class="sub err" hidden>Use letters, digits and . _ @ - only.</p>
@@ -116,6 +132,7 @@
       </ol>
     </div>
     <button type="button" id="pair-retry">Try again</button>
+    </details>
   </section>
 
   <section id="history" hidden>

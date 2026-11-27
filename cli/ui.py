@@ -448,6 +448,36 @@ def job_file(job_id, index):
     return path, content_type
 
 
+PAIR_CODE = re.compile(r"\d{6}")
+DEVICE_ID = re.compile(r"[0-9a-f]{8}")
+
+
+def phone_link():
+    """The phone page's address (<api_url>/m), for the Phones panel."""
+    base = vidgen.setting("url")
+    if not base:
+        raise ValueError("the API URL is not configured; run vidgen.py configure --url <api_url>")
+    return {"url": base.rstrip("/") + "/m"}
+
+
+def pairing(method, code=None, device=None, body=None):
+    """Phones panel: list, open the pairing window, approve/decline a code, remove a phone (signed with this
+    computer's key, which is what allows managing phones). docs/specs/2026-11-27-phone-pairing.md"""
+    if code is not None and not PAIR_CODE.fullmatch(code):
+        raise ValueError("code: 6 digits")
+    if device is not None and not DEVICE_ID.fullmatch(device):
+        raise ValueError("phone id: 8 hex characters")
+    if device is not None:
+        return vidgen.api("DELETE", f"/devices/{device}")
+    if code is not None and method == "POST":
+        return vidgen.api("POST", f"/pairings/{code}/approve", {"name": str((body or {}).get("name") or "").strip()})
+    if code is not None:
+        return vidgen.api("DELETE", f"/pairings/{code}")
+    if method == "POST":
+        return vidgen.api("POST", "/pairings/open")
+    return vidgen.api("GET", "/pairings")
+
+
 def delete_avatar(name, loras=False):
     """Delete an avatar on the server (images, earlier versions, media); loras: also its own LoRAs and their
     training photos. Media already copied to the download folder stays."""
@@ -660,6 +690,16 @@ def make_handler(port, token):
                     return self._send(200, use_lora(m.group(1), self._body()))
                 if m and method == "POST" and m.group(2) == "preview":
                     return self._send(202, preview_lora(m.group(1), self._body()))
+                if method == "GET" and path == "/api/phone":
+                    return self._send(200, phone_link())
+                if path == "/api/pairings" and method in ("GET", "POST"):
+                    return self._send(200, pairing(method))
+                m = re.fullmatch(r"/api/pairings/([^/]+)(/approve)?", path)
+                if m and ((method == "POST" and m.group(2)) or (method == "DELETE" and not m.group(2))):
+                    return self._send(200, pairing(method, code=m.group(1), body=self._body() if method == "POST" else None))
+                m = re.fullmatch(r"/api/devices/([^/]+)", path)
+                if m and method == "DELETE":
+                    return self._send(200, pairing("DELETE", device=m.group(1)))
                 if method == "POST" and path == "/api/reveal":
                     reveal(self._body().get("path", ""))
                     return self._send(200, {"ok": True})

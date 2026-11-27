@@ -1,6 +1,8 @@
 // vidgen phone page. Talks only to this API, signing every call with a key that never leaves this browser.
 // Everything shown from the server goes in as text (textContent / text nodes), never parsed as HTML. docs/specs/2026-11-27-phone-ui.md
-import { COMMENT, Offline, Unauthorized, loadOrCreateKey, publicKeyLine, putUpload, signedFetch } from "/m/sign.js";
+import {
+  COMMENT, Offline, Unauthorized, loadOrCreateKey, publicKeyLine, putUpload, requestPairing, signedFetch,
+} from "/m/sign.js";
 
 const REFRESH_MS = 10000;
 const NAME_KEY = "vidgen.keyName";
@@ -94,6 +96,54 @@ async function busy(button, fn) {
 
 // ---------------------------------------------------------------- pairing
 
+let pairPoll = null;
+
+function stopPairing() {
+  clearTimeout(pairPoll);
+  pairPoll = null;
+}
+
+/** Pair this phone: get a code, show it, and check every 5 s whether the Mac approved it. */
+async function startPairing(button) {
+  stopPairing();
+  $("pair-error").textContent = "";
+  button.disabled = true;
+  let p;
+  try {
+    p = await requestPairing(key);
+  } catch (e) {
+    $("pair-error").textContent = e.message;
+    button.disabled = false;
+    return;
+  }
+  button.disabled = false;
+  $("pair-code").textContent = `${p.code.slice(0, 3)} ${p.code.slice(3)}`;
+  $("pair-fingerprint").textContent = String(p.fingerprint || "");
+  $("pair-wait").hidden = false;
+  button.textContent = "Get a new code";
+  const mine = session;
+  const expires = Number(p.expires_at) * 1000 || Date.now() + 600000;
+  const check = async () => {
+    if (mine !== session) return;
+    if (Date.now() > expires) {
+      $("pair-wait").hidden = true;
+      $("pair-error").textContent = "The code expired. Tap Get a new code.";
+      return;
+    }
+    try {
+      await signedFetch(key, "GET", "/status");
+      stopPairing();
+      toast("Paired");
+      start();
+      return;
+    } catch (e) {
+      if (!(e instanceof Unauthorized) && !(e instanceof Offline)) $("pair-error").textContent = e.message;
+    }
+    pairPoll = setTimeout(check, 5000);
+  };
+  pairPoll = setTimeout(check, 5000);
+}
+
 function pairScreen(err) {
   stopRefresh();
   show("pair");
@@ -115,6 +165,7 @@ function renderLine() {
 
 function setupPairing() {
   $("pair-name").addEventListener("input", renderLine);
+  $("pair-start").addEventListener("click", (e) => startPairing(e.currentTarget));
   $("pair-copy").addEventListener("click", () => {
     storeName($("pair-name").value.trim());
     copyText($("pair-line").value);
@@ -598,6 +649,7 @@ async function start() {
   if (starting) return;
   starting = true;
   session += 1;
+  stopPairing();
   stopRefresh();
   $("pair-retry").disabled = true;
   $("boot-retry").hidden = true;
