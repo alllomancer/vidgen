@@ -423,7 +423,11 @@ form:not(.krea) .krea-text { display: none !important; }
         <label class="wide">Description<textarea name="description" required maxlength="500" placeholder="a woman in her 30s, short dark hair, green raincoat"></textarea></label>
         <label>Candidates (1-6)<input name="candidates" type="number" min="1" max="6" value="4"></label>
         <label>Seed (optional)<input name="seed" type="number" min="0" placeholder="random"></label>
-        <div class="wide checks"><label title="Generates 24 photos of this avatar and trains a Krea 2 LoRA on the trainer (~1.5 h GPU, about $3), so Krea photos and first frames can show this person; its trigger word is the avatar name"><input type="checkbox" name="krea_lora" checked> Also train a Krea 2 LoRA (~1.5 h GPU; only for people who agreed)</label></div>
+        <label class="wide" title="The avatar's own LoRAs, trained on the trainer (trigger word: the avatar name). Its 24 photos and 2 s clips are made either way">LoRAs for this person (only for people who agreed)<select name="loras">
+          <option value="both" selected>Train both: Krea 2 (~1.5 h) and Wan (~1 h)</option>
+          <option value="krea">Train only the Krea 2 LoRA (photos, first frames)</option>
+          <option value="wan">Train only the Wan LoRA (videos)</option>
+          <option value="none">None: I'll upload my own (Upload LoRAs on its card)</option></select></label>
         <p class="hint wide">When they've downloaded, History shows <b>Pick</b> buttons: the one you pick is saved as this avatar. Krea 2 images go through its content filter; flagged ones are dropped.</p>
         <div><button class="primary" type="submit">Generate candidates</button></div>
       </form>
@@ -440,7 +444,11 @@ form:not(.krea) .krea-text { display: none !important; }
         <ol class="wide thumbs" id="avatar-thumbs" aria-label="Chosen photos, in order"></ol>
         <p class="hint wide">Order matters: photos and keyframes use the first 3. Best: 1 full-length or waist-up (the main image, also used alone in shots with several avatars), 2 a sharp face close-up, 3 another angle. Use yourself or a fictional character, never a real person without their consent.</p>
         <div class="wide checks"><label><input type="checkbox" name="make_default"> Make it my default avatar</label></div>
-        <div class="wide checks"><label title="Generates 24 photos of this avatar and trains a Krea 2 LoRA on the trainer (~1.5 h GPU, about $3), so Krea photos and first frames can show this person; its trigger word is the avatar name"><input type="checkbox" name="krea_lora" checked> Also train a Krea 2 LoRA (~1.5 h GPU; only for people who agreed)</label></div>
+        <label class="wide" title="The avatar's own LoRAs, trained on the trainer (trigger word: the avatar name). Its 24 photos and 2 s clips are made either way">LoRAs for this person (only for people who agreed)<select name="loras">
+          <option value="both" selected>Train both: Krea 2 (~1.5 h) and Wan (~1 h)</option>
+          <option value="krea">Train only the Krea 2 LoRA (photos, first frames)</option>
+          <option value="wan">Train only the Wan LoRA (videos)</option>
+          <option value="none">None: I'll upload my own (Upload LoRAs on its card)</option></select></label>
         <div><button class="primary" type="submit" id="avatar-go" disabled>Create avatar</button></div>
       </form>
       <p class="hint err" id="avatar-err" role="alert"></p>
@@ -1983,12 +1991,17 @@ $("avatar-generate").onsubmit = async e => {
     const d = Object.fromEntries(new FormData(f).entries());
     const r = await api("POST", "/api/create", {job: {type: "avatar", description: d.description.trim(), model: d.model,
       candidates: num(d.candidates), seed: num(d.seed)}, avatar_name: d.name.trim().toLowerCase(),
-      krea_lora: f.elements.krea_lora.checked});
+      ...loraChoice(f)});
     toast(`Generating candidates (${r.job_id.slice(0, 8)}); Pick them in History when they've downloaded`);
     loadJobs(); loadStatus();
   } catch (err) { $("avatar-gen-err").textContent = err.message || String(err); }
   finally { btn.disabled = false; }
 };
+// Which of a new avatar's LoRAs to train (docs/specs/2026-11-27-avatar-lora-upload.md)
+function loraChoice(f) {
+  const v = f.elements.loras.value;
+  return {krea_lora: v === "both" || v === "krea", wan_lora: v === "both" || v === "wan"};
+}
 $("create-avatar").onsubmit = async e => {
   e.preventDefault();
   const f = $("create-avatar"), btn = $("avatar-go");
@@ -1998,7 +2011,7 @@ $("create-avatar").onsubmit = async e => {
     const images = await Promise.all(avatarFiles.map(a => readBase64(a.file)));
     const r = await api("POST", "/api/avatars", {name: f.elements.name.value.trim().toLowerCase(),
       description: f.elements.description.value.trim(), make_default: f.elements.make_default.checked, images,
-      krea_lora: f.elements.krea_lora.checked});
+      ...loraChoice(f)});
     toast(`Avatar ${r.name} saved with ${r.images} photo${r.images > 1 ? "s" : ""}${r.default ? " and set as default" : ""}`);
     for (const a of avatarFiles) URL.revokeObjectURL(a.url);
     avatarFiles = []; f.reset();

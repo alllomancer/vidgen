@@ -91,3 +91,22 @@ assert h.avatar_lora_uploads("m", "dana", "krea", {})["statusCode"] == 200, "a f
 assert h.lora_uploads("m", "avatar-dana", {"files": "single"})["statusCode"] == 400
 
 print("test_avatar_lora_upload: ok")
+
+# ---- an avatar made with no LoRAs (to upload them): both skipped, its photos and clips still made
+queued = []
+h._queue_job = lambda client, job_type, params, **kw: queued.append((job_type, params)) or h._resp(202, {})
+h._image_sources = lambda client, body: ["avatars/m/src.png"]
+h._archive_avatar = lambda client, name: None
+h._write_avatar = lambda client, name, sources, description: s3.put_json(
+    f"avatars/m/{name}/avatar.json", {"name": name, "description": description, "created_at": 2,
+                                      "reference_key": sources[0]})
+r = h.create_avatar("m", {"name": "noa", "upload_keys": ["uploads/m/a.png"], "krea_lora": False, "wan_lora": False})
+assert r["statusCode"] == 200, body(r)
+av = h._get_avatar("m", "noa")
+assert av["krea_lora"]["state"] == "skipped" and av["wan_lora"]["state"] == "skipped", av
+assert [t for t, _ in queued] == ["avatar_photoset"] and queued[0][1]["krea_lora"] is False and queued[0][1]["wan_lora"] is False
+# ... and then its own LoRAs upload straight away
+assert h.avatar_lora_uploads("m", "noa", "krea", {})["statusCode"] == 200
+assert h.avatar_lora_uploads("m", "noa", "wan", {})["statusCode"] == 200
+
+print("test_avatar_lora_upload: no-LoRA avatar ok")

@@ -4,6 +4,7 @@
 
 - Phone page for Android Chrome at `<api_url>/m`: History, Create (video, photos, story), job results with Save, Avatars, render box status; installable to the home screen. Its own ed25519 key signs requests like the CLI.
 - Pair a phone from the dashboard's Phones panel (code + key fingerprint, approve on the Mac, remove any time); adding its key in Terraform still works.
+- New avatars: choose which LoRAs to train (both, Krea 2, Wan, or none to upload your own): **LoRAs for this person** in the dashboard, `--loras` in the CLI.
 - Upload an avatar's own Krea 2 and Wan LoRAs made elsewhere (avatar card **Upload LoRAs**, `vidgen avatar lora`); they're used right away.
 - Phones panel shows a QR code of the phone page link.
 - Optional AI-look check after a render (photos, videos, stories): a 0-10 score, the giveaways, and a suggested prompt and settings with Use suggestion (dashboard, phone) and `--realism-check` (CLI).

@@ -388,7 +388,7 @@ def job_meta(source, out_name=None, extra=None):
     meta = {"source": source}
     if out_name and OUT_NAME.fullmatch(out_name):
         meta["out_name"] = out_name
-    for k in ("avatar_name", "krea_lora"):
+    for k in ("avatar_name", "krea_lora", "wan_lora"):
         if (extra or {}).get(k) is not None:
             meta[k] = extra[k]
     return meta
@@ -698,11 +698,12 @@ def adopt_remote(jobs):
         if job_type not in ADOPT_TYPES or row.get("status") not in ADOPT_STATUSES:
             continue
         meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-        extra = {k: meta[k] for k in ("avatar_name", "krea_lora") if meta.get(k) is not None}
+        extra = {k: meta[k] for k in ("avatar_name", "krea_lora", "wan_lora") if meta.get(k) is not None}
         if not (isinstance(extra.get("avatar_name"), str) and OUT_NAME.fullmatch(extra["avatar_name"])):
             extra.pop("avatar_name", None)
-        if not isinstance(extra.get("krea_lora"), bool):
-            extra.pop("krea_lora", None)
+        for k in ("krea_lora", "wan_lora"):
+            if not isinstance(extra.get(k), bool):
+                extra.pop(k, None)
         out = adopted_out(job_type, job_id, meta.get("out_name"), taken)
         taken.add(out)
         jobs[job_id] = {"type": job_type, "out": out, "status": "queued", "submitted_at": created,
@@ -979,13 +980,24 @@ def upload_images(paths):
     return keys
 
 
-def avatar_from_image(name, images, description, make_default=True, krea_lora=True):
+# Which of an avatar's own LoRAs to build on the trainer when it is made: both (default), one, or none (upload
+# your own afterwards: vidgen avatar lora). docs/specs/2026-11-27-avatar-lora-upload.md
+LORA_CHOICES = {"both": (True, True), "krea": (True, False), "wan": (False, True), "none": (False, False)}
+
+
+def lora_choice(args, start=(True, True)):
+    """(krea_lora, wan_lora) from --loras (and the older --no-krea-lora), starting from what a job asked for."""
+    krea, wan = LORA_CHOICES[args.loras] if getattr(args, "loras", None) else start
+    return krea and not getattr(args, "no_krea_lora", False), wan
+
+
+def avatar_from_image(name, images, description, make_default=True, krea_lora=True, wan_lora=True):
     """images: one path or a list of paths of the same person (the first is the main image).
     krea_lora: also build the avatar's Krea 2 LoRA (~1.5 h GPU)."""
     images = [images] if isinstance(images, str) else list(images)
     keys = upload_images(images)
     r = api("POST", "/avatars", {"name": name, "upload_keys": keys, "description": description,
-                                 "make_default": make_default, "krea_lora": krea_lora})
+                                 "make_default": make_default, "krea_lora": krea_lora, "wan_lora": wan_lora})
     if krea_lora and (r or {}).get("krea_lora", {}).get("state") == "queued":
         print(f"its Krea 2 LoRA is being built (~1.5 h; trigger word '{name}'); see vidgen.py avatar list")
     print(f"avatar '{name}' saved with {len(keys)} image{'s' if len(keys) > 1 else ''}"
@@ -994,16 +1006,16 @@ def avatar_from_image(name, images, description, make_default=True, krea_lora=Tr
         print(f"tip: more photos of the same person improve likeness: vidgen.py avatar add --name {name} FILE...")
 
 
-def avatar_generate(name, description, candidates, model="wan", krea_lora=True):
+def avatar_generate(name, description, candidates, model="wan", krea_lora=True, wan_lora=True):
     out = f"avatar-{name}-{int(time.time())}.png"
     job_id = submit({"type": "avatar", "description": description, "candidates": candidates, "model": model}, out,
-                    {"avatar_name": name, "krea_lora": krea_lora})
+                    {"avatar_name": name, "krea_lora": krea_lora, "wan_lora": wan_lora})
     print(f"{candidates} candidate images are being generated. When the watcher has downloaded them,")
     print(f"look at them and pick one:  vidgen.py avatar pick {job_id} <1-{candidates}>")
     return job_id
 
 
-def avatar_setup(name, image=None, description=None, candidates=4, model="wan", krea_lora=True):
+def avatar_setup(name, image=None, description=None, candidates=4, model="wan", krea_lora=True, wan_lora=True):
     """Interactive unless image/description are given (image: a path or a list of paths). Returns True when an
     avatar is ready now, False when candidates are still being generated."""
     if image is None and description is None:
@@ -1016,11 +1028,11 @@ def avatar_setup(name, image=None, description=None, candidates=4, model="wan", 
                   if image else "Describe the character (look, hair, clothing, age range): ")
         description = input(prompt).strip()
     if image:
-        avatar_from_image(name, image, description or "", krea_lora=krea_lora)
+        avatar_from_image(name, image, description or "", krea_lora=krea_lora, wan_lora=wan_lora)
         return True
     if not description:
         raise ApiError("a description is needed to generate an avatar")
-    avatar_generate(name, description, candidates, model, krea_lora=krea_lora)
+    avatar_generate(name, description, candidates, model, krea_lora=krea_lora, wan_lora=wan_lora)
     return False
 
 
@@ -1054,8 +1066,9 @@ def avatar_command(args):
                   f"Wan LoRA: {wl:9} media: {md:7} {av['description']}")
     elif args.action == "refresh":
         name = args.name or api("GET", "/avatars")["default"] or DEFAULT_AVATAR_NAME
-        avatar_setup(name, args.image, args.describe, args.candidates, args.model,
-                     krea_lora=not getattr(args, "no_krea_lora", False))
+        krea_lora, wan_lora = lora_choice(args)
+        avatar_setup(name, args.image, args.describe, args.candidates, args.model, krea_lora=krea_lora,
+                     wan_lora=wan_lora)
     elif args.action == "pick":
         if len(a) != 2 or not a[1].isdigit():
             raise ApiError("usage: vidgen.py avatar pick <job_id> <candidate number>")
@@ -1064,9 +1077,10 @@ def avatar_command(args):
         if not local.get("avatar_name"):  # started on another device: the server has its avatar name
             local = dict(server_meta(job_id), **local)
         name = args.name or local.get("avatar_name") or DEFAULT_AVATAR_NAME
-        krea_lora = local.get("krea_lora", True) and not getattr(args, "no_krea_lora", False)
+        krea_lora, wan_lora = lora_choice(args, (local.get("krea_lora", True) is not False,
+                                                 local.get("wan_lora", True) is not False))
         api("POST", "/avatars", {"name": name, "job_id": job_id, "candidate": int(a[1]), "make_default": True,
-                                 "krea_lora": krea_lora})
+                                 "krea_lora": krea_lora, "wan_lora": wan_lora})
         print(f"avatar '{name}' saved from candidate {a[1]} and set as default")
     elif args.action == "lora":
         if not args.name:
@@ -2057,6 +2071,9 @@ def main():
     a.add_argument("--yes", action="store_true", help="delete: don't ask")
     a.add_argument("--no-krea-lora", action="store_true",
                    help="refresh/pick: don't build this avatar's Krea 2 LoRA (it is built by default, ~1.5 h GPU)")
+    a.add_argument("--loras", choices=sorted(LORA_CHOICES),
+                   help="refresh/pick: which of the avatar's own LoRAs to train: both (default), krea, wan, or none "
+                        "(upload your own afterwards with `avatar lora`); its photos and clips are made either way")
     a.add_argument("args", nargs="*", help="add: image files; remove/main: image number; "
                                            "pick: <job_id> <n>; restore: <version>")
     a.add_argument("--name", help=f"avatar name (default: current default, or '{DEFAULT_AVATAR_NAME}')")

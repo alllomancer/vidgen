@@ -2351,7 +2351,7 @@ RERUN_SUFFIX = re.compile(r"(?:-rerun-[0-9a-f]{6})+$")
 def _validate_meta(meta):
     if not isinstance(meta, dict):
         raise ValueError("meta must be an object")
-    unknown = set(meta) - {"out_name", "avatar_name", "krea_lora", "source"}
+    unknown = set(meta) - {"out_name", "avatar_name", "krea_lora", "wan_lora", "source"}
     if unknown:
         raise ValueError(f"meta: unknown key(s) {', '.join(sorted(unknown))}")
     out = {}
@@ -2365,10 +2365,11 @@ def _validate_meta(meta):
         if not isinstance(meta["avatar_name"], str) or not AVATAR_NAME.fullmatch(meta["avatar_name"]):
             raise ValueError("meta.avatar_name: 1-32 chars, a-z 0-9 - _")
         out["avatar_name"] = meta["avatar_name"]
-    if meta.get("krea_lora") is not None:
-        if not isinstance(meta["krea_lora"], bool):
-            raise ValueError("meta.krea_lora must be true or false")
-        out["krea_lora"] = meta["krea_lora"]
+    for k in ("krea_lora", "wan_lora"):
+        if meta.get(k) is not None:
+            if not isinstance(meta[k], bool):
+                raise ValueError(f"meta.{k} must be true or false")
+            out[k] = meta[k]
     if meta.get("source") is not None:
         if meta["source"] not in META_SOURCES:
             raise ValueError(f"meta.source must be one of: {', '.join(META_SOURCES)}")

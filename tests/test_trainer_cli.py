@@ -525,10 +525,13 @@ enc = lambda d: base64.b64encode(d).decode()  # noqa: E731
 r = ui.create_avatar({"name": "Dana", "description": "d", "images": [enc(jpg), enc(png)]})
 assert [u[0] for u in uploaded] == ["01.jpg", "02.png"] and uploaded[0][1] == jpg, uploaded
 assert posted[-1] == ("POST", "/avatars", {"name": "dana", "upload_keys": ["uploads/m/1.jpg", "uploads/m/2.png"],
-                                           "description": "d", "make_default": False, "krea_lora": True}), posted[-1]
+                                           "description": "d", "make_default": False, "krea_lora": True,
+                                           "wan_lora": True}), posted[-1]
 assert ui.create_avatar({"name": "dana", "images": [enc(png)], "make_default": True})["default"] is True
 ui.create_avatar({"name": "dana", "images": [enc(png)], "krea_lora": False})
-assert posted[-1][2]["krea_lora"] is False
+assert posted[-1][2]["krea_lora"] is False and posted[-1][2]["wan_lora"] is True
+ui.create_avatar({"name": "dana", "images": [enc(png)], "krea_lora": False, "wan_lora": False})  # none: upload your own
+assert posted[-1][2]["krea_lora"] is False and posted[-1][2]["wan_lora"] is False
 n = len(uploaded)
 for bad, msg in [({"name": "dana", "images": []}, "1-12"), ({"name": "dana", "images": [enc(png)] * 13}, "1-12"),
                  ({"name": "Bad Name!", "images": [enc(png)]}, "name"),
@@ -922,14 +925,14 @@ vidgen.api = lambda m, p, b=None: posted.append((m, p, b)) or {"job_id": "f" * 3
 regs = []
 vidgen.register_job = lambda job_id, t, out, extra=None: regs.append((t, out, extra))
 ui.create_job({"job": {"type": "avatar", "description": "a sailor", "model": "krea2"}, "avatar_name": "Mira"})
-assert regs[-1][0] == "avatar" and regs[-1][2] == {"avatar_name": "mira", "krea_lora": True} and "avatar-mira-" in regs[-1][1]
+assert regs[-1][0] == "avatar" and regs[-1][2] == {"avatar_name": "mira", "krea_lora": True, "wan_lora": True} and "avatar-mira-" in regs[-1][1]
 ui.create_job({"job": {"type": "avatar", "description": "a sailor"}, "avatar_name": "mira", "krea_lora": False})
 assert regs[-1][2]["krea_lora"] is False
 _stubs.expect_error(ui.create_job, {"job": {"type": "avatar", "description": "x"}, "avatar_name": "Bad Name"}, contains="avatar name")
 vidgen.load_jobs = lambda: {"f" * 32: {"type": "avatar", "status": "downloaded", "out": "/x.png", "avatar_name": "mira"}}
 ui.pick_candidate({"job_id": "f" * 32, "candidate": 2})
 assert posted[-1] == ("POST", "/avatars", {"name": "mira", "job_id": "f" * 32, "candidate": 2, "make_default": False,
-                                           "krea_lora": True})
+                                           "krea_lora": True, "wan_lora": True})
 vidgen.load_jobs = lambda: {"f" * 32: {"type": "avatar", "status": "downloaded", "out": "/x.png", "avatar_name": "mira",
                                        "krea_lora": False}}
 ui.pick_candidate({"job_id": "f" * 32, "candidate": 1})

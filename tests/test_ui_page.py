@@ -24,6 +24,10 @@ assert re.search(r'function copyable\(j\) \{ return !!j\.summary && \["video", "
 assert 'data-avatar-loras="${name}"' in script and 'id="avatar-lora-dialog"' in page
 assert all(f'name="{n}"' in page for n in ("krea", "wan", "wan_low")) and "`${path}/loras`" in script
 
+# a new avatar (generated or from photos): which LoRAs to train, including none (upload your own)
+assert page.count('<select name="loras">') == 2 and page.count('<option value="none">None: I') == 2
+assert script.count("...loraChoice(f)") == 2 and 'name="krea_lora"' not in page
+
 # the Phones panel draws the link's QR code from ui.py's rows, as SVG elements (no HTML, no outside script)
 assert 'id="phone-qr"' in page and "function drawQr(" in script and "drawQr(r.qr)" in script
 assert "/^[01]+$/.test(r)" in script

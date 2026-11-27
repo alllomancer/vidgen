@@ -47,7 +47,7 @@ for empty in ({}, None):  # an empty or null meta stores nothing
 
 # ---- a job with meta: stored and returned
 clock[0] += 10
-meta = {"out_name": "lighthouse.txt", "avatar_name": "mirabel", "krea_lora": False, "source": "phone"}
+meta = {"out_name": "lighthouse.txt", "avatar_name": "mirabel", "krea_lora": False, "wan_lora": False, "source": "phone"}
 r = h.create_job("m", dict(WRITE, meta=meta))
 assert r["statusCode"] == 202, r
 jid = body(r)["job_id"]
@@ -62,7 +62,7 @@ for bad in [{"colour": "red"}, {"out_name": "a/b.mp4"}, {"out_name": ".hidden"},
             {"out_name": 5}, {"out_name": ""}, {"out_name": "a\x00b"}, {"out_name": "a\nb"}, {"out_name": "a\x1b[2Jb"},
             {"out_name": "evil\u202efdp.mp4"}, {"out_name": "a\uff0fb"}, {"out_name": "a:b"}, {"out_name": "foo."},
             {"out_name": "foo "}, {"out_name": "<b>x</b>"}, {"out_name": "..x"}, {"out_name": "a\\b"},
-            {"out_name": "שלום.mp4"}, {"avatar_name": "Bad Name"}, {"avatar_name": "mirabel\n"}, {"krea_lora": "yes"},
+            {"out_name": "שלום.mp4"}, {"avatar_name": "Bad Name"}, {"avatar_name": "mirabel\n"}, {"krea_lora": "yes"}, {"wan_lora": 1},
             {"source": "tablet"}, "notadict"]:
     before, n_sent = dict(table), len(sent)
     r = h.create_job("m", dict(WRITE, meta=bad))

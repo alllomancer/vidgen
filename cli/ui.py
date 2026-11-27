@@ -385,7 +385,8 @@ def create_avatar(body):
         keys = [vidgen.upload_file(p, vidgen.IMAGE_EXTS) for p in paths]
     return vidgen.api("POST", "/avatars", {"name": name, "upload_keys": keys, "description": description,
                                            "make_default": body.get("make_default") is True,
-                                           "krea_lora": body.get("krea_lora") is not False})
+                                           "krea_lora": body.get("krea_lora") is not False,
+                                           "wan_lora": body.get("wan_lora") is not False})
 
 
 
@@ -405,7 +406,8 @@ def create_job(body):
         if not THEME_NAME.match(name):
             raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
         out = out or f"avatar-{name}-{int(time.time())}.png"
-        extra = {"avatar_name": name, "krea_lora": body.get("krea_lora") is not False}
+        extra = {"avatar_name": name, "krea_lora": body.get("krea_lora") is not False,
+                 "wan_lora": body.get("wan_lora") is not False}
     r = vidgen.api("POST", "/jobs", dict(job, meta=vidgen.job_meta("mac", out, extra)))
     vidgen.register_job(r["job_id"], job["type"], vidgen.local_out(job["type"], r["job_id"], out), extra)
     return r
@@ -422,7 +424,8 @@ def pick_candidate(body):
     name = local.get("avatar_name") or vidgen.DEFAULT_AVATAR_NAME
     return vidgen.api("POST", "/avatars", {"name": name, "job_id": job_id, "candidate": int(body.get("candidate")),
                                            "make_default": body.get("make_default") is True,
-                                           "krea_lora": local.get("krea_lora", True) is not False})
+                                           "krea_lora": local.get("krea_lora", True) is not False,
+                                           "wan_lora": local.get("wan_lora", True) is not False})
 
 
 def avatar_krea_lora(name):

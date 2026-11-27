@@ -35,6 +35,13 @@ ready on the avatar, exactly as a finished training run would.
   optional low-noise file, each with Choose… (native picker) and a path box; Upload uploads what is filled, one
   after the other, and refreshes the card. The local server uploads from the paths (the browser never reads them).
 
+### Making an avatar with no LoRAs (added 2026-11-27, at the user's request)
+
+Both new-avatar forms (from photos, generated candidates) get **LoRAs for this person**: train both (default), only
+Krea 2, only Wan, or **None: I'll upload my own**, sent as `krea_lora` / `wan_lora` (the API already took both; a
+generated avatar carries them in its job `meta` until Pick). CLI: `--loras both|krea|wan|none` on `avatar refresh`
+/ `pick`. Its photos and clips are made either way, and Upload LoRAs works on it straight away.
+
 ## Acceptance Criteria
 
 - When a valid Krea 2 LoRA is uploaded for avatar `dana`, `avatar-dana` shall get the next version with trigger
@@ -45,6 +52,8 @@ ready on the avatar, exactly as a finished training run would.
   avatar.
 - While `dana`'s Krea (or Wan) build is live, uploading that kind shall return 409; the other kind still works.
 - `POST /loras/{name}/uploads` shall still refuse `avatar-*` names.
+- When an avatar is made with no LoRAs, both records shall be `skipped`, only its media job shall be queued, and both
+  LoRA uploads for it shall be accepted.
 
 ## Out of Scope
 

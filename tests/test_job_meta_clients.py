@@ -81,9 +81,10 @@ assert meta["source"] == "cli" and meta["avatar_name"] == "dana" and meta["krea_
 # ---- dashboard create sends meta {source: mac, ...}
 ui.create_job({"job": {"type": "photos", "avatar": "dana", "scenes": [{"prompt": "x"}]}, "out": "cafe"})
 assert last_post()[2]["meta"] == {"source": "mac", "out_name": "cafe"}, last_post()
-ui.create_job({"job": {"type": "avatar", "description": "d", "candidates": 2}, "avatar_name": "lior", "krea_lora": True})
+ui.create_job({"job": {"type": "avatar", "description": "d", "candidates": 2}, "avatar_name": "lior", "krea_lora": True,
+               "wan_lora": False})
 meta = last_post()[2]["meta"]
-assert meta["source"] == "mac" and meta["avatar_name"] == "lior" and meta["krea_lora"] is True
+assert meta["source"] == "mac" and meta["avatar_name"] == "lior" and meta["krea_lora"] is True and meta["wan_lora"] is False
 assert meta["out_name"].startswith("avatar-lior-") and meta["out_name"].endswith(".png"), meta
 ui.train_theme.__globals__["load_themes"] = lambda: {"moves": {}}
 ui.train_theme("moves", 100)
@@ -101,14 +102,24 @@ server_jobs[phone_id] = {"type": "avatar", "meta": {"avatar_name": "noa", "krea_
 vidgen.register_job(phone_id, "avatar", os.path.join(downloads, "x.png"), {"adopted": True})
 ui.pick_candidate({"job_id": phone_id, "candidate": 2})
 assert last_post() == ("POST", "/avatars", {"name": "noa", "job_id": phone_id, "candidate": 2, "make_default": False,
-                                             "krea_lora": False}), last_post()
+                                             "krea_lora": False, "wan_lora": True}), last_post()
+server_jobs[phone_id]["meta"]["wan_lora"] = False  # made with no LoRAs at all: picking keeps that
+ui.pick_candidate({"job_id": phone_id, "candidate": 2})
+assert last_post()[2]["krea_lora"] is False and last_post()[2]["wan_lora"] is False
 # the local record still wins when it has the name
 ui.pick_candidate({"job_id": av_cli, "candidate": 1})
 assert last_post()[2]["name"] == "dana" and last_post()[2]["krea_lora"] is False
 # CLI pick, same fallback
-args = types.SimpleNamespace(action="pick", name=None, no_krea_lora=False, args=[phone_id, "1"])
+args = types.SimpleNamespace(action="pick", name=None, no_krea_lora=False, loras=None, args=[phone_id, "1"])
 with quiet:
     vidgen.avatar_command(args)
-assert last_post()[2]["name"] == "noa" and last_post()[2]["krea_lora"] is False, last_post()
+assert last_post()[2]["name"] == "noa" and last_post()[2]["krea_lora"] is False and last_post()[2]["wan_lora"] is False
+args.loras = "both"  # --loras overrides what the job asked for
+with quiet:
+    vidgen.avatar_command(args)
+assert last_post()[2]["krea_lora"] is True and last_post()[2]["wan_lora"] is True
+for choice, want in vidgen.LORA_CHOICES.items():
+    assert vidgen.lora_choice(types.SimpleNamespace(loras=choice, no_krea_lora=False)) == want
+assert vidgen.lora_choice(types.SimpleNamespace(loras=None, no_krea_lora=True)) == (False, True)
 
 print("test_job_meta_clients: ok")
