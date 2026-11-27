@@ -1948,7 +1948,7 @@ def uploads_abort(client, body):
     return _resp(200, {"key": key, "aborted": True})
 
 
-def lora_uploads(client, name, body):
+def lora_uploads(client, name, body, avatar_owned=False):
     """POST /loras/{name}/uploads {files: "single"|"pair", model: "t2v"|"krea2"} -> {version, model,
     urls: {high, low?}}. A Krea 2 LoRA is one file (krea2.safetensors); a name holds one model."""
     name = (name or "").strip().lower()
@@ -1957,7 +1957,7 @@ def lora_uploads(client, name, body):
     files = body.get("files") or "single"
     if files not in ("single", "pair"):
         return _resp(400, {"error": "files must be single (one file for both experts) or pair (high + low)"})
-    if name.startswith("avatar-"):
+    if name.startswith("avatar-") and not avatar_owned:
         return _resp(400, {"error": "names starting with avatar- are reserved for avatar LoRAs; pick another name"})
     model = body.get("model") or "t2v"
     if model not in LORA_MODELS:
@@ -2079,7 +2079,7 @@ def _lora_name_model(client, name):
     return None
 
 
-def register_lora_upload(client, name, version, body):
+def register_lora_upload(client, name, version, body, expect_model=None):
     """PUT /loras/{name}/versions/{version} {trigger?, description?, make_current?}: check the
     uploaded file(s) and make the version usable."""
     name = (name or "").strip().lower()
@@ -2103,6 +2103,8 @@ def register_lora_upload(client, name, version, body):
     if not has_krea and not has_wan:
         return _resp(400, {"error": "no file uploaded; PUT the file to the URL from POST .../uploads first"})
     model = "krea2" if has_krea else "t2v"
+    if expect_model and model != expect_model:
+        return _resp(400, {"error": "this upload is the wrong kind of LoRA for this slot"})
     existing = _lora_name_model(client, name)  # again here: an unregistered reservation can't see the other
     if existing and existing != model:
         what = {"t2v": "a Wan LoRA", "krea2": "a Krea 2 LoRA"}
@@ -2139,6 +2141,63 @@ def register_lora_upload(client, name, version, body):
         _put_json(f"loras/{client}/{name}/current.json", {"version": version})
     return _resp(200, {"name": name, "version": version, "model": model, "single_file": single,
                        "trigger": trigger, "current": body.get("make_current", True) is not False})
+
+
+# ---------------------------------------------------------------- an avatar's own LoRAs, uploaded
+# POST /avatars/{name}/loras/{kind}/uploads and PUT /avatars/{name}/loras/{kind}/versions/{version}: a Krea 2 or Wan
+# LoRA made elsewhere becomes the next version of the avatar's own LoRA name and is marked ready on the avatar, as a
+# finished training run would. docs/specs/2026-11-27-avatar-lora-upload.md
+
+AVATAR_LORA_KINDS = {"krea": "krea2", "wan": "t2v"}
+
+
+def _avatar_lora_slot(client, name, kind):
+    """(avatar, LoRA name, model, error response) for an upload to one of an avatar's two LoRAs."""
+    name = (name or "").strip().lower()
+    avatar = _get_avatar(client, name) if AVATAR_NAME.match(name) else None
+    if not avatar:
+        return None, None, None, _resp(404, {"error": f"avatar '{name}' not found"})
+    if kind not in AVATAR_LORA_KINDS:
+        return None, None, None, _resp(400, {"error": "kind must be krea (Krea 2 LoRA) or wan (Wan LoRA)"})
+    field, busy = ("krea_lora", KREA_LORA_BUSY) if kind == "krea" else ("wan_lora", WAN_LORA_BUSY)
+    rec = avatar.get(field) or {}
+    if rec.get("state") in busy and any(_job_live(j) for j in rec.get("job_ids") or []):
+        what = "Krea 2" if kind == "krea" else "Wan"
+        return None, None, None, _resp(409, {"error": f"avatar '{name}' has a {what} LoRA build {rec['state']}; "
+                                                      "wait for it to finish, then upload"})
+    lora = _avatar_lora_name(name) if kind == "krea" else _avatar_wan_lora_name(name)
+    return avatar, lora, AVATAR_LORA_KINDS[kind], None
+
+
+def avatar_lora_uploads(client, name, kind, body):
+    avatar, lora, model, err = _avatar_lora_slot(client, name, kind)
+    if err:
+        return err
+    files = body.get("files") or "single"
+    if model == "krea2" and files != "single":
+        return _resp(400, {"error": "a Krea 2 LoRA is one file"})
+    return lora_uploads(client, lora, {"files": files, "model": model, "sizes": body.get("sizes") or {}},
+                        avatar_owned=True)
+
+
+def register_avatar_lora(client, name, kind, version):
+    avatar, lora, model, err = _avatar_lora_slot(client, name, kind)
+    if err:
+        return err
+    trigger = avatar["name"]
+    r = register_lora_upload(client, lora, version, {"trigger": trigger, "make_current": True,
+                                                    "description": f"uploaded for avatar {avatar['name']}"},
+                             expect_model=model)
+    if r["statusCode"] != 200:
+        return r
+    v = json.loads(r["body"])["version"]
+    record = {"state": "ready", "lora": lora, "version": v, "trigger": trigger, "ready": {"lora": lora, "version": v},
+              "source": "upload", "error": None, "job_ids": []}
+    if kind == "krea":
+        _set_krea_lora(client, avatar["name"], dict(_krea_lora_of(client, avatar["name"]), **record))
+    else:
+        _set_wan_lora(client, avatar["name"], dict(_wan_lora_of(client, avatar["name"]), **record))
+    return _resp(200, dict(json.loads(r["body"]), avatar=avatar["name"], kind=kind))
 
 
 def lora_files(client, name, version):
@@ -2861,6 +2920,10 @@ def handler(event, context):
         return set_lora_current(client, params.get("name"), body)
     if route == "POST /loras/{name}/uploads":
         return lora_uploads(client, params.get("name"), body)
+    if route == "POST /avatars/{name}/loras/{kind}/uploads":
+        return avatar_lora_uploads(client, params.get("name"), params.get("kind"), body)
+    if route == "PUT /avatars/{name}/loras/{kind}/versions/{version}":
+        return register_avatar_lora(client, params.get("name"), params.get("kind"), params.get("version"))
     if route == "PUT /loras/{name}/versions/{version}":
         return register_lora_upload(client, params.get("name"), params.get("version"), body)
     if route == "POST /uploads/complete":
