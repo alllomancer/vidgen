@@ -20,7 +20,8 @@ assert rc.frame_times(12.0, 6) == [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
 # ---- the question: the prompt, the settings, every check; the suggestion goes in the prompt, no vidgen settings
 q = rc.instruction("video", "a woman walks in the rain", {"look": "pro"})
 assert "a woman walks in the rain" in q and '"look": "pro"' in q and '"prompt"' in q and '"checks"' in q
-assert all(f'"{k}": 0|1|2' in q for k in rc.CHECKS) and '"options"' not in q and '"score"' not in q
+assert all(k in q for k in rc.CHECKS) and "0|1|2" not in q, "no template the model could copy as-is"
+assert '"options"' not in q and '"score"' not in q
 assert "camera or phone" in q and "photorealistic" in q  # concrete camera words in; buzzwords named as banned
 assert '"prompt"' not in rc.instruction("story", None, {})
 
@@ -43,6 +44,19 @@ assert rc.clean('{"score": 3}', "video")["score"] == 3, "an answer with only a s
 assert rc.clean('{"score": 12}', "video")["score"] == 10 and rc.clean('{"score": -4}', "video")["score"] == 0
 assert "prompt" not in rc.clean('{"checks": {"skin": 1}, "prompt": "x"}', "story")
 assert "prompt" not in rc.clean('{"checks": {"skin": 1}, "prompt": "8k, masterpiece"}', "photo"), "only buzzwords: none"
+# answers a small model really gives: fenced, with text around, a second object, cut off by the token limit
+fenced = 'Here is my review:\n```json\n{"checks": {"skin": 2, "hands": 1}, "signs": ["waxy skin"]}\n```\nHope it helps {:)}'
+assert rc.clean(fenced, "photo")["score"] == 4
+cut = '{"checks": {"skin": 2, "polish": 2}, "signs": ["waxy skin", "too smooth"], "prompt": "A candid phone photo of'
+got = rc.clean(cut, "photo")
+assert got["score"] == 6 and got["prompt"] == "A candid phone photo of", got
+assert rc.clean('{"checks": {"skin": 1, "hands": 2', "photo")["score"] == 4, "cut inside checks"
+assert rc.clean('{"checks": {"skin": 1}, "signs": ["a", "b"', "photo")["signs"] == ["a", "b"]
+try:
+    rc.clean("The image looks quite real, I would say mostly fine.", "photo")
+    raise AssertionError("prose only")
+except rc.BadAnswer as e:
+    assert e.answer.startswith("The image looks quite real")
 for bad in ["no json here", '{"signs": []}', '{"score": true}', '["score", 3]', '{"score": "high"}',
             '{"score": Infinity}', '{"score": NaN}', '{"score": 3,}', '{"checks": {"nope": 2}}']:
     try:
@@ -119,8 +133,10 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
 
 # ---- failures: never raised, the job keeps its result
 assert rc.check("photos", {}, {}, tmp, download, judge)["error"].startswith("the check failed")
-out = rc.check("photos", {}, result, tmp, download, lambda images, text: "I can't tell")
-assert out == {"error": "the check couldn't read the model's answer", "checked": "photos", "note": rc.NOTE}, out
+out = rc.check("photos", {}, result, tmp, download, lambda images, text: "I can't tell,\n  sorry")
+assert out == {"error": "the check couldn't read the model's answer", "checked": "photos", "note": rc.NOTE,
+               "answer": "I can't tell, sorry"}, out
+assert len(rc.check("photos", {}, result, tmp, download, lambda images, text: "x" * 5000)["answer"]) == 400
 out = rc.check("video", {}, {"video_key": "outputs/m/j/nope.mp4"}, tmp, download, judge)
 assert out["error"].startswith("the check failed"), out
 

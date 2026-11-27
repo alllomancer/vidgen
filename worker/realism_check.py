@@ -25,7 +25,11 @@ FFMPEG_TIMEOUT = 120
 
 
 class BadAnswer(ValueError):
-    """The model's answer can't be read."""
+    """The model's answer can't be read; .answer keeps what it said."""
+
+    def __init__(self, message, answer=None):
+        super().__init__(message)
+        self.answer = answer
 
 
 def frame_times(duration, n):
@@ -127,11 +131,11 @@ def instruction(kind, prompt, current):
         "you can actually see; real photos usually get mostly 0.\n"
         f"{checks}\n"
         f"{asked}Its realism settings were: {json.dumps(current)}.\n"
-        "Answer with JSON only: {"
-        '"checks": {' + ", ".join(f'"{k}": 0|1|2' for k in CHECKS) + "}, "
-        '"signs": up to 5 short phrases describing the giveaways you rated above 0, worst first, in your own words '
-        "about this picture"
-        + (f", {rewrite}" if rewrite else "") + "}."
+        "Answer with one JSON object and nothing else, with these keys: "
+        '"checks": an object with the keys ' + ", ".join(CHECKS) + ", each an integer 0, 1 or 2 (your rating); "
+        '"signs": a list of up to 5 short phrases describing the giveaways you rated above 0, worst first, in your own '
+        "words about this picture"
+        + (f"; {rewrite}" if rewrite else "") + "."
     )
 
 
@@ -143,23 +147,34 @@ def tidy_prompt(text):
     return text.strip(" ,;")
 
 
+# Endings tried when the answer was cut off mid-object (the token limit): close the string, list and objects.
+REPAIRS = ("", "}", "\"}", "]}", "\"]}", "}}", "\"}}", "\"]}}")
+
+
 def _json_object(text):
-    m = re.search(r"\{.*\}", text or "", re.DOTALL)
-    if not m:
-        raise BadAnswer("no JSON in the answer")
-    try:
-        out = json.loads(m.group(0))
-    except json.JSONDecodeError as e:
-        raise BadAnswer(str(e))
-    if not isinstance(out, dict):
-        raise BadAnswer("the answer is not an object")
-    return out
+    """The first JSON object in the model's answer: inside ```json fences or plain, with text around it, or cut off
+    at the end (closed again)."""
+    text = re.sub(r"```(?:json)?", "", text or "")
+    decoder = json.JSONDecoder()
+    for start in [m.start() for m in re.finditer(r"\{", text)]:
+        for end in REPAIRS:
+            try:
+                out, _ = decoder.raw_decode(text[start:].rstrip().rstrip(",") + end)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(out, dict) and out:
+                return out
+    raise BadAnswer("no JSON object in the answer", answer=text)
 
 
 def clean(answer, kind):
     """The VLM's answer as {score, checks?, signs, prompt?}; BadAnswer when it can't be read. The score is computed
     from the per-check ratings; an answer with only a holistic "score" still reads."""
-    raw = _json_object(answer)
+    try:
+        raw = _json_object(answer)
+    except BadAnswer as e:
+        e.answer = answer
+        raise
     if isinstance(raw.get("checks"), dict) and any(k in raw["checks"] for k in CHECKS):
         checks = {k: _rating(raw["checks"].get(k)) for k in CHECKS}
         out = {"score": score_from_checks(checks), "checks": checks}
@@ -168,7 +183,7 @@ def clean(answer, kind):
         if isinstance(score, str) and re.fullmatch(r"\s*\d+(\.\d+)?\s*", score):
             score = float(score)
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-            raise BadAnswer("no checks or score in the answer")
+            raise BadAnswer("no checks or score in the answer", answer=answer)
         out = {"score": max(0, min(10, int(round(score))))}
     signs = raw.get("signs") if isinstance(raw.get("signs"), list) else []
     out["signs"] = [re.sub(r"\s+", " ", s).strip()[:MAX_SIGN_CHARS] for s in signs if isinstance(s, str) and s.strip()][:MAX_SIGNS]
@@ -203,9 +218,12 @@ def check(job_type, params, result, workdir, download, judge, progress=lambda ms
     except Exception as e:  # noqa: BLE001 - the render is done; the check is extra
         if type(e).__name__ == "JobCancelled":
             raise
-        reason = "the check couldn't read the model's answer" if isinstance(e, BadAnswer) \
-            else f"the check failed: {str(e)[:200]}"
-        return {"error": reason, "checked": job_type, "note": NOTE}
+        if isinstance(e, BadAnswer):
+            out = {"error": "the check couldn't read the model's answer", "checked": job_type, "note": NOTE}
+            if e.answer:  # shown in the UIs and logged, so it can be fixed
+                out["answer"] = re.sub(r"\s+", " ", str(e.answer)).strip()[:400]
+            return out
+        return {"error": f"the check failed: {str(e)[:200]}", "checked": job_type, "note": NOTE}
 
 
 def _check(job_type, params, result, workdir, download, judge, progress):

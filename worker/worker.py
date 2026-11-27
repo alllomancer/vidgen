@@ -1401,7 +1401,7 @@ def process(job_id, receipt):
                 job["type"], params, result, workdir, download=lambda key, path: s3.download_file(BUCKET, key, path),
                 judge=models.judge_realism, progress=lambda msg: progress(job_id, msg))
             log(event="realism_check", job_id=job_id, score=result["realism"].get("score"),
-                error=result["realism"].get("error"))
+                error=result["realism"].get("error"), answer=result["realism"].get("answer"))
         if params.get("loras"):
             result["loras"] = [{k: l.get(k) for k in ("name", "version", "step", "weight")} for l in params["loras"]]
         set_status(job_id, "done", result=json.dumps(result), finished_at=int(time.time()))

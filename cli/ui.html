@@ -873,7 +873,8 @@ function realismLevel(score) { return score <= 3 ? "low" : score <= 6 ? "mid" : 
 function realismBadge(j) {
   const r = j.realism;
   if (!r) return "";
-  if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}</div>`;
+  if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}
+    <button class="small" data-realism="${esc(j.job_id)}" aria-label="Show what the AI-look check got">Details</button></div>`;
   const words = {low: "looks real", mid: "some giveaways", high: "looks AI-made"}[realismLevel(r.score)];
   const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
   return `<button class="small realism-badge r-${realismLevel(r.score)}" data-realism="${esc(j.job_id)}"
@@ -890,6 +891,7 @@ async function showRealism(jobId) {
   const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
   const scenes = Array.isArray(r.scenes) ? r.scenes.map(String) : [];
   $("realism-body").innerHTML = (r.error ? `<p class="err">${esc(r.error)}</p>` : "") +
+    (typeof r.answer === "string" && r.answer ? `<p class="hint">The model said: ${esc(r.answer)}</p>` : "") +
     (signs.length ? `<h3>What gives it away</h3><ul class="plain">${signs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "") +
     (typeof r.prompt === "string" && r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
     (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}" aria-label="Copy scene ${i + 1}">Copy</button>${

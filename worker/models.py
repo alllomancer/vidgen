@@ -1237,7 +1237,7 @@ def judge_realism(image_paths, text):
     order, then the question. Greedy, short. docs/specs/2026-11-27-realism-check.md"""
     content = [{"type": "image", "image": f"file://{p}", "max_pixels": 768 * 768} for p in image_paths]
     messages = [{"role": "user", "content": content + [{"type": "text", "text": text}]}]
-    return _chat(messages, max_new_tokens=600, do_sample=False)
+    return _chat(messages, max_new_tokens=1024, do_sample=False)
 
 
 def describe_video(video_path, instructions=""):

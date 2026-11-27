@@ -247,6 +247,7 @@ function showVerdict(job) {
   if (!r) { box.hidden = true; box.replaceChildren(); return; }
   const parts = [el("h3", {}, typeof r.score === "number" ? `AI look ${Number(r.score)}/10` : "AI-look check")];
   if (r.error) parts.push(el("p", { class: "err" }, String(r.error)));
+  if (typeof r.answer === "string" && r.answer) parts.push(el("p", { class: "sub" }, `The model said: ${r.answer}`));
   const signs = Array.isArray(r.signs) ? r.signs.filter((x) => typeof x === "string") : [];
   if (signs.length) parts.push(el("h3", {}, "What gives it away"), el("ul", {}, signs.map((x) => el("li", {}, x))));
   const prompt = typeof r.prompt === "string" ? r.prompt : "";
