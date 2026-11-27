@@ -7,7 +7,7 @@ Jira: N/A
 ## Progress
 
 - [x] Task 1: Job `meta` on the server (create, list, get, re-run) — `374ed81`
-- [ ] Task 2: CLI and dashboard send `meta`; pick falls back to server meta
+- [x] Task 2: CLI and dashboard send `meta`; pick falls back to server meta — `b003d99`
 - [ ] Task 3: Watcher adopts jobs from other devices (`jobs forget`, 7-day cut-off)
 - [ ] Task 4: Unauthenticated `/m` routes serving a placeholder page
 - [ ] Task 5: Browser SSHSIG signer with ssh-keygen parity test
