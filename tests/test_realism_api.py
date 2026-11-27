@@ -53,7 +53,9 @@ items = [{"job_id": "a" * 32, "client": "m", "type": "photos", "status": "done",
          {"job_id": "d" * 32, "client": "m", "type": "video", "status": "running", "created_at": 0, "params": "{}"}]
 h.jobs = types.SimpleNamespace(query=lambda **kw: {"Items": items})
 h.Key = lambda name: types.SimpleNamespace(eq=lambda v: (name, v))
+items[0]["result"] = json.dumps(dict(json.loads(items[0]["result"]), realism_retry={"tries": 9, "best_try": 4, "attempts": []}))
 rows = {r["job_id"][0]: r for r in json.loads(h.list_jobs("m")["body"])["jobs"]}
+assert rows["a"]["realism_retry"] == {"tries": 9, "best_try": 4} and "realism_retry" not in rows["b"]
 assert rows["a"]["realism"] == {"score": 7, "signs": ["waxy skin", "too-perfect light"]}, rows["a"]
 assert rows["b"]["realism"] == {"error": "the check couldn't read the model's answer"}, rows["b"]
 assert "realism" not in rows["c"] and "realism" not in rows["d"]

@@ -65,6 +65,7 @@ assert "j.saves" in app and "bucketLink(saves[name])" in app and 'u.hostname.end
 assert page.count('name="realism_check" data-remember') == 3 and 'class="note suggested"' not in page
 assert "body.realism_check = true" in app and "REMEMBER_CHECK" in app and 'id="job-verdict"' in page
 assert "function useSuggestion(" in app and "showVerdict(j)" in app and "realismBadge(j.realism)" in app
+assert page.count('name="realism_retry"') == 2 and "body.realism_retries = 25" in app and "function retryList(" in app
 assert "Suggested settings" not in app and "allowedOptions" not in app, "the suggestion is the prompt; no settings ride along"
 
 # ---- key handling: created non-extractable, only the public half is shown

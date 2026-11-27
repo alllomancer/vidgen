@@ -2620,11 +2620,25 @@ def list_jobs(client):
         verdict = _realism_summary_of(item)
         if verdict:
             row["realism"] = verdict
+            rr = _retry_summary_of(item)
+            if rr:
+                row["realism_retry"] = rr
         for k in ("error", "progress", "rerun_of"):
             if item.get(k):
                 row[k] = item[k]
         out.append(row)
     return _resp(200, {"jobs": out})
+
+
+def _retry_summary_of(item):
+    """{tries, best_try} of a job that retried until it looked real (docs/specs/2026-11-28-realism-retry.md)."""
+    try:
+        rr = json.loads(item.get("result") or "{}").get("realism_retry")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if isinstance(rr, dict) and isinstance(rr.get("tries"), int) and isinstance(rr.get("best_try"), int):
+        return {"tries": rr["tries"], "best_try": rr["best_try"]}
+    return None
 
 
 def _realism_summary_of(item):

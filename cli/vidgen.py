@@ -1778,6 +1778,12 @@ def realism_flags(parser, what):
             "make avatar keyframes with the full 40-step image model (about +1.5 min per keyframe); "
             "the video model is unchanged")
     parser.add_argument("--best", action="store_true", help=f"best quality: {best}")
+    if what in ("video", "photos"):
+        one = "a 5 s clip" if what == "video" else "one picture"
+        parser.add_argument("--realism-retries", type=int, metavar="N",
+                            help=f"render {one} up to N times (1-25), each from the best try's suggested prompt, until "
+                                 "the AI-look score is 0 or stops improving; keeps the best and every try (turns on "
+                                 "--realism-check; ~1-2 min per try)")
     parser.add_argument("--realism-check", action="store_true",
                         help="after the render, have the vision model rate how AI-made it looks and suggest a prompt "
                              "and settings that look more real (about 1-2 min more; a critique, not a detector)")
@@ -1821,13 +1827,19 @@ def photos_body(args):
         scenes += read_shots_file(args.shots)
     if len(scenes) > 8:
         raise ApiError(f"{len(scenes)} photos requested; at most 8 per job")
+    if getattr(args, "realism_retries", None):  # one picture per try
+        if (args.count or 1) != 1 or len(scenes) > 1:
+            raise ApiError("--realism-retries makes one picture: one scene and --count 1")
+        return {"type": "photos", "scenes": scenes, "count": 1, **extra}
     return {"type": "photos", "scenes": scenes, "count": args.count, **extra}
 
 
 def realism_body(args):
     body = {"look": args.look, "natural_skin": args.natural_skin, "candid": args.candid, "grain": args.grain}
-    if getattr(args, "realism_check", False):
+    if getattr(args, "realism_check", False) or getattr(args, "realism_retries", None):
         body["realism_check"] = True
+    if getattr(args, "realism_retries", None):
+        body["realism_retries"] = args.realism_retries
     return body
 
 

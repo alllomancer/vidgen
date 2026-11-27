@@ -38,4 +38,14 @@ assert logged[-1] == "AI-look check: the check failed: x"
 assert vidgen.save_realism({"out": video}, {"result": {}}) is None
 assert vidgen.save_realism({"out": video}, {}) is None
 
+# --realism-retries on video and photos (not story); it turns the check on; photos become one picture
+for what in ("video", "photos"):
+    parser = argparse.ArgumentParser()
+    vidgen.realism_flags(parser, what)
+    body = vidgen.realism_body(parser.parse_args(["--realism-retries", "25"]))
+    assert body["realism_check"] is True and body["realism_retries"] == 25, body
+parser = argparse.ArgumentParser()
+vidgen.realism_flags(parser, "story")
+assert not hasattr(parser.parse_args([]), "realism_retries")
+
 print("test_realism_cli: ok")

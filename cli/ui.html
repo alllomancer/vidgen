@@ -313,7 +313,8 @@ form:not(.krea) .krea-text { display: none !important; }
                 <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
                 <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
                 <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
-                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt that looks more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
+                <label title="Renders a 5 s clip again and again (new seed, the best try's suggested prompt) until the AI-look score is 0 or stops improving, up to 25 tries (~1-2 min each). Keeps the best and every try"><input type="checkbox" name="realism_retry"> Retry until it looks real (a 5 s clip, up to 25 tries)</label>
                 <label><input type="checkbox" name="best"> Best keyframe (full model for the avatar frame, ~+1.5 min)</label>
               </div>
               <div class="checks shot-options" role="group" aria-label="How it is filmed (one or none)">
@@ -354,7 +355,8 @@ form:not(.krea) .krea-text { display: none !important; }
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
             <label title="Real film grain added to the finished photos"><input type="checkbox" name="grain"> Film grain</label>
-                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt that looks more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
+                <label title="Renders one picture again and again (new seed, the best try's suggested prompt) until the AI-look score is 0 or stops improving, up to 25 tries (~1-2 min each). Keeps the best and every try"><input type="checkbox" name="realism_retry"> Retry until it looks real (one picture, up to 25 tries)</label>
             <label><input type="checkbox" name="best"> Best quality (full 40-step model, ~3x slower per photo)</label>
           </div>
         </fieldset>
@@ -401,7 +403,7 @@ form:not(.krea) .krea-text { display: none !important; }
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
             <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
-                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt that looks more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
             <label><input type="checkbox" name="best"> Best keyframes (full model for avatar frames, ~+1.5 min each)</label>
           </div>
         </fieldset>
@@ -873,13 +875,14 @@ function realismLevel(score) { return score <= 3 ? "low" : score <= 6 ? "mid" : 
 function realismBadge(j) {
   const r = j.realism;
   if (!r) return "";
+  const tries = j.realism_retry ? ` · best of ${Number(j.realism_retry.tries)} tr${j.realism_retry.tries === 1 ? "y" : "ies"}` : "";
   if (r.skipped) return `<div class="sub">AI-look check ${esc(r.skipped)}</div>`;
   if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}
     <button class="small" data-realism="${esc(j.job_id)}" aria-label="Show what the AI-look check got">Details</button></div>`;
   const words = {low: "looks real", mid: "some giveaways", high: "looks AI-made"}[realismLevel(r.score)];
   const signs = Array.isArray(r.signs) ? r.signs.map(String) : [];
   return `<button class="small realism-badge r-${realismLevel(r.score)}" data-realism="${esc(j.job_id)}"
-    title="${esc(signs.join("; "))}" aria-label="AI look ${Number(r.score)} out of 10, ${words}: show details">AI look ${Number(r.score)}/10 · ${words}</button>`;
+    title="${esc(signs.join("; "))}" aria-label="AI look ${Number(r.score)} out of 10, ${words}${tries}: show details">AI look ${Number(r.score)}/10 · ${words}${esc(tries)}</button>`;
 }
 let realismOpen = null;  // {job, realism} shown in the dialog
 async function showRealism(jobId) {
@@ -897,10 +900,17 @@ async function showRealism(jobId) {
     (typeof r.prompt === "string" && r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
     (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}" aria-label="Copy scene ${i + 1}">Copy</button>${
         r.photos && r.photos[i] ? ` <span class="hint">(${Number(r.photos[i].score)}/10)</span>` : ""}</li>`).join("")}</ol>` : "") +
+    retryHtml((job.result || {}).realism_retry) +
     `<p class="hint">${esc(r.note || "An AI critique of visible artifacts, not a detector.")}</p>`;
   $("realism-use").disabled = !(r.prompt || scenes.length);
   $("realism-copy").hidden = !r.prompt;
   askDialog(d);
+}
+function retryHtml(rr) {
+  if (!rr || !Array.isArray(rr.attempts)) return "";
+  const rows = rr.attempts.map(a => `<li>try ${Number(a.try)}: ${typeof a.score === "number" ? `${Number(a.score)}/10` : "not scored"}${
+    Number(a.try) === Number(rr.best_try) ? " <b>(kept)</b>" : ""} <span class="hint">${esc(a.prompt || "")}</span></li>`).join("");
+  return `<h3>Tries (${Number(rr.tries)}; stopped: ${esc(rr.stopped || "")})</h3><ol class="plain">${rows}</ol>`;
 }
 function useRealism() {
   const {job, realism: r} = realismOpen || {};
@@ -1713,8 +1723,9 @@ document.addEventListener("change", e => {
 function createBody(kind, f) {
   const d = Object.fromEntries(new FormData(f).entries());
   const on = name => f.elements[name] && f.elements[name].checked;
+  const retry = (kind === "video" || kind === "photos") && on("realism_retry");  // docs/specs/2026-11-28-realism-retry.md
   const real = {look: d.look || "pro", natural_skin: on("natural_skin"), candid: on("candid"), grain: on("grain"),
-                realism_check: on("realism_check") || undefined};
+                realism_check: (on("realism_check") || retry) || undefined, realism_retries: retry ? 25 : undefined};
   if ((kind === "video" || kind === "story") && on("draft") && on("best")) throw new Error("Choose Draft or Best, not both");
   const vq = on("best") ? "best" : on("draft") ? "draft" : "standard";
   const kreaFrameAvatar = (kind === "video" || kind === "story") && d.image_model === "krea2" && d.avatar !== "none" &&
@@ -1723,8 +1734,9 @@ function createBody(kind, f) {
   const lora = collectLoras(f, kreaFrameAvatar || kreaPhotoAvatar);
   if (kind === "video") {
     const long = videoLong(f), secs = long.secs;
-    return {type: "video", video_model: videoModel(f), prompt: d.prompt, seconds: num(d.seconds),
-      variations: long.wan && secs > 5 ? 1 : num(d.variations),
+    if (retry && (long.beats || long.anchor)) throw new Error("Retry until it looks real makes one 5 s clip: turn off beats and re-anchoring");
+    return {type: "video", video_model: videoModel(f), prompt: d.prompt, seconds: retry ? 5 : num(d.seconds),
+      variations: retry || (long.wan && secs > 5) ? 1 : num(d.variations),
       seed: num(d.seed), avatar: d.avatar || undefined, loras: lora, fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
       quality: long.wan ? vq : (vq === "draft" ? "standard" : vq), sound: on("sound"), image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real,
       shot: shotChoice(f),
@@ -1736,7 +1748,8 @@ function createBody(kind, f) {
     style: d.style, voice: d.voice, avatar: d.avatar || undefined, loras: lora, narration: on("narration"),
     subtitles: on("subtitles"), sound: on("sound"), fps: on("smooth") ? 32 : 16, upscale: on("upscale"),
     quality: vq, image_model: d.image_model && d.image_model !== "auto" ? d.image_model : undefined, ...real};
-  const photoOpts = {count: num(d.count), aspect: d.aspect, seed: num(d.seed), avatar: d.avatar || undefined,
+  if (retry && on("series")) throw new Error("Retry until it looks real makes one picture: turn off Series in one place");
+  const photoOpts = {count: retry ? 1 : num(d.count), aspect: d.aspect, seed: num(d.seed), avatar: d.avatar || undefined,
                      quality: on("best") ? "best" : "standard", ...real};
   if (d.avatar === "none") Object.assign(photoOpts, {model: "krea2", quality: "standard"});
   if (d.avatar === "none" && lora.length) photoOpts.loras = lora;  // Krea 2 LoRAs on no-person photos

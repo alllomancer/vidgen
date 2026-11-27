@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-28
+
+- Retry until it looks real: one picture or one 5 s clip, re-rendered from the best try's suggested prompt up to 25 times until the AI-look score is 0 or stops improving (dashboard, phone, `--realism-retries`).
+
 ## 2026-11-27
 
 - Phone page for Android Chrome at `<api_url>/m`: History, Create (video, photos, story), job results with Save, Avatars, render box status; installable to the home screen. Its own ed25519 key signs requests like the CLI.

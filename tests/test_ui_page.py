@@ -37,7 +37,11 @@ assert 'svg.removeAttribute("hidden")' in qr_fn and "svg.hidden = false" not in 
 
 # the AI-look toggle is in the video, photos and story forms, and sent with the job
 assert page.count('name="realism_check" data-remember="realism_check"') == 3
-assert 'realism_check: on("realism_check") || undefined' in script
+assert 'realism_check: (on("realism_check") || retry) || undefined' in script
+# retry until it looks real: in the video and photos forms only; turns the check on; one 5 s clip / one picture
+assert page.count('name="realism_retry"') == 2 and "realism_retries: retry ? 25 : undefined" in script
+assert "seconds: retry ? 5 : num(d.seconds)" in script and "count: retry ? 1 : num(d.count)" in script
+assert "function retryHtml(" in script and "${esc(a.prompt" in script
 # Use suggestion on photos clears what would override the prompt (Series, Where/Wearing/Doing/Camera)
 use = script[script.index("function useRealism("):script.index("function rowHtml(")]
 assert 'f.elements.series.checked = false; photoForm();' in use and '"where", "wearing", "doing", "camera", "actions"' in use

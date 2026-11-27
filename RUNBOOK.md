@@ -406,6 +406,14 @@ Tick **Check how AI it looks** in the Video, Photos or Story form (dashboard or 
 
 It doesn't critique sexual images: when the prompt or the content filter (the one Krea photos use) finds sexual content, the check is skipped and says so; the render is unaffected. It adds about 1-2 minutes (the vision model is loaded after the render). It's a critique of what's visible by a general vision model, not an AI detector: the score varies between runs, and the giveaways are the useful part. If the check fails, the job is still done and the badge says why.
 
+### Retry until it looks real (optional)
+
+Tick **Retry until it looks real** in the Video or Photos form (dashboard or phone), or add `--realism-retries 25` to `vidgen video` / `vidgen photos`. The render box then makes **one picture** (photos) or **one 5 s clip** (video), runs the AI-look check, and renders again with a new seed and the best try's suggested prompt, keeping the same avatar, LoRAs and settings. It stops at a score of 0, after 6 tries in a row without a better score, or after the tries you gave (at most 25).
+
+- **Result**: the best try is the job's photo or video; every try comes along as `attempt_<n>` with its score, and the details list each try's score and prompt ("best of 9 tries", **(kept)** marks the winner).
+- **Cost**: about 1-2 minutes per try on the g7e; 25 tries is up to ~40 minutes of GPU. Progress shows "try 7/25 · best 3/10".
+- A try whose check is skipped (sexual content) or fails ends the loop; the best try so far is kept.
+
 ### Phone (Android)
 
 A small page for the phone, served by the API at `<api_url>/m` (`make output` shows `api_url`; the dashboard's Phones panel has the link). Open it in Chrome on the phone and install it (Chrome menu → **Add to Home screen**) so it opens like an app and Chrome keeps its key. The full dashboard still runs only on the Mac.
@@ -695,6 +703,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | Command | What it does |
 |---|---|
 | `vidgen jobs` | local list of jobs: pending, downloaded, where the files went |
+| `--realism-retries N` (on `video`, `photos`) | retry one 5 s clip / one picture up to N times (max 25) until the AI-look score is 0 or stops improving; keeps the best and every try |
 | `--realism-check` (on `video`, `photos`, `story`) | after the render, rate how AI-made it looks and suggest a prompt and settings (about 1-2 min more) |
 | `vidgen jobs forget ID...` | drop jobs from the local list and don't download them (also ones started on the phone; full id for one not downloaded yet) |
 | `vidgen cancel JOB_ID` | cancel a queued or running job (a unique prefix of the id is enough) |

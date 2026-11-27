@@ -242,6 +242,15 @@ function realismBadge(r) {
   return el("span", { class: `badge r-${realismLevel(r.score)}` }, `AI look ${Number(r.score)}/10 · ${words}`);
 }
 
+function retryList(rr) {
+  if (!rr || !Array.isArray(rr.attempts)) return [];
+  return [el("h3", {}, `Tries (${Number(rr.tries)}; stopped: ${String(rr.stopped || "")})`),
+    el("ol", {}, rr.attempts.map((a) => el("li", {},
+      `try ${Number(a.try)}: ${typeof a.score === "number" ? `${Number(a.score)}/10` : "not scored"}`
+      + (Number(a.try) === Number(rr.best_try) ? " (kept)" : ""),
+      el("div", { class: "sub" }, String(a.prompt || "")))))];
+}
+
 function showVerdict(job) {
   const box = $("job-verdict");
   const r = job.result && job.result.realism && typeof job.result.realism === "object" ? job.result.realism : null;
@@ -256,6 +265,7 @@ function showVerdict(job) {
   if (prompt) parts.push(el("h3", {}, "Suggested prompt"), el("p", { class: "suggest" }, prompt));
   const scenes = Array.isArray(r.scenes) ? r.scenes.filter((x) => typeof x === "string") : [];
   if (scenes.length) parts.push(el("h3", {}, "Suggested scenes"), el("ol", {}, scenes.map((x) => el("li", { class: "suggest" }, x))));
+  parts.push(...retryList(job.result && job.result.realism_retry));
   parts.push(el("p", { class: "sub" }, String(r.note || "An AI critique of visible artifacts, not a detector.")));
   const actions = [];
   if (prompt || scenes.length) {
@@ -317,6 +327,7 @@ function jobCard(j) {
     el("div", { class: "summary" }, String(j.summary || "")),
     el("div", { class: "status" }, statusPart(j)),
     realismBadge(j.realism),
+    j.realism_retry ? el("div", { class: "sub" }, `best of ${Number(j.realism_retry.tries)} tries`) : null,
     actions.length ? el("div", { class: "actions" }, actions) : null);
 }
 
@@ -634,8 +645,17 @@ function lines(text) {
 }
 
 async function jobBody(form, progress) {
+  const retry = form.elements.realism_retry && form.elements.realism_retry.checked; // docs/specs/2026-11-28-realism-retry.md
+  if (retry && form.dataset.kind === "photos" && lines(form.elements.scenes.value).length > 1) {
+    throw new Error("retry until it looks real makes one picture: give one scene");
+  }
   const body = await kindBody(form, progress);
-  if (form.elements.realism_check.checked) body.realism_check = true;
+  if (form.elements.realism_check.checked || retry) body.realism_check = true;
+  if (retry) {
+    body.realism_retries = 25;
+    if (body.type === "video") body.seconds = 5;
+    if (body.type === "photos") body.count = 1;
+  }
   return body;
 }
 
