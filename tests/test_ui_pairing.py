@@ -36,7 +36,10 @@ def hit(method, path, body=None, token=TOKEN, host="127.0.0.1:8765"):
     return sent["code"], json.loads(h.wfile.getvalue() or b"{}")
 
 
-assert hit("GET", "/api/phone") == (200, {"url": "https://abc.execute-api.us-east-1.amazonaws.com/m"})
+st, body = hit("GET", "/api/phone")
+assert st == 200 and body["url"] == "https://abc.execute-api.us-east-1.amazonaws.com/m", body
+import qr  # noqa: E402
+assert body["qr"] == qr.encode(body["url"]) and len(body["qr"]) == 33, "the QR code of exactly that link"
 for method, path, body, want in [
         ("GET", "/api/pairings", None, ("GET", "/pairings", None)),
         ("POST", "/api/pairings", None, ("POST", "/pairings/open", None)),

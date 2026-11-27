@@ -174,6 +174,8 @@ form:not(.krea) .krea-text { display: none !important; }
   .realism-badge.r-high { border-color: var(--err, #b91c1c); font-weight: 600; }
   #realism-body h3 { font-size: 14px; margin: 14px 0 4px; }
   #realism-body .suggest { white-space: pre-wrap; }
+  .phone-link { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  #phone-qr { width: 176px; height: 176px; flex: none; border-radius: 6px; }
 </style>
 </head>
 <body>
@@ -210,8 +212,11 @@ form:not(.krea) .krea-text { display: none !important; }
     </section>
     <section class="card" aria-labelledby="phones-h">
       <h2 id="phones-h">Phones</h2>
-      <p class="hint">Open <a id="phone-url" href="#" target="_blank" rel="noopener">the phone page</a> in Chrome on
-        the phone. <button class="small" id="phone-url-copy" type="button">Copy link</button></p>
+      <div class="phone-link">
+        <svg id="phone-qr" role="img" aria-label="QR code of the phone page link" viewBox="0 0 1 1" hidden></svg>
+        <p class="hint">Scan this with the phone's camera, or open <a id="phone-url" href="#" target="_blank" rel="noopener">the
+          phone page</a> in Chrome there. <button class="small" id="phone-url-copy" type="button">Copy link</button></p>
+      </div>
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
         <button id="pair-open" type="button" class="primary">Pair a phone</button>
         <span class="hint" id="pair-window" role="status"></span>
@@ -2039,7 +2044,25 @@ $("pair-devices").addEventListener("click", async (ev) => {
   loadPhones();
 });
 $("phone-url-copy").onclick = () => copyText($("phone-url").href).then(() => toast("Link copied"), e => showError(e.message));
-api("GET", "/api/phone").then(r => { $("phone-url").href = r.url; $("phone-url").textContent = r.url; }).catch(() => {});
+// The QR code: rows of "1"/"0" from ui.py (cli/qr.py), drawn as one SVG path with a 4-module quiet zone,
+// black on white in both themes so phone cameras read it.
+function drawQr(rows) {
+  const svg = $("phone-qr");
+  if (!Array.isArray(rows) || !rows.length || !rows.every(r => typeof r === "string" && /^[01]+$/.test(r) && r.length === rows.length)) return;
+  const n = rows.length, side = n + 8, NS = "http://www.w3.org/2000/svg";
+  let d = "";
+  rows.forEach((row, y) => { for (let x = 0; x < n; x++) if (row[x] === "1") d += `M${x + 4} ${y + 4}h1v1h-1z`; });
+  const bg = document.createElementNS(NS, "rect"), path = document.createElementNS(NS, "path");
+  bg.setAttribute("width", side); bg.setAttribute("height", side); bg.setAttribute("fill", "#fff");
+  path.setAttribute("d", d); path.setAttribute("fill", "#000");
+  svg.setAttribute("viewBox", `0 0 ${side} ${side}`);
+  svg.setAttribute("shape-rendering", "crispEdges");
+  svg.replaceChildren(bg, path);
+  svg.hidden = false;
+}
+api("GET", "/api/phone").then(r => {
+  $("phone-url").href = r.url; $("phone-url").textContent = r.url; drawQr(r.qr);
+}).catch(() => {});
 loadPhones();
 
 // askDialog() opens it; Use suggestion closes it with returnValue "use" (Esc and Close leave "").

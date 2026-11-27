@@ -67,7 +67,8 @@ History once approved; after 10 minutes it offers a new code. The Terraform step
 
 ### Mac dashboard
 
-A **Phones** panel (Server tab): the phone page link (`<api_url>/m`) with Copy; waiting requests with code, time and
+A **Phones** panel (Server tab): the phone page link (`<api_url>/m`) as a QR code to scan with the phone's camera
+(made by `cli/qr.py`, standard library only, drawn as SVG) and as a link with Copy; waiting requests with code, time and
 browser, **Approve** (with an optional name) and **Decline**; paired phones with **Remove**. It refreshes every 5 s
 while a request is waiting. `ui.py` proxies `GET /api/pairings`, `POST /api/pairings/{code}/approve`,
 `DELETE /api/pairings/{code}`, `DELETE /api/devices/{id}` and `GET /api/phone` (`{url}`).
@@ -95,7 +96,7 @@ while a request is waiting. `ui.py` proxies `GET /api/pairings`, `POST /api/pair
 
 ## Out of Scope
 
-QR codes; naming devices after approval; per-device permissions; pairing more than one client's phones from one Mac
+Naming devices after approval; per-device permissions; pairing more than one client's phones from one Mac
 (each Mac key approves into its own client).
 
 ## Risks & Open Questions

@@ -25,6 +25,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import datasets
+import qr
 import vidgen
 
 PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
@@ -453,11 +454,12 @@ DEVICE_ID = re.compile(r"[0-9a-f]{8}")
 
 
 def phone_link():
-    """The phone page's address (<api_url>/m), for the Phones panel."""
+    """The phone page's address (<api_url>/m) and its QR code (rows of 1/0) for the Phones panel."""
     base = vidgen.setting("url")
     if not base:
         raise ValueError("the API URL is not configured; run vidgen.py configure --url <api_url>")
-    return {"url": base.rstrip("/") + "/m"}
+    url = base.rstrip("/") + "/m"
+    return {"url": url, "qr": qr.encode(url)}
 
 
 def pairing(method, code=None, device=None, body=None):

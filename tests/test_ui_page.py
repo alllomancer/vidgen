@@ -20,6 +20,10 @@ for needed in ('data-copy-prompt=', 'data-use-prompt=', "function copyText(", "n
 # copying is offered for the job kinds whose summary is the prompt as sent
 assert re.search(r'function copyable\(j\) \{ return !!j\.summary && \["video", "photos", "avatar"\]\.includes\(j\.type\); \}', script)
 
+# the Phones panel draws the link's QR code from ui.py's rows, as SVG elements (no HTML, no outside script)
+assert 'id="phone-qr"' in page and "function drawQr(" in script and "drawQr(r.qr)" in script
+assert "/^[01]+$/.test(r)" in script
+
 # the AI-look toggle is in the video, photos and story forms, and sent with the job
 assert page.count('name="realism_check" data-remember="realism_check"') == 3
 assert 'realism_check: on("realism_check") || undefined' in script
