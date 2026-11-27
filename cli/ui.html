@@ -168,6 +168,12 @@ form:not(.krea) .krea-text { display: none !important; }
   .pair-req { border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 10px; }
   .pair-code { font-size: 22px; letter-spacing: 2px; font-variant-numeric: tabular-nums; }
   .pair-name { width: 100%; max-width: 220px; }
+  .realism-badge { margin-top: 6px; }
+  .realism-badge.r-low { border-color: var(--ok, #15803d); }
+  .realism-badge.r-mid { border-color: #a16207; }
+  .realism-badge.r-high { border-color: var(--err, #b91c1c); font-weight: 600; }
+  #realism-body h3 { font-size: 14px; margin: 14px 0 4px; }
+  #realism-body .suggest { white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -300,6 +306,7 @@ form:not(.krea) .krea-text { display: none !important; }
                 <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
                 <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
                 <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
                 <label><input type="checkbox" name="best"> Best keyframe (full model for the avatar frame, ~+1.5 min)</label>
               </div>
               <div class="checks shot-options" role="group" aria-label="How it is filmed (one or none)">
@@ -340,6 +347,7 @@ form:not(.krea) .krea-text { display: none !important; }
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
             <label title="Real film grain added to the finished photos"><input type="checkbox" name="grain"> Film grain</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
             <label><input type="checkbox" name="best"> Best quality (full 40-step model, ~3x slower per photo)</label>
           </div>
         </fieldset>
@@ -386,6 +394,7 @@ form:not(.krea) .krea-text { display: none !important; }
             <label title="Visible skin texture and pores, no retouched or beauty-filter look"><input type="checkbox" name="natural_skin"> Natural skin</label>
             <label title="Unposed; people don't look at the camera"><input type="checkbox" name="candid"> Candid</label>
             <label title="Real film grain added to the finished frames"><input type="checkbox" name="grain"> Film grain</label>
+                <label title="After the render, a vision model rates how AI-made it looks and suggests a prompt and settings that look more real. About 1-2 min more. A critique, not a detector"><input type="checkbox" name="realism_check" data-remember="realism_check"> Check how AI it looks</label>
             <label><input type="checkbox" name="best"> Best keyframes (full model for avatar frames, ~+1.5 min each)</label>
           </div>
         </fieldset>
@@ -502,6 +511,17 @@ form:not(.krea) .krea-text { display: none !important; }
     <button type="button" id="viewer-close" title="Esc">Close</button>
   </div>
   <div class="v-stage"><img id="viewer-img" alt=""></div>
+</dialog>
+<dialog id="realism-dialog" aria-labelledby="realism-h">
+  <form method="dialog" class="dialog-form">
+    <h2 id="realism-h" class="wide" style="margin:0;font-size:16px"></h2>
+    <div id="realism-body" class="wide"></div>
+    <div class="wide" style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end">
+      <button type="button" id="realism-copy" class="small">Copy prompt</button>
+      <button value="use" id="realism-use" class="primary">Use suggestion</button>
+      <button value="">Close</button>
+    </div>
+  </form>
 </dialog>
 <dialog id="pick-dialog" aria-labelledby="pick-h">
   <form method="dialog" class="add">
@@ -815,12 +835,62 @@ async function copyText(text) {
   box.remove();
   if (!ok) throw new Error("Copying isn't allowed in this browser: select the prompt text and copy it");
 }
+// ---------------------------------------------------------------- AI-look check (docs/specs/2026-11-27-realism-check.md)
+function realismLevel(score) { return score <= 3 ? "low" : score <= 6 ? "mid" : "high"; }
+function realismBadge(j) {
+  const r = j.realism;
+  if (!r) return "";
+  if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}</div>`;
+  const words = {low: "looks real", mid: "some giveaways", high: "looks AI-made"}[realismLevel(r.score)];
+  return `<button class="small realism-badge r-${realismLevel(r.score)}" data-realism="${esc(j.job_id)}"
+    title="${esc((r.signs || []).join("; "))}">AI look ${Number(r.score)}/10 · ${words}</button>`;
+}
+let realismOpen = null;  // {job, realism} shown in the dialog
+async function showRealism(jobId) {
+  let job;
+  try { job = await api("GET", `/api/jobs/${jobId}`); } catch (e) { showError(e.message); return; }
+  const r = (job.result || {}).realism || {};
+  realismOpen = {job, realism: r};
+  const d = $("realism-dialog");
+  $("realism-h").textContent = typeof r.score === "number" ? `AI look ${r.score}/10` : "AI-look check";
+  const opts = Object.entries(r.options || {}).map(([k, v]) => `${k.replace("_", " ")}: ${v === true ? "on" : v === false ? "off" : v}`);
+  const scenes = Array.isArray(r.scenes) ? r.scenes : [];
+  $("realism-body").innerHTML = (r.error ? `<p class="err">${esc(r.error)}</p>` : "") +
+    ((r.signs || []).length ? `<h3>What gives it away</h3><ul class="plain">${r.signs.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : "") +
+    (r.prompt ? `<h3>Suggested prompt</h3><p class="suggest">${esc(r.prompt)}</p>` : "") +
+    (scenes.length ? `<h3>Suggested scenes</h3><ol class="plain">${scenes.map((t, i) => `<li>${esc(t)} <button type="button" class="small" data-copy-scene="${i}">Copy</button>${
+        r.photos && r.photos[i] ? ` <span class="hint">(${Number(r.photos[i].score)}/10)</span>` : ""}</li>`).join("")}</ol>` : "") +
+    (opts.length ? `<h3>Suggested settings</h3><p>${esc(opts.join(" · "))}</p>` : "") +
+    `<p class="hint">${esc(r.note || "An AI critique of visible artifacts, not a detector.")}</p>`;
+  $("realism-use").disabled = !(r.prompt || scenes.length || opts.length);
+  $("realism-copy").hidden = !r.prompt;
+  askDialog(d);
+}
+function useRealism() {
+  const {job, realism: r} = realismOpen || {};
+  if (!job) return;
+  const kind = job.type, f = $(`create-${kind}`);
+  if (!f) return;
+  $("tab-create").click();
+  document.querySelector(`.seg button[data-kind="${kind}"]`).click();
+  if (kind === "video" && r.prompt) f.elements.prompt.value = r.prompt;
+  if (kind === "photos" && Array.isArray(r.scenes) && r.scenes.length && f.elements.prompt) {
+    const worst = (r.photos || []).reduce((w, p, i) => (p.score > ((r.photos[w] || {}).score ?? -1) ? i : w), 0);
+    f.elements.prompt.value = r.scenes[worst] || r.scenes[0];
+  }
+  const o = r.options || {};
+  if (o.look && f.elements.look) f.elements.look.value = o.look;
+  for (const k of ["natural_skin", "candid", "grain"]) if (k in o && f.elements[k]) f.elements[k].checked = !!o[k];
+  if (kind === "video" && o.shot) for (const el of f.querySelectorAll('input[name="shot"]')) el.checked = el.value === o.shot;
+  toast("Suggestion loaded into the form: check it, then render again");
+}
+
 function rowHtml(j) {
   const id = esc(j.job_id), live = j.status === "queued" || j.status === "running", stop = cancelling.has(j.job_id);
   return `<tr data-job="${id}">
       <td title="${esc(new Date(j.created_at * 1000).toLocaleString())}"><span data-ago="${Number(j.created_at)}"></span><div class="sub">${esc(when(j.created_at))}</div></td>
       <td><span class="chip">${esc(j.type)}</span></td>
-      <td class="summary"><div class="text" title="${esc(j.summary)}">${esc(j.summary || "—")}</div><div class="sub">${esc(details(j))}</div></td>
+      <td class="summary"><div class="text" title="${esc(j.summary)}">${esc(j.summary || "—")}</div><div class="sub">${esc(details(j))}</div>${realismBadge(j)}</td>
       <td>${statusHtml(j)}</td>
       <td class="num">${dur(j.wait_seconds)}</td>
       <td class="num"><b>${dur(j.run_seconds)}</b></td>
@@ -1017,6 +1087,7 @@ $("jobs").onclick = async e => {
     } catch (err) { showError(err.message); }
     return;
   }
+  if (b.dataset.realism) { showRealism(b.dataset.realism); return; }
   if (b.dataset.copyPrompt || b.dataset.usePrompt) {
     const j = jobs.find(x => x.job_id === (b.dataset.copyPrompt || b.dataset.usePrompt));
     if (!j || !j.summary) return;
@@ -1576,7 +1647,8 @@ document.addEventListener("change", e => {
 function createBody(kind, f) {
   const d = Object.fromEntries(new FormData(f).entries());
   const on = name => f.elements[name] && f.elements[name].checked;
-  const real = {look: d.look || "pro", natural_skin: on("natural_skin"), candid: on("candid"), grain: on("grain")};
+  const real = {look: d.look || "pro", natural_skin: on("natural_skin"), candid: on("candid"), grain: on("grain"),
+                realism_check: on("realism_check") || undefined};
   if ((kind === "video" || kind === "story") && on("draft") && on("best")) throw new Error("Choose Draft or Best, not both");
   const vq = on("best") ? "best" : on("draft") ? "draft" : "standard";
   const kreaFrameAvatar = (kind === "video" || kind === "story") && d.image_model === "krea2" && d.avatar !== "none" &&
@@ -1962,6 +2034,23 @@ $("pair-devices").addEventListener("click", async (ev) => {
 $("phone-url-copy").onclick = () => copyText($("phone-url").href).then(() => toast("Link copied"), e => showError(e.message));
 api("GET", "/api/phone").then(r => { $("phone-url").href = r.url; $("phone-url").textContent = r.url; }).catch(() => {});
 loadPhones();
+
+$("realism-dialog").addEventListener("close", () => { if ($("realism-dialog").returnValue === "use") useRealism(); });
+$("realism-copy").onclick = () => copyText((realismOpen || {}).realism.prompt || "").then(() => toast("Prompt copied"), e => showError(e.message));
+$("realism-body").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-copy-scene]"); if (!b) return;
+  copyText(((realismOpen || {}).realism.scenes || [])[Number(b.dataset.copyScene)] || "").then(() => toast("Scene copied"), e => showError(e.message));
+});
+// "Check how AI it looks" is remembered on this computer (all three forms share it)
+try {
+  const remembered = localStorage.getItem("vidgen.realism_check") === "1";
+  for (const el of document.querySelectorAll('input[data-remember="realism_check"]')) el.checked = remembered;
+} catch (e) { /* storage blocked: unticked */ }
+document.addEventListener("change", e => {
+  if (!e.target.matches || !e.target.matches('input[data-remember="realism_check"]')) return;
+  for (const el of document.querySelectorAll('input[data-remember="realism_check"]')) el.checked = e.target.checked;
+  try { localStorage.setItem("vidgen.realism_check", e.target.checked ? "1" : "0"); } catch (err) { /* not remembered */ }
+});
 
 setInterval(loadStatus, 15000);
 setInterval(loadJobs, 30000);

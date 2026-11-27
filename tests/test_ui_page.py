@@ -14,10 +14,15 @@ assert len(script) > 10000
 
 for needed in ('data-copy-prompt=', 'data-use-prompt=', "function copyText(", "navigator.clipboard.writeText",
                'id="restart-worker"', 'id="ready-bar"', 'name="video_model"', 'name="shot" value="stream"',
-               'name="shot" value="pov"', 'id="viewer"'):
+               'name="shot" value="pov"', 'id="viewer"', 'id="realism-dialog"', 'id="realism-use"',
+               "function realismBadge(", "function useRealism("):
     assert needed in page, f"missing from the dashboard: {needed}"
 # copying is offered for the job kinds whose summary is the prompt as sent
 assert re.search(r'function copyable\(j\) \{ return !!j\.summary && \["video", "photos", "avatar"\]\.includes\(j\.type\); \}', script)
+
+# the AI-look toggle is in the video, photos and story forms, and sent with the job
+assert page.count('name="realism_check" data-remember="realism_check"') == 3
+assert 'realism_check: on("realism_check") || undefined' in script
 
 node = shutil.which("node")
 if node:
