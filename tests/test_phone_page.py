@@ -31,7 +31,8 @@ assert re.findall(r'^import .* from "([^"]+)";', app, re.M) == ["/m/sign.js"]
 
 # ---- the API calls it makes are ones the phone is meant to make
 ALLOWED = {("GET", "/jobs"), ("POST", "/jobs/{id}/cancel"), ("POST", "/jobs/{id}/rerun"), ("POST", "/jobs"),
-           ("POST", "/uploads"), ("GET", "/avatars")}
+           ("POST", "/uploads"), ("GET", "/avatars"), ("GET", "/jobs/{id}"), ("PUT", "/avatars/default"),
+           ("POST", "/avatars/{id}/images")}
 calls = set()
 for method, path in re.findall(r'call\("([A-Z]+)", [`"]([^`"]+)[`"]', app):
     calls.add((method, re.sub(r"\$\{[^}]+\}", "{id}", path)))
@@ -54,6 +55,9 @@ for form_field in ('name="prompt"', 'name="seconds"', 'name="avatar"', 'name="su
                    'name="scenes"', 'name="count"', 'name="story"', 'name="subtitles"', 'name="narration"'):
     assert form_field in page, form_field
 assert page.count('name="out"') == 3
+
+# ---- Job screen: previews from downloads, Save from the attachment links, both only to the bucket
+assert "j.saves" in app and "bucketLink(saves[name])" in app and 'u.hostname.endsWith(".amazonaws.com")' in app
 
 # ---- key handling: created non-extractable, only the public half is shown
 assert 'generateKey({ name: "Ed25519" }, false, ["sign"])' in sign

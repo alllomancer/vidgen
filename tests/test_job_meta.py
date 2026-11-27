@@ -93,4 +93,24 @@ assert "meta" not in table[body(r)["job_id"]], "no meta to copy"
 r = h.rerun_job("m", body(h.create_job("m", dict(WRITE, meta={"source": "cli"})))["job_id"])
 assert json.loads(table[body(r)["job_id"]]["meta"]) == {"source": "cli"}
 
+# ---- saves: the same files as downloads, presigned as attachments named after the job (the phone's Save)
+signed = []
+h.s3.generate_presigned_url = lambda op, Params, ExpiresIn: signed.append(Params) or f"https://signed/{Params['Key']}"
+done = dict(table[jid], job_id="d" * 32, status="done", result=json.dumps({
+    "video_key": "outputs/m/d/video.mp4", "subtitles_key": "outputs/m/d/subs.srt", "title": "x"}))
+table[done["job_id"]] = done
+r = body(h.get_job("m", done["job_id"]))
+assert set(r["downloads"]) == set(r["saves"]) == {"video", "subtitles"}, r
+by_key = {p["Key"]: p for p in signed if "ResponseContentDisposition" in p}
+assert by_key["outputs/m/d/video.mp4"]["ResponseContentDisposition"] == 'attachment; filename="lighthouse.mp4"'
+assert by_key["outputs/m/d/subs.srt"]["ResponseContentDisposition"] == 'attachment; filename="lighthouse.subtitles.srt"'
+nameless = dict(done, job_id="e" * 32, meta=None)
+nameless.pop("meta")
+table[nameless["job_id"]] = nameless
+signed.clear()
+h.get_job("m", nameless["job_id"])
+names = sorted(p["ResponseContentDisposition"] for p in signed if "ResponseContentDisposition" in p)
+assert names == ['attachment; filename="vidgen-eeeeeeee.mp4"', 'attachment; filename="vidgen-eeeeeeee.subtitles.srt"'], names
+assert "saves" not in body(h.get_job("m", plain)), "only for done jobs"
+
 print("test_job_meta: ok")

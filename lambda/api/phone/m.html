@@ -67,6 +67,14 @@
   form.create .go { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
   form.create .go button { flex: 0 0 auto; }
   .form-status { font-size: 14px; }
+  a.button { display: inline-flex; align-items: center; min-height: 44px; padding: 4px 14px; border-radius: 10px;
+             border: 1px solid var(--field); background: var(--card); color: var(--fg); text-decoration: none; font-size: 14px; }
+  ul.files { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+  .file img, .file video { display: block; width: 100%; height: auto; border-radius: 10px; background: var(--line); }
+  .file .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 6px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  label.button { font-weight: 400; margin: 0; cursor: pointer; }
+  label.button:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
   #toast { position: fixed; left: 16px; right: 16px; bottom: 16px; max-width: 480px; margin: 0 auto; z-index: 3;
            background: var(--fg); color: var(--bg); padding: 12px 14px; border-radius: 12px; }
 </style>
@@ -77,6 +85,7 @@
   <nav id="nav" hidden aria-label="Sections">
     <button type="button" data-view="history">History</button>
     <button type="button" data-view="create">Create</button>
+    <button type="button" data-view="avatars">Avatars</button>
   </nav>
 </div></header>
 <main>
@@ -119,6 +128,21 @@
     <p id="history-empty" class="muted" hidden>No jobs yet.</p>
     <ul id="history-list" class="jobs"></ul>
   </section>
+  <section id="job" hidden>
+    <div class="toolbar">
+      <button type="button" id="job-back" class="small">← History</button>
+      <h2 tabindex="-1" id="job-title"></h2>
+    </div>
+    <ul id="job-files" class="files"></ul>
+    <p id="job-note" class="sub"></p>
+  </section>
+
+  <section id="avatars" hidden>
+    <h2 tabindex="-1">Avatars</h2>
+    <p id="avatars-empty" class="muted" hidden>No avatars yet. Make one in the Mac dashboard.</p>
+    <ul id="avatars-list" class="jobs"></ul>
+  </section>
+
   <section id="create" hidden>
     <h2 tabindex="-1">Create</h2>
     <div class="seg" id="create-kinds" role="group" aria-label="What to make">

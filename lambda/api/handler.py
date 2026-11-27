@@ -2189,7 +2189,32 @@ def get_job(client, job_id):
             for k, v in result.items()
             if k.endswith("_key")
         }
+        out["saves"] = _save_links(item, result)
     return _resp(200, out)
+
+
+def _save_links(item, result):
+    """The same files as downloads, presigned to download as attachments named after the job (the phone's Save):
+    <name>.mp4 for the video, <name>.<file><ext> for the rest; <name> is meta.out_name's stem or vidgen-<id8>.
+    The stem passes OUT_NAME (ASCII, no quotes), so it is safe in the header."""
+    stem = os.path.splitext(_meta_of(item).get("out_name") or "")[0].rstrip(". ")
+    if not stem or not OUT_NAME.fullmatch(stem):
+        stem = f"vidgen-{item['job_id'][:8]}"
+    saves = {}
+    for k, v in result.items():
+        if not k.endswith("_key") or not isinstance(v, str):
+            continue
+        name = k[: -len("_key")]
+        ext = os.path.splitext(v)[1].lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,8}", ext):
+            ext = ""
+        fname = f"{stem}{ext}" if name == "video" else f"{stem}.{name}{ext}"
+        if not re.fullmatch(r"[A-Za-z0-9._ -]{1,200}", fname):
+            fname = f"vidgen-{item['job_id'][:8]}{ext}"
+        saves[name] = s3.generate_presigned_url(
+            "get_object", Params={"Bucket": BUCKET, "Key": v, "ResponseContentDisposition": f'attachment; filename="{fname}"'},
+            ExpiresIn=URL_TTL)
+    return saves
 
 
 def _num(value):

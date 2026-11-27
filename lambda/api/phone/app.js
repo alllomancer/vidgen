@@ -178,6 +178,9 @@ function jobCard(j) {
   } else if (["video", "photos", "story", "write", "avatar"].includes(j.type)) {
     actions.push(el("button", { class: "small", onclick: (e) => rerun(j, e.currentTarget) }, "Re-run"));
   }
+  if (j.status === "done" && j.type !== "train") {
+    actions.unshift(el("button", { class: "small", onclick: () => openJob(j.job_id) }, "Open"));
+  }
   if (j.summary && COPYABLE.includes(j.type)) {
     actions.push(el("button", { class: "small", onclick: () => copyText(j.summary) }, "Copy prompt"));
   }
@@ -240,6 +243,127 @@ function startRefresh() {
   timer = setInterval(() => {
     if (document.visibilityState === "visible" && !$("history").hidden) refreshHistory().catch(staleNote);
   }, REFRESH_MS);
+}
+
+// ---------------------------------------------------------------- one job: results and Save
+
+const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
+const VIDEO_EXT = /\.(mp4|webm|mov)$/i;
+let openJobId = null;
+
+function fileExt(url) {
+  try { return new URL(url).pathname; } catch (e) { return ""; }
+}
+
+/** Only links to this bucket's presigned objects are shown or followed. */
+function bucketLink(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.hostname.endsWith(".amazonaws.com") ? u.href : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function openJob(jobId) {
+  openJobId = jobId;
+  show("job");
+  $("job-title").textContent = "Loading…";
+  $("job-files").replaceChildren();
+  $("job-note").textContent = "";
+  let j;
+  try {
+    j = await call("GET", `/jobs/${encodeURIComponent(jobId)}`); // fresh links: they last an hour
+  } catch (e) {
+    if (!(e instanceof Unauthorized)) $("job-title").textContent = e.message;
+    return;
+  }
+  if (openJobId !== jobId) return;
+  $("job-title").textContent = `${j.type || "job"} · ${j.status || ""}`;
+  const downloads = j.downloads && typeof j.downloads === "object" ? j.downloads : {};
+  const saves = j.saves && typeof j.saves === "object" ? j.saves : {};
+  const names = Object.keys(downloads).sort((a, b) => (a === "video" ? -1 : b === "video" ? 1 : a.localeCompare(b)));
+  const items = [];
+  for (const name of names) {
+    const view = bucketLink(downloads[name]);
+    if (!view) continue;
+    const path = fileExt(view);
+    const save = bucketLink(saves[name]);
+    let media = null;
+    if (IMAGE_EXT.test(path)) media = el("img", { src: view, alt: `${name} from this job`, loading: "lazy" });
+    else if (VIDEO_EXT.test(path)) media = el("video", { src: view, controls: true, playsinline: true, preload: "metadata" });
+    items.push(el("li", { class: "file" },
+      media,
+      el("div", { class: "row" }, el("span", {}, name.replace(/_/g, " ")),
+        save ? el("a", { class: "button small", href: save, rel: "noopener" }, "Save") : null)));
+  }
+  $("job-files").replaceChildren(...items);
+  $("job-note").textContent = items.length ? "Save downloads the file; it shows up in Files → Downloads and the gallery."
+                                           : "Nothing to show for this job.";
+}
+
+// ---------------------------------------------------------------- avatars
+
+const MAX_AVATAR_IMAGES = 12;
+
+function avatarCard(a, def) {
+  const name = String(a.name);
+  const states = [`${Number(a.images) || 0} photo${Number(a.images) === 1 ? "" : "s"}`];
+  for (const [label, rec] of [["Krea LoRA", a.krea_lora], ["Wan LoRA", a.wan_lora]]) {
+    if (rec && typeof rec.state === "string" && rec.state !== "none") states.push(`${label}: ${rec.state}`);
+  }
+  const input = el("input", { type: "file", accept: "image/*", multiple: true, class: "visually-hidden",
+                              id: `add-${name}`, "aria-label": `Photos to add to ${name}` });
+  const status = el("span", { class: "form-status", role: "status" });
+  input.addEventListener("change", () => addAvatarPhotos(name, input, status, Number(a.images) || 0));
+  const actions = [el("label", { class: "button small", for: `add-${name}` }, "Add photos"), input];
+  if (name !== def) {
+    actions.push(el("button", { class: "small", onclick: (e) => busy(e.currentTarget, async () => {
+      await call("PUT", "/avatars/default", { name });
+      toast(`${name} is now the default`);
+      await refreshAvatars();
+    }) }, "Make default"));
+  }
+  return el("li", { class: "job" },
+    el("div", { class: "row" }, el("strong", {}, name), name === def ? el("span", { class: "pill done" }, "default") : null),
+    el("div", { class: "sub" }, states.join(" · ")),
+    el("div", { class: "actions" }, actions),
+    status);
+}
+
+async function addAvatarPhotos(name, input, status, have) {
+  const files = [...input.files];
+  input.value = "";
+  if (!files.length) return;
+  if (have + files.length > MAX_AVATAR_IMAGES) {
+    status.textContent = `an avatar holds at most ${MAX_AVATAR_IMAGES} photos (${name} has ${have})`;
+    status.classList.add("err");
+    return;
+  }
+  status.classList.remove("err");
+  try {
+    const keys = [];
+    for (const [i, f] of files.entries()) {
+      keys.push(await uploadImage(f, (t) => { status.textContent = `photo ${i + 1}/${files.length}: ${t}`; }));
+    }
+    status.textContent = "saving…";
+    await call("POST", `/avatars/${encodeURIComponent(name)}/images`, { upload_keys: keys });
+    status.textContent = "";
+    toast(`Added ${files.length} photo${files.length > 1 ? "s" : ""} to ${name}`);
+    await refreshAvatars();
+  } catch (e) {
+    if (!(e instanceof Unauthorized)) {
+      status.textContent = e.message;
+      status.classList.add("err");
+    }
+  }
+}
+
+async function refreshAvatars() {
+  await loadAvatars();
+  const list = avatarList.avatars.filter((a) => a && typeof a.name === "string");
+  $("avatars-list").replaceChildren(...list.map((a) => avatarCard(a, avatarList.default)));
+  $("avatars-empty").hidden = list.length > 0;
 }
 
 // ---------------------------------------------------------------- create
@@ -469,11 +593,17 @@ async function main() {
   }
   setupPairing();
   setupCreate();
+  $("job-back").addEventListener("click", () => {
+    openJobId = null;
+    show("history");
+    refreshHistory().catch(staleNote);
+  });
   for (const b of document.querySelectorAll("nav button")) {
     b.addEventListener("click", () => {
       show(b.dataset.view);
       if (b.dataset.view === "history") refreshHistory().catch(staleNote);
       if (b.dataset.view === "create") loadAvatars();
+      if (b.dataset.view === "avatars") refreshAvatars();
     });
   }
   $("history-refresh").addEventListener("click", (e) => busy(e.currentTarget, refreshHistory));
