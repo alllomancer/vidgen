@@ -12,7 +12,7 @@ Jira: N/A
 - [x] Task 4: Unauthenticated `/m` routes serving a placeholder page — `2480cce`
 - [x] Task 5: Browser SSHSIG signer with ssh-keygen parity test — `47f6301`
 - [x] Task 6: Phone pairing screen and History — `7984e5c`
-- [ ] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS
+- [x] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS — `cfb7c09`
 - [ ] Task 8: Phone Job screen (results, Save) and Avatars
 - [ ] Task 9: "Pair a phone" in the dashboard, docs
 - [ ] Task 10: Live check on the Android phone
