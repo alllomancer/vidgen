@@ -92,8 +92,9 @@ data "aws_iam_policy_document" "worker" {
   }
 
   statement {
-    sid       = "WriteOutputs"
-    actions   = ["s3:PutObject"]
+    sid = "WriteOutputs"
+    # Get too: the AI-look check reads a finished job's files back (docs/specs/2026-11-27-realism-check.md).
+    actions   = ["s3:PutObject", "s3:GetObject"]
     resources = ["${aws_s3_bucket.data.arn}/outputs/*"]
   }
 

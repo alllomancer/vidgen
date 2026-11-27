@@ -127,4 +127,15 @@ try:
 except JobCancelled:
     pass
 
+# ---- the render box may read back what it wrote (the check downloads outputs/...): the fake S3 above can't catch
+# a missing permission, so check the worker's IAM policy itself
+import re  # noqa: E402
+
+iam = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "terraform", "iam.tf")).read()
+worker = iam[iam.index('data "aws_iam_policy_document" "worker"'):]
+worker = worker[:worker.index("\ndata \"aws_iam_policy_document\"", 1) if "\ndata \"aws_iam_policy_document\"" in worker[1:] else len(worker)]
+reads_outputs = [b for b in re.findall(r"statement \{(.*?)\n  \}", worker, re.S)
+                 if "/outputs/*" in b and '"s3:GetObject"' in b]
+assert reads_outputs, "the worker role must be allowed s3:GetObject on outputs/* (the AI-look check reads them back)"
+
 print("test_realism_check: ok")
