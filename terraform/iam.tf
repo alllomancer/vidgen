@@ -69,6 +69,7 @@ data "aws_iam_policy_document" "worker" {
       "${aws_s3_bucket.data.arn}/models/krea-2-turbo/*",
       "${aws_s3_bucket.data.arn}/models/nsfw-filter/*",
       "${aws_s3_bucket.data.arn}/models/helios/*",
+      "${aws_s3_bucket.data.arn}/models/qwen3-vl-32b/*",
     ]
   }
 

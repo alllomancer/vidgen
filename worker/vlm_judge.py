@@ -12,6 +12,8 @@ import re
 import sys
 import time
 
+MAX_SIDE = 1024  # pictures are shrunk to this long side: a full-size photo would cost thousands of tokens of GPU memory
+
 
 def fill(text, answers):
     """{stepN} -> the answer of step N (an unknown index stays as written)."""
@@ -32,8 +34,15 @@ def main(request_path):
         processor = AutoProcessor.from_pretrained(req["model_dir"])
         load = round(time.time() - t0, 1)
         answers, t1 = [], time.time()
+        from PIL import Image
+
+        def picture(path):
+            im = Image.open(path).convert("RGB")
+            im.thumbnail((MAX_SIDE, MAX_SIDE))
+            return im
+
         for step in req["steps"]:
-            content = [{"type": "image", "image": p} for p in step.get("images") or []]
+            content = [{"type": "image", "image": picture(p)} for p in step.get("images") or []]
             content.append({"type": "text", "text": fill(step["text"], answers)})
             inputs = processor.apply_chat_template([{"role": "user", "content": content}], tokenize=True,
                                                    add_generation_prompt=True, return_dict=True, return_tensors="pt")

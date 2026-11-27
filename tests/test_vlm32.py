@@ -53,6 +53,16 @@ assert req["model_dir"] == vlm32.MODEL_DIR and req["steps"] == steps
 assert events[:3] == ["env", "weights", "release"], "Krea venv, weights, then the GPU freed before the 32B model loads"
 assert progress[-1] == "AI-look critic: step 2/2"
 
+# ---- the GPU must really be free after release_all(): else a clear error, no 32B load
+vlm32._free_gpu_bytes = lambda: 20 * 2 ** 30
+try:
+    vlm32.critic(steps)
+    raise AssertionError("must refuse")
+except RuntimeError as e:
+    assert "only 20 GiB of GPU memory free" in str(e), e
+vlm32._free_gpu_bytes = lambda: None
+assert "torchvision==0.29.1+cu130" in open(os.path.join(os.path.dirname(vlm32.__file__), "krea_requirements.txt")).read()
+
 # ---- failures raise (the check turns them into an error, the job stays done)
 for proc in (lambda cmd, **kw: FakeProc(cmd, None, code=1, error="OutOfMemoryError: CUDA out of memory"),
              lambda cmd, **kw: FakeProc(cmd, lambda st: ["only one"])):

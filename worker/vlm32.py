@@ -17,6 +17,18 @@ MODEL_DIR = f"/opt/models/qwen3-vl-32b/{REVISION[:12]}"
 UNIT = f"qwen3-vl-32b/{REVISION[:12]}"  # its copy in the model mirror
 FILES = ["*.json", "*.safetensors", "merges.txt", "vocab.json", "tokenizer*"]
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vlm_judge.py")
+MIN_FREE_GPU = 72 * 2 ** 30  # 32B in bf16 (~66 GB) plus the pictures' tokens
+
+
+def _free_gpu_bytes():
+    """Free GPU memory after release_all(), or None where it can't be read."""
+    try:
+        import torch
+
+        free = torch.cuda.mem_get_info()[0]
+    except Exception:  # noqa: BLE001 - no CUDA here (tests): don't block
+        return None
+    return free if isinstance(free, int) else None
 
 
 def ensure_weights(progress=lambda msg: None):
@@ -34,6 +46,10 @@ def critic(steps, progress=lambda msg: None):
     krea.ensure_env(progress)  # the Krea venv has transformers with Qwen3-VL
     ensure_weights(progress)
     models.release_all()  # the 32B model needs the GPU to itself; the render model loads again afterwards
+    free = _free_gpu_bytes()
+    if free is not None and free < MIN_FREE_GPU:
+        raise RuntimeError(f"only {free / 2 ** 30:.0f} GiB of GPU memory free for the AI-look critic "
+                           f"(needs ~{MIN_FREE_GPU / 2 ** 30:.0f}); something still holds the GPU")
     work = tempfile.mkdtemp(prefix="vlm-")
     req = {"model_dir": MODEL_DIR, "result": os.path.join(work, "result.json"), "steps": steps}
     with open(os.path.join(work, "request.json"), "w") as f:

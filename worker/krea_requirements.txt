@@ -5,6 +5,8 @@
 # CUDA 13.0 build: the cu126 one has no kernels for the g7e's GPU (generated an image on a g7e 2026-11-26).
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.14.1+cu130
+# Qwen3-VL's image/video processors (the AI-look critic, vlm_judge.py) need torchvision; 0.29.1 is torch 2.14.1's.
+torchvision==0.29.1+cu130
 diffusers==0.41.0
 transformers==5.20.2
 accelerate==1.15.0

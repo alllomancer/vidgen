@@ -1240,7 +1240,8 @@ def critic_local(steps):
 
     answers = []
     for step in steps:
-        text = re.sub(r"\{step(\d+)\}", lambda m: answers[int(m.group(1))], step["text"])
+        text = re.sub(r"\{step(\d+)\}", lambda m: answers[int(m.group(1))] if int(m.group(1)) < len(answers)
+                      else m.group(0), step["text"])
         content = [{"type": "image", "image": f"file://{p}", "max_pixels": 768 * 768} for p in step.get("images") or []]
         messages = [{"role": "user", "content": content + [{"type": "text", "text": text}]}]
         kw = {"max_new_tokens": int(step.get("max_new_tokens") or 1024)}

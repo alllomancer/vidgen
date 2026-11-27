@@ -56,7 +56,7 @@ assert "{step0}" in w and '"prompt"' in w and "camera or phone" in w and "photor
 assert "try 1: 7/10; giveaways: waxy skin" in w and "try 2: 4/10 (best so far)" in w and "candid phone photo" in w
 assert "Earlier tries" not in rc.rewrite_text("photo", "x", 0, ())
 c = rc.compare_text("video", 4)
-assert "first 4 images (A)" in c and '"more_real"' in c
+assert "first 4 images (A)" in c and "last 4 images (B)" in c and '"more_real"' in c
 assert '"""' not in q + w + c, "the prompt is quoted between lines, never in triple quotes"
 
 # ---- one critic call per attempt: judge, sampled rewrite with the history, compare with the best
@@ -69,10 +69,17 @@ def critic(steps):
 v = rc._assess("photo", "a woman in a cafe", {"look": "pro"}, ["new.png"], critic, ["best.png"],
                [{"try": 1, "score": 5, "signs": ["x"], "prompt": "p"}])
 st = steps_seen[-1]
-assert [x["images"] for x in st] == [["new.png"], ["new.png"], ["best.png", "new.png"]], st
+assert [x["images"] for x in st] == [["new.png"], ["new.png"], ["new.png", "best.png"]], st  # 1 earlier try: new first
 assert st[0].get("sample") is not True and st[1]["sample"] is True and "{step0}" in st[1]["text"] and "try 1: 5/10" in st[1]["text"]
 assert v == {"score": 4, "checks": dict({k: 0 for k in rc.CHECKS}, skin=2, polish=1), "signs": ["waxy skin"],
-             "prompt": "A candid phone photo of a woman in a cafe, window light", "compared": "B"}, v
+             "prompt": "A candid phone photo of a woman in a cafe, window light", "compared": "A"}, v  # "B" = the best, shown second
+# with an even number of earlier tries the best comes first and "B" means the new attempt
+v = rc._assess("photo", "x", {}, ["new.png"], critic, ["best.png"], [{"try": 1}, {"try": 2}])
+assert steps_seen[-1][2]["images"] == ["best.png", "new.png"] and v["compared"] == "B"
+assert "first image (A) and the second image (B)" in steps_seen[-1][2]["text"]
+# user or model text can't pose as a placeholder
+assert "{step0}" not in rc.judge_text("photo", "a {step0} trick", {}) and "{ step0}" in rc.judge_text("photo", "a {step0} trick", {})
+assert rc.compare_text("video", 4, 3).startswith("The first 4 images (A) and the last 3 images (B)")
 v = rc._assess("story", None, {}, ["f.png"], critic, None, ())
 assert len(steps_seen[-1]) == 1 and "prompt" not in v, "a story: judged only"
 assert rc._compared('{"more_real": "a"}') == "A" and rc._compared('{"more_real": "same"}') == "SAME"
