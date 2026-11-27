@@ -2165,7 +2165,7 @@ def _queue_job(client, job_type, params, rerun_of=None, job_id=None, meta=None):
     loras = [{k: l.get(k) for k in ("name", "version", "step", "weight", "trigger", "model")}
              for l in (params.get("loras") or []) + (params.get("krea_loras") or [])]
     return _resp(202, {"job_id": job_id, "type": job_type, "status": "queued", "avatars": avatars, "loras": loras,
-                       "instance": _ensure_started(TRAINER_INSTANCE_ID if training else INSTANCE_ID)})
+                       "meta": _meta_of(item), "instance": _ensure_started(TRAINER_INSTANCE_ID if training else INSTANCE_ID)})
 
 
 def get_job(client, job_id):

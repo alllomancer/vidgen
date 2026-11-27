@@ -77,6 +77,7 @@ r = h.rerun_job("m", jid)
 assert r["statusCode"] == 202, r
 new = body(r)["job_id"]
 assert json.loads(table[new]["meta"]) == dict(meta, out_name=f"lighthouse-rerun-{new[:6]}.txt")
+assert body(r)["meta"] == json.loads(table[new]["meta"]), "the 202 says the re-run's meta (its file name)"
 r2 = h.rerun_job("m", new)  # a re-run of a re-run replaces the suffix instead of stacking it
 new2 = body(r2)["job_id"]
 assert json.loads(table[new2]["meta"])["out_name"] == f"lighthouse-rerun-{new2[:6]}.txt"

@@ -376,8 +376,34 @@ def register_job(job_id, job_type, out, extra=None):
         save_jobs(jobs)
 
 
+# Same rule as the API's meta.out_name (lambda/api/handler.py OUT_NAME): only plain names are shared with other
+# devices; a CLI name with folders stays local.
+OUT_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._ -]{0,126}[A-Za-z0-9_-])?")
+
+
+def job_meta(source, out_name=None, extra=None):
+    """The job's meta for the API (docs/specs/2026-11-27-phone-ui.md): where it came from, the file name to save
+    as when it is a plain name, and for avatar candidates the avatar name and krea_lora."""
+    meta = {"source": source}
+    if out_name and OUT_NAME.fullmatch(out_name):
+        meta["out_name"] = out_name
+    for k in ("avatar_name", "krea_lora"):
+        if (extra or {}).get(k) is not None:
+            meta[k] = extra[k]
+    return meta
+
+
+def server_meta(job_id):
+    """The server's meta for a job (e.g. started on the phone); {} if it can't be read."""
+    try:
+        meta = api("GET", f"/jobs/{job_id}").get("meta")
+    except (ApiError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
 def submit(body, out_name, extra=None, quiet=False):
-    r = api("POST", "/jobs", body)
+    r = api("POST", "/jobs", dict(body, meta=job_meta("cli", out_name, extra)))
     job_id = r["job_id"]
     out = local_out(body["type"], job_id, out_name)
     register_job(job_id, body["type"], out, extra)
@@ -921,6 +947,8 @@ def avatar_command(args):
             raise ApiError("usage: vidgen.py avatar pick <job_id> <candidate number>")
         job_id = resolve_job_id(a[0])
         local = load_jobs().get(job_id, {})
+        if not local.get("avatar_name"):  # started on another device: the server has its avatar name
+            local = dict(server_meta(job_id), **local)
         name = args.name or local.get("avatar_name") or DEFAULT_AVATAR_NAME
         krea_lora = local.get("krea_lora", True) and not getattr(args, "no_krea_lora", False)
         api("POST", "/avatars", {"name": name, "job_id": job_id, "candidate": int(a[1]), "make_default": True,

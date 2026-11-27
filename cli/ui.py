@@ -296,8 +296,8 @@ def job_history():
 def rerun(job_id):
     r = vidgen.api("POST", f"/jobs/{job_id}/rerun")
     old = vidgen.load_jobs().get(job_id)
-    out_name = None
-    if old:  # next to the original: name-rerun-<id>.ext
+    out_name = (r.get("meta") or {}).get("out_name")  # the server names it: <name>-rerun-<id6>.ext
+    if not out_name and old:  # an older job with no meta: next to the original, the same way
         base, ext = os.path.splitext(os.path.basename(old["out"]))
         out_name = f"{base}-rerun-{r['job_id'][:6]}{ext}"
     vidgen.register_job(r["job_id"], r["type"], vidgen.local_out(r["type"], r["job_id"], out_name),
@@ -311,7 +311,8 @@ def train_theme(name, steps, speed="standard"):
         raise KeyError(name)
     if speed not in ("standard", "fast"):
         raise ValueError("speed must be standard or fast")
-    r = vidgen.api("POST", "/jobs", {"type": "train", "dataset": name, "steps": int(steps), "speed": speed})
+    r = vidgen.api("POST", "/jobs", {"type": "train", "dataset": name, "steps": int(steps), "speed": speed,
+                                     "meta": vidgen.job_meta("mac", f"train-{name}")})
     vidgen.register_job(r["job_id"], "train", vidgen.local_out("train", r["job_id"], f"train-{name}"))
     return r
 
@@ -382,7 +383,7 @@ def create_job(body):
             raise ValueError("avatar name must be 1-32 chars: a-z, 0-9, - or _")
         out = out or f"avatar-{name}-{int(time.time())}.png"
         extra = {"avatar_name": name, "krea_lora": body.get("krea_lora") is not False}
-    r = vidgen.api("POST", "/jobs", job)
+    r = vidgen.api("POST", "/jobs", dict(job, meta=vidgen.job_meta("mac", out, extra)))
     vidgen.register_job(r["job_id"], job["type"], vidgen.local_out(job["type"], r["job_id"], out), extra)
     return r
 
@@ -393,6 +394,8 @@ def pick_candidate(body):
     local = vidgen.load_jobs().get(job_id)
     if not local or local.get("type") != "avatar":
         raise KeyError(job_id)
+    if not local.get("avatar_name"):  # started on another device: the server has its avatar name
+        local = dict(vidgen.server_meta(job_id), **local)
     name = local.get("avatar_name") or vidgen.DEFAULT_AVATAR_NAME
     return vidgen.api("POST", "/avatars", {"name": name, "job_id": job_id, "candidate": int(body.get("candidate")),
                                            "make_default": body.get("make_default") is True,
@@ -502,7 +505,7 @@ def preview_lora(name, body):
     req = {"type": "lora_preview", "name": name, "version": body.get("version")}
     if body.get("steps"):
         req["steps"] = body["steps"]
-    r = vidgen.api("POST", "/jobs", req)
+    r = vidgen.api("POST", "/jobs", dict(req, meta=vidgen.job_meta("mac")))
     vidgen.register_job(r["job_id"], "lora_preview", vidgen.local_out("lora_preview", r["job_id"]))
     return r
 
