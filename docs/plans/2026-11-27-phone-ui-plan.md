@@ -14,8 +14,11 @@ Jira: N/A
 - [x] Task 6: Phone pairing screen and History — `7984e5c`
 - [x] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS — `cfb7c09`
 - [ ] Task 8: Phone Job screen (results, Save) and Avatars
-- [ ] Task 9: "Pair a phone" in the dashboard, docs
-- [ ] Task 10: Live check on the Android phone
+- [ ] Task 9: Phone status strip and app icons
+- [ ] Task 10: Pairing API (POST /pair, approve, decline, revoke, device keys in auth)
+- [ ] Task 11: Pairing screens on the phone and the Mac dashboard (Phones panel)
+- [ ] Task 12: Docs
+- [ ] Task 13: Live check on the Android phone
 
 ## Tasks
 
@@ -114,21 +117,50 @@ path as Task 7).
 **Verify**: `python3 -B tests/test_phone_page.py`; `python3 -B tests/test_job_meta.py` (`saves` links carry the attachment
 disposition); on the phone a finished video plays and Save puts it in the gallery
 
-### Task 9: "Pair a phone" in the dashboard, docs
+### Task 9: Phone status strip and app icons
 
-**What**: Dashboard Settings → "Pair a phone": the `/m` URL as a QR code (generated in the page, no CDN) and the
-Mac key's comment to reuse; `ui.py` adds `GET /api/phone` returning `{url, comment}` from the config. README
-(phone section), RUNBOOK (pairing, revoking, installing the page so Chrome keeps the key), `CHANGELOG.md` dated entry.
-**Files**: `cli/ui.py`, `cli/ui.html`, `README.md`, `RUNBOOK.md`, `CHANGELOG.md`
-**Depends on**: Task 6
-**Verify**: `make test` (`tests/test_ui_page.py` covers the new section); the QR opens `/m` on the phone
+**What**: History gets a status strip from `GET /status` (render box off / starting / running N min, queued jobs).
+The manifest gets 192 and 512 px PNG icons (generated once with Python, bundled in `phone/`, served via
+`PHONE_FILES` as `image/png`) so Chrome offers an app install.
+**Files**: `lambda/api/phone/app.js`, `lambda/api/phone/m.html`, `lambda/api/phone/manifest.webmanifest`,
+`lambda/api/phone/icon-192.png`, `lambda/api/phone/icon-512.png`, `lambda/api/handler.py`, `tests/test_phone_routes.py`,
+`tests/test_phone_page.py`
+**Depends on**: Task 8
+**Verify**: `make test` (icons served with `image/png`, base64-encoded; `GET /status` in the allowed calls)
 
-### Task 10: Live check on the Android phone
+### Task 10: Pairing API (POST /pair, approve, decline, revoke, device keys in auth)
 
-**What**: Pair the Android phone in Chrome and install the page; create a photos job from the phone; watch it on
-both devices; Save a photo and find it in the gallery;
-confirm the Mac watcher downloaded it as `adopted`; re-run from the Mac; revoke the key → 401 and pairing screen.
-Record results in the spec's Live check section.
+**What**: Per docs/specs/2026-11-27-phone-pairing.md: `auth/pairing.json` and `auth/devices.json` in S3; unsigned
+`POST /pair`; signed, Terraform-key-only `GET /pairings`, `POST /pairings/{code}/approve`, `DELETE /pairings/{code}`,
+`DELETE /devices/{id}`; `_authenticate` also accepts device keys (30 s cache) as the approver's client. Terraform
+routes.
+**Files**: `lambda/api/handler.py`, `terraform/api.tf`, `tests/test_pairing.py` (new)
+**Depends on**: Task 9
+**Verify**: `python3 -B tests/test_pairing.py` (all criteria in the pairing spec)
+
+### Task 11: Pairing screens on the phone and the Mac dashboard (Phones panel)
+
+**What**: Phone: "Pair this phone" → code, 5 s retry until approved, new code after 10 min; Terraform steps kept as
+the fallback. Mac: `ui.py` proxies the pairing routes and `GET /api/phone`; `ui.html` Phones panel with the `/m`
+link (Copy), waiting requests (Approve with name / Decline) and paired phones (Remove).
+**Files**: `lambda/api/phone/app.js`, `lambda/api/phone/m.html`, `lambda/api/phone/sign.js`, `cli/ui.py`, `cli/ui.html`,
+`tests/test_phone_page.py`, `tests/test_ui_page.py`
+**Depends on**: Task 10
+**Verify**: `make test`
+
+### Task 12: Docs
+
+**What**: README (phone section), RUNBOOK (deploy, pairing from the dashboard and the Terraform fallback, revoking,
+installing the page), `CHANGELOG.md` dated entry.
+**Files**: `README.md`, `RUNBOOK.md`, `CHANGELOG.md`
+**Depends on**: Task 11
+**Verify**: docs name the controls that exist (Phones panel, /m, Pair this phone)
+
+### Task 13: Live check on the Android phone
+
+**What**: Deploy; open `/m` in Chrome on the phone and install it; pair from the dashboard; create a photos job from
+the phone; watch it on both devices; Save a photo and find it in the gallery; confirm the Mac watcher downloaded it as
+`adopted`; remove the phone in the dashboard → pairing screen. Record results in the spec.
 **Files**: `docs/specs/2026-11-27-phone-ui.md`
-**Depends on**: Tasks 3, 8, 9
+**Depends on**: Tasks 3, 11, 12
 **Verify**: every step above observed; results written in the spec
