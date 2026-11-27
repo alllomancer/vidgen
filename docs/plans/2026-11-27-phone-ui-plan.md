@@ -10,7 +10,7 @@ Jira: N/A
 - [x] Task 2: CLI and dashboard send `meta`; pick falls back to server meta — `b003d99`
 - [x] Task 3: Watcher adopts jobs from other devices (`jobs forget`, 7-day cut-off) — `8c48a4f`
 - [x] Task 4: Unauthenticated `/m` routes serving a placeholder page — `2480cce`
-- [ ] Task 5: Browser SSHSIG signer with ssh-keygen parity test
+- [x] Task 5: Browser SSHSIG signer with ssh-keygen parity test — `47f6301`
 - [ ] Task 6: Phone pairing screen and History
 - [ ] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS
 - [ ] Task 8: Phone Job screen (results, Save) and Avatars
