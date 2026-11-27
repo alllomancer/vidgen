@@ -44,7 +44,8 @@ server's re-run `out_name`.
 **What**: `check_once` calls `GET /jobs` once per pass and registers every `queued`/`running`/`done` job not in
 `jobs.json`, created within `ADOPT_DAYS = 7` and not in `jobs.json`'s new `dismissed` list, with
 `local_out(type, id, meta.out_name)` and `adopted: true`. A failed `GET /jobs` logs and continues with the local
-jobs. New `vidgen jobs forget <id-prefix>` drops a local record and adds it to `dismissed`.
+jobs. `local_out` treats a server `out_name` as untrusted: basename only, the same allowlist as the API, and the final
+path must stay inside the download dir (`os.path.commonpath`). New `vidgen jobs forget <id-prefix>` drops a local record and adds it to `dismissed`.
 **Files**: `cli/vidgen.py`, `tests/test_watcher_adopt.py` (new)
 **Depends on**: Task 2 (shares `cli/vidgen.py`)
 **Verify**: `python3 -B tests/test_watcher_adopt.py` (spec criteria 6, 7: adopt + download, 8-day-old skipped,

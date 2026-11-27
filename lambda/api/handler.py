@@ -3,6 +3,7 @@
 Every route requires a request signed with an authorized SSH ed25519 key
 (see `_authenticate`). Routes:
   POST /jobs                     submit a job -> {job_id, status, avatars, instance}
+                                 (optional meta: out_name, avatar_name, krea_lora, source; returned by the GETs)
   GET  /jobs/{job_id}            job status / result -> presigned download URLs when done
   POST /jobs/{job_id}/cancel     cancel a queued or running job
   GET  /jobs                     your latest 100 jobs: summary, status, run/wait seconds
@@ -2054,8 +2055,70 @@ def delete_dataset(client, name):
 
 # ---------------------------------------------------------------- routes
 
+# Per-job notes for the clients (not part of params, so the worker never sees them): the file name to save as,
+# the avatar a candidate job is for and whether it gets a Krea LoRA, and which device sent it. Any client can read
+# them back, so a job started on the phone downloads and picks on the Mac. docs/specs/2026-11-27-phone-ui.md
+META_SOURCES = ("mac", "cli", "phone")
+MAX_OUT_NAME = 128
+# ASCII letters, digits, ". _ -" and spaces; starts with a letter or digit, doesn't end in "." or " ". No path
+# parts, control or bidi characters, and short enough in bytes for any filesystem.
+OUT_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._ -]{0,%d}[A-Za-z0-9_-])?" % (MAX_OUT_NAME - 2))
+RERUN_SUFFIX = re.compile(r"(?:-rerun-[0-9a-f]{6})+$")
+
+
+def _validate_meta(meta):
+    if not isinstance(meta, dict):
+        raise ValueError("meta must be an object")
+    unknown = set(meta) - {"out_name", "avatar_name", "krea_lora", "source"}
+    if unknown:
+        raise ValueError(f"meta: unknown key(s) {', '.join(sorted(unknown))}")
+    out = {}
+    if meta.get("out_name") is not None:
+        name = meta["out_name"]
+        if not isinstance(name, str) or not OUT_NAME.fullmatch(name):
+            raise ValueError(f"meta.out_name: a plain file name of 1-{MAX_OUT_NAME} chars: letters, digits, "
+                             "spaces and . _ - (no folders, not starting with . or ending in . or a space)")
+        out["out_name"] = name
+    if meta.get("avatar_name") is not None:
+        if not isinstance(meta["avatar_name"], str) or not AVATAR_NAME.fullmatch(meta["avatar_name"]):
+            raise ValueError("meta.avatar_name: 1-32 chars, a-z 0-9 - _")
+        out["avatar_name"] = meta["avatar_name"]
+    if meta.get("krea_lora") is not None:
+        if not isinstance(meta["krea_lora"], bool):
+            raise ValueError("meta.krea_lora must be true or false")
+        out["krea_lora"] = meta["krea_lora"]
+    if meta.get("source") is not None:
+        if meta["source"] not in META_SOURCES:
+            raise ValueError(f"meta.source must be one of: {', '.join(META_SOURCES)}")
+        out["source"] = meta["source"]
+    return out
+
+
+def _meta_of(item):
+    try:
+        meta = json.loads(item.get("meta") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _rerun_meta(meta, new_job_id):
+    """The original's meta for its re-run, saved next to it as <base>-rerun-<id6><ext>: a re-run of a re-run
+    replaces the suffix, and the base is shortened so the name stays within MAX_OUT_NAME."""
+    meta = dict(meta)
+    if meta.get("out_name"):
+        base, ext = os.path.splitext(meta["out_name"])
+        suffix = f"-rerun-{new_job_id[:6]}{ext}"
+        base = RERUN_SUFFIX.sub("", base)[:MAX_OUT_NAME - len(suffix)].rstrip(". ") or "job"
+        meta["out_name"] = base + suffix
+        if not OUT_NAME.fullmatch(meta["out_name"]):
+            meta.pop("out_name")
+    return meta
+
+
 def create_job(client, body):
     try:
+        meta = _validate_meta(body["meta"]) if body.get("meta") is not None else {}
         job_type, params = _validate(client, body)
         if job_type in ("video", "story"):
             params["avatars"] = _resolve_avatars(client, body.get("avatar"))
@@ -2072,10 +2135,10 @@ def create_job(client, body):
     except (ValueError, TypeError) as e:
         return _resp(400, {"error": str(e)})
 
-    return _queue_job(client, job_type, params)
+    return _queue_job(client, job_type, params, **({"meta": meta} if meta else {}))
 
 
-def _queue_job(client, job_type, params, rerun_of=None, job_id=None):
+def _queue_job(client, job_type, params, rerun_of=None, job_id=None, meta=None):
     job_id = job_id or uuid.uuid4().hex
     now = int(time.time())
     item = {
@@ -2089,6 +2152,8 @@ def _queue_job(client, job_type, params, rerun_of=None, job_id=None):
     }
     if rerun_of:
         item["rerun_of"] = rerun_of
+    if meta:
+        item["meta"] = json.dumps(_rerun_meta(meta, job_id) if rerun_of else meta)
     training = job_type == "train"
     if training and not TRAIN_QUEUE_URL:
         return _resp(400, {"error": "the trainer is not deployed (set training_enabled = true in Terraform)"})
@@ -2109,6 +2174,7 @@ def get_job(client, job_id):
         return _resp(404, {"error": "job not found"})
 
     out = {k: item[k] for k in ("job_id", "type", "status", "created_at") if k in item}
+    out["meta"] = _meta_of(item)
     for k in ("progress", "error", "started_at", "finished_at", "cancel_requested"):
         if k in item:
             out[k] = item[k]
@@ -2211,7 +2277,7 @@ def list_jobs(client):
                "created_at": created, "started_at": started, "finished_at": finished,
                "run_seconds": finished - started if started and finished else None,
                "wait_seconds": started - created if started and created else None,
-               "summary": summary, "details": details}
+               "summary": summary, "details": details, "meta": _meta_of(item)}
         for k in ("error", "progress", "rerun_of"):
             if item.get(k):
                 row[k] = item[k]
@@ -2224,7 +2290,9 @@ def rerun_job(client, job_id):
     item = jobs.get_item(Key={"job_id": job_id}).get("Item")
     if not item or item.get("client") != client:
         return _resp(404, {"error": "job not found"})
-    return _queue_job(client, item["type"], json.loads(item["params"]), rerun_of=job_id)
+    meta = _meta_of(item)
+    return _queue_job(client, item["type"], json.loads(item["params"]), rerun_of=job_id,
+                      **({"meta": meta} if meta else {}))
 
 
 def cancel_job(client, job_id):
