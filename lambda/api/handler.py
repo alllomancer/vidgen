@@ -1,9 +1,10 @@
 """Front-door API for the AI video pipeline.
 
-Every route requires a request signed with an authorized SSH ed25519 key
-(see `_authenticate`). Routes:
+Every route except the phone page (GET /m, GET /m/{file}) requires a request signed with an authorized SSH
+ed25519 key (see `_authenticate`). Routes:
   POST /jobs                     submit a job -> {job_id, status, avatars, instance}
                                  (optional meta: out_name, avatar_name, krea_lora, source; returned by the GETs)
+  GET  /m, GET /m/{file}         the phone page (static, no signature; docs/specs/2026-11-27-phone-ui.md)
   GET  /jobs/{job_id}            job status / result -> presigned download URLs when done
   POST /jobs/{job_id}/cancel     cancel a queued or running job
   GET  /jobs                     your latest 100 jobs: summary, status, run/wait seconds
@@ -2458,12 +2459,54 @@ def _wake_or_cap(instance_id, queue_url, max_hours, hold_key, label):
         print(json.dumps({"event": "waker", "machine": label, "instance": _ensure_started(instance_id)}))
 
 
+# ---------------------------------------------------------------- phone page
+# GET /m and GET /m/{file}: the static phone page, the only routes without a signature. They serve fixed files
+# bundled with this function and touch no AWS service; every API call the page makes is signed in the browser.
+# docs/specs/2026-11-27-phone-ui.md
+
+PHONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phone")
+PHONE_FILES = {  # served name -> content type; nothing else under /m
+    "app.js": "text/javascript; charset=utf-8",
+    "manifest.webmanifest": "application/manifest+json",
+}
+# Presigned links point at this bucket only (virtual-host style; with or without the region in the host name).
+PHONE_S3 = f"https://{BUCKET}.s3.amazonaws.com https://{BUCKET}.s3.{os.environ.get('AWS_REGION', 'us-east-1')}.amazonaws.com"
+PHONE_CSP = (f"default-src 'self'; img-src 'self' {PHONE_S3}; media-src 'self' {PHONE_S3}; "
+             f"connect-src 'self' {PHONE_S3}; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+             "manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; worker-src 'none'; "
+             "frame-ancestors 'none'")
+PHONE_HEADERS = {"content-security-policy": PHONE_CSP, "cache-control": "no-cache", "x-content-type-options": "nosniff",
+                 "referrer-policy": "no-referrer", "cross-origin-opener-policy": "same-origin"}
+
+
+def phone_file(name):
+    """The page (name None) or one of PHONE_FILES, with the page's fixed headers; 404 for anything else."""
+    if name is None:
+        fname, ctype = "m.html", "text/html; charset=utf-8"
+    elif name in PHONE_FILES:
+        fname, ctype = name, PHONE_FILES[name]
+    else:
+        return dict(_resp(404, {"error": "not found"}), headers={"content-type": "application/json", **PHONE_HEADERS})
+    try:
+        with open(os.path.join(PHONE_DIR, fname), encoding="utf-8") as f:
+            body = f.read()
+    except OSError as e:  # the bundle is missing the page (make build wasn't run)
+        print(json.dumps({"event": "phone_page_missing", "file": fname, "error": str(e)}))
+        return dict(_resp(500, {"error": "the phone page is not deployed"}),
+                    headers={"content-type": "application/json", **PHONE_HEADERS})
+    return {"statusCode": 200, "body": body, "headers": {"content-type": ctype, **PHONE_HEADERS}}
+
+
 # ---------------------------------------------------------------- entrypoint
 
 def handler(event, context):
     if event.get("waker"):
         waker()
         return {"ok": True}
+    if event.get("routeKey") == "GET /m":
+        return phone_file(None)
+    if event.get("routeKey") == "GET /m/{file}":
+        return phone_file((event.get("pathParameters") or {}).get("file"))
 
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     raw = event.get("body") or ""

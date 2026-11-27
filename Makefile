@@ -8,6 +8,7 @@ BUILD   := terraform/.build/api_src
 build:
 	rm -rf $(BUILD) && mkdir -p $(BUILD)
 	cp lambda/api/handler.py $(BUILD)/
+	cp -R lambda/api/phone $(BUILD)/phone
 	python3 -m pip install --quiet --target $(BUILD) \
 		--platform manylinux2014_x86_64 --implementation cp --python-version 3.12 \
 		--only-binary=:all: -r lambda/api/requirements.txt

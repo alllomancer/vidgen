@@ -102,6 +102,9 @@ resource "aws_apigatewayv2_route" "routes" {
     "POST /uploads/abort",
     "GET /datasets/{name}/captions",
     "PUT /datasets/{name}/captions",
+    # The phone page: static files, no signature (docs/specs/2026-11-27-phone-ui.md).
+    "GET /m",
+    "GET /m/{file}",
   ])
 
   api_id    = aws_apigatewayv2_api.main.id

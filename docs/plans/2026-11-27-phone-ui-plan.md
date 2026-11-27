@@ -54,23 +54,23 @@ dismissed skipped, GET /jobs failure doesn't stop downloads)
 ### Task 4: Unauthenticated `/m` routes serving a placeholder page
 
 **What**: New `lambda/api/phone/` with `m.html`, `app.js`, `manifest.webmanifest`. The handler serves
-`GET /m`, `GET /m/app.js`, `GET /m/manifest.webmanifest` before `_authenticate`, with the spec's CSP,
+`GET /m` and `GET /m/{file}` (a fixed list: `app.js`, `manifest.webmanifest`) before `_authenticate`, with the spec's CSP,
 `Cache-Control: no-cache`, `nosniff`, `Referrer-Policy: no-referrer`; every other route still needs a signature.
-`make build` copies `phone/` into the bundle; Terraform adds the three routes. The page at this point only shows
+`make build` copies `phone/` into the bundle; Terraform adds the two routes. The page at this point only shows
 "vidgen" and a WebCrypto Ed25519 support check.
 **Files**: `lambda/api/handler.py`, `lambda/api/phone/*` (new), `Makefile`, `terraform/api.tf`,
 `tests/test_phone_routes.py` (new)
 **Depends on**: none
 **Verify**: `python3 -B tests/test_phone_routes.py` (spec criterion 1: 200 + headers without signature, `GET /jobs`
-unsigned still 401, unknown `/m/x` 404); `make plan` shows 3 new routes and nothing else replaced
+unsigned still 401, unknown `/m/x` 404); `make plan` shows 2 new routes and nothing else replaced
 
 ### Task 5: Browser SSHSIG signer with ssh-keygen parity test
 
 **What**: `lambda/api/phone/sign.js` (ES module, no dependencies): key generation (`extractable: false`) and
 IndexedDB storage, `publicKeyLine(comment)`, and `signedFetch(method, path, body)` that builds the canonical string,
 SSHSIG v1 (namespace `vidgen-api`, sha512), armors it and sets the three `x-vidgen-*` headers like
-`cli/vidgen.py` `sign()`. Served at `GET /m/sign.js` (route added like Task 4).
-**Files**: `lambda/api/phone/sign.js` (new), `lambda/api/handler.py`, `terraform/api.tf`,
+`cli/vidgen.py` `sign()`. Served at `GET /m/sign.js` (added to `PHONE_FILES`).
+**Files**: `lambda/api/phone/sign.js` (new), `lambda/api/handler.py`,
 `tests/sign_parity.test.mjs` (new), `tests/test_sign_parity.py` (new: generates a test key with ssh-keygen, runs the
 Node test, verifies with `_verify_sshsig`)
 **Depends on**: Task 4
