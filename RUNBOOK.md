@@ -393,6 +393,18 @@ vidgen ui --port 9000 --no-browser
 - **Phones**: the phone page's link (Copy link), **Pair a phone**, waiting pairing requests and paired phones. See "Phone (Android)" below.
 - **Security**: the page is only served on 127.0.0.1, rejects other Host headers, and its API calls need a per-session token, so other websites cannot use it.
 
+### AI-look check (optional)
+
+Tick **Check how AI it looks** in the Video, Photos or Story form (dashboard or phone; remembered on that device), or add `--realism-check` to `vidgen video`, `photos` or `story`. After the render, the vision model (Qwen2.5-VL, already on the box) looks at each photo, or 4 frames of a video (each take of a job with variations) or 6 frames of a story, and returns:
+
+- a **score** from 0 (could pass as real) to 10 (obviously AI), shown as a badge in History ("AI look 7/10 · looks AI-made");
+- up to 5 **giveaways** it sees (waxy skin, too-perfect light, warped fingers, garbled text, a background that's too clean, ...);
+- a **suggested prompt** (videos), **scenes** (photos) and **settings** (look, natural skin, candid, grain, and for videos the shot).
+
+**Use suggestion** (in the badge's details on the Mac, on the job's screen on the phone) puts the suggestion into the Create form; nothing renders until you send it. On the phone, the suggested settings are listed above the button and go with that form's next job (**Remove** drops them). The watcher logs the verdict and saves it as `realism.json` next to the files.
+
+It adds about 1-2 minutes (the vision model is loaded after the render). It's a critique of what's visible by a general vision model, not an AI detector: the score varies between runs, and the giveaways are the useful part. If the check fails, the job is still done and the badge says why.
+
 ### Phone (Android)
 
 A small page for the phone, served by the API at `<api_url>/m` (`make output` shows `api_url`; the dashboard's Phones panel has the link). Open it in Chrome on the phone and install it (Chrome menu → **Add to Home screen**) so it opens like an app and Chrome keeps its key. The full dashboard still runs only on the Mac.
@@ -682,6 +694,7 @@ Every command in one place. `vidgen` stands for `python3 ~/Documents/private/myp
 | Command | What it does |
 |---|---|
 | `vidgen jobs` | local list of jobs: pending, downloaded, where the files went |
+| `--realism-check` (on `video`, `photos`, `story`) | after the render, rate how AI-made it looks and suggest a prompt and settings (about 1-2 min more) |
 | `vidgen jobs forget ID...` | drop jobs from the local list and don't download them (also ones started on the phone; full id for one not downloaded yet) |
 | `vidgen cancel JOB_ID` | cancel a queued or running job (a unique prefix of the id is enough) |
 | `vidgen check` | one pass: download any finished jobs (what the watcher runs) |
