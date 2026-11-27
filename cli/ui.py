@@ -296,12 +296,16 @@ def job_history():
 def rerun(job_id):
     r = vidgen.api("POST", f"/jobs/{job_id}/rerun")
     old = vidgen.load_jobs().get(job_id)
-    out_name = (r.get("meta") or {}).get("out_name")  # the server names it: <name>-rerun-<id6>.ext
-    if not out_name and old:  # an older job with no meta: next to the original, the same way
-        base, ext = os.path.splitext(os.path.basename(old["out"]))
-        out_name = f"{base}-rerun-{r['job_id'][:6]}{ext}"
-    vidgen.register_job(r["job_id"], r["type"], vidgen.local_out(r["type"], r["job_id"], out_name),
-                        {"rerun_of": job_id})
+    server_name = (r.get("meta") or {}).get("out_name")  # the server names it: <name>-rerun-<id6>.ext
+    if server_name:  # checked like any name from the server: plain, inside the download folder, no clobbering
+        out = vidgen.adopted_out(r["type"], r["job_id"], server_name)
+    else:  # an older job with no meta: next to the original, the same way
+        out_name = None
+        if old:
+            base, ext = os.path.splitext(os.path.basename(old["out"]))
+            out_name = f"{base}-rerun-{r['job_id'][:6]}{ext}"
+        out = vidgen.local_out(r["type"], r["job_id"], out_name)
+    vidgen.register_job(r["job_id"], r["type"], out, {"rerun_of": job_id})
     return r
 
 

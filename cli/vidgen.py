@@ -65,6 +65,7 @@ JOBS_FILE = os.path.join(STATE_DIR, "jobs.json")
 LOCK_FILE = os.path.join(STATE_DIR, "check.lock")
 LOG_FILE = os.path.join(STATE_DIR, "watcher.log")
 PID_FILE = os.path.join(STATE_DIR, "watcher.pid")
+DISMISSED_FILE = os.path.join(STATE_DIR, "dismissed.json")  # {job_id: when}: jobs `jobs forget` dropped
 PENDING = ("queued", "running")
 FORGET_AFTER_DAYS = 30  # outputs expire in S3 after this anyway
 DEFAULT_AVATAR_NAME = "star"
@@ -630,10 +631,116 @@ def read_shots_file(path):
     return shots
 
 
+# Jobs started on another device (the phone) that the watcher downloads too. docs/specs/2026-11-27-phone-ui.md
+ADOPT_DAYS = 7
+ADOPT_TYPES = ("video", "photos", "story", "write", "describe", "avatar", "lora_preview", "train")
+ADOPT_STATUSES = ("queued", "running", "done")
+
+
+def load_dismissed():
+    try:
+        with open(DISMISSED_FILE) as f:
+            d = json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _name_taken(out, taken):
+    """True when out, or a file a download writes next to it (<base>.<x>, <base>_<n>.mp4), exists or is the
+    destination of another job."""
+    if out in taken or os.path.exists(out):
+        return True
+    base = os.path.splitext(out)[0]
+    if base != out and (base in taken or os.path.exists(base)):
+        return True
+    folder, stem = os.path.split(base)
+    try:
+        return any(f.startswith((stem + ".", stem + "_")) for f in os.listdir(folder))
+    except OSError:
+        return False
+
+
+def adopted_out(job_type, job_id, server_name, taken=()):
+    """Where an adopted job saves: the server's name only when it is a plain name (it came from another device),
+    never over an existing file or another job's destination (taken), and always inside the download folder."""
+    name = server_name if isinstance(server_name, str) and OUT_NAME.fullmatch(server_name) else None
+    out = local_out(job_type, job_id, name)
+    taken = set(taken)
+    if name and _name_taken(out, taken):
+        base, ext = os.path.splitext(out)
+        for tag in (job_id[:6], job_id[:12], job_id):  # the short tag unless another job already has it
+            out = f"{base}-{tag}{ext}"
+            if not _name_taken(out, taken):
+                break
+    root = os.path.abspath(download_dir())
+    if os.path.commonpath([root, out]) != root or os.path.dirname(out) != root:
+        out = local_out(job_type, job_id)
+    return out
+
+
+def adopt_remote(jobs):
+    """Register the server's recent jobs that this computer doesn't know (started on another device)."""
+    dismissed = load_dismissed()
+    cutoff = time.time() - ADOPT_DAYS * 86400
+    r = api("GET", "/jobs")
+    rows = r.get("jobs") if isinstance(r, dict) else None
+    taken = {j.get("out") for j in jobs.values() if isinstance(j, dict)}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):  # server data: skip anything malformed rather than stop the pass
+            continue
+        job_id, job_type, created = row.get("job_id"), row.get("type"), row.get("created_at")
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f]{32}", job_id) or job_id in jobs \
+                or job_id in dismissed:
+            continue
+        if not isinstance(created, (int, float)) or isinstance(created, bool) or created < cutoff:
+            continue
+        if job_type not in ADOPT_TYPES or row.get("status") not in ADOPT_STATUSES:
+            continue
+        meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+        extra = {k: meta[k] for k in ("avatar_name", "krea_lora") if meta.get(k) is not None}
+        if not (isinstance(extra.get("avatar_name"), str) and OUT_NAME.fullmatch(extra["avatar_name"])):
+            extra.pop("avatar_name", None)
+        if not isinstance(extra.get("krea_lora"), bool):
+            extra.pop("krea_lora", None)
+        out = adopted_out(job_type, job_id, meta.get("out_name"), taken)
+        taken.add(out)
+        jobs[job_id] = {"type": job_type, "out": out, "status": "queued", "submitted_at": created,
+                        "adopted": True, **extra}
+        log(f"{job_id}: started on {meta.get('source') or 'another device'}; downloading it here too")
+
+
+def forget_jobs(prefixes):
+    """`vidgen jobs forget ID...`: drop jobs from the local list and never adopt them again."""
+    with locked():
+        jobs = load_jobs()
+        dismissed = load_dismissed()
+        ids = [resolve_job_id(p) for p in prefixes]  # all resolve, or nothing changes
+        for job_id in ids:
+            if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+                raise ApiError(f"'{job_id}' is not a job id")
+        for job_id in ids:
+            jobs.pop(job_id, None)
+            dismissed[job_id] = int(time.time())
+            print(f"forgot job {job_id}")
+        cutoff = time.time() - 2 * FORGET_AFTER_DAYS * 86400  # past the server's history by then
+        dismissed = {k: v for k, v in dismissed.items() if v > cutoff}
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = DISMISSED_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(dismissed, f, indent=2)
+        os.replace(tmp, DISMISSED_FILE)
+        save_jobs(jobs)
+
+
 def check_once():
     """One pass over pending jobs. Returns how many are still pending."""
     with locked():
         jobs = load_jobs()
+        try:
+            adopt_remote(jobs)
+        except Exception as e:  # noqa: BLE001 - whatever the server sent, the local jobs still get checked
+            log(f"listing jobs from other devices failed, will retry: {e}")
         for job_id in [jid for jid, j in jobs.items() if j["status"] in PENDING]:
             local = jobs[job_id]
             try:
@@ -683,7 +790,8 @@ def check_once():
                         notify("Training done", f"{r.get('lora')} v{r.get('version')}")
                         if r.get("preview_job_id") and r["preview_job_id"] not in jobs:
                             pid = r["preview_job_id"]
-                            jobs[pid] = {"type": "lora_preview", "out": local_out("lora_preview", pid, f"lora-preview-{r.get('lora')}-v{r.get('version')}"),
+                            jobs[pid] = {"type": "lora_preview", "out": adopted_out("lora_preview", pid, f"lora-preview-{r.get('lora')}-v{r.get('version')}",
+                                                                                   {j.get("out") for j in jobs.values()}),
                                          "status": "queued", "submitted_at": time.time()}
                             log(f"{pid}: checkpoint previews queued on the render box; they download when ready")
                 elif local["type"] == "write":
@@ -1752,7 +1860,10 @@ def main():
     sub.add_parser("wake", help="start the GPU instance ahead of a batch")
     sub.add_parser("restart-worker", help="ask the render worker to restart between jobs (it pulls the latest "
                                           "worker code); the render machine must be running")
-    sub.add_parser("jobs", help="list local jobs and where their files went")
+    jb = sub.add_parser("jobs", help="list local jobs and where their files went; `jobs forget ID...` drops jobs "
+                                     "(also ones from the phone; a job not downloaded yet needs its full id) so the watcher doesn't download them")
+    jb.add_argument("action", nargs="?", choices=["forget"])
+    jb.add_argument("ids", nargs="*")
     ch = sub.add_parser("check", help="one pass: download any finished jobs (what the watcher runs)")
     ch.add_argument("--log", help=argparse.SUPPRESS)
 
@@ -1946,7 +2057,12 @@ def main():
         elif args.cmd == "restart-worker":
             print(api("POST", "/worker/restart")["note"])
         elif args.cmd == "jobs":
-            show_jobs()
+            if args.action == "forget":
+                if not args.ids:
+                    raise ApiError("usage: vidgen.py jobs forget ID...")
+                forget_jobs(args.ids)
+            else:
+                show_jobs()
         elif args.cmd == "check":
             check_once()
         elif args.cmd == "watch":
