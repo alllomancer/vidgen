@@ -2467,6 +2467,7 @@ def _wake_or_cap(instance_id, queue_url, max_hours, hold_key, label):
 PHONE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phone")
 PHONE_FILES = {  # served name -> content type; nothing else under /m
     "app.js": "text/javascript; charset=utf-8",
+    "sign.js": "text/javascript; charset=utf-8",
     "manifest.webmanifest": "application/manifest+json",
 }
 # Presigned links point at this bucket only (virtual-host style; with or without the region in the host name).

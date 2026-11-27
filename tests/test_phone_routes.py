@@ -23,6 +23,7 @@ CSP = (f"default-src 'self'; img-src 'self' {S3}; media-src 'self' {S3}; connect
        "script-src 'self'; style-src 'self' 'unsafe-inline'; manifest-src 'self'; base-uri 'none'; "
        "form-action 'none'; object-src 'none'; worker-src 'none'; frame-ancestors 'none'")
 EXPECT = {"/m": "text/html; charset=utf-8", "/m/app.js": "text/javascript; charset=utf-8",
+          "/m/sign.js": "text/javascript; charset=utf-8",
           "/m/manifest.webmanifest": "application/manifest+json"}
 
 for path, ctype in EXPECT.items():
