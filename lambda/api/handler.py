@@ -564,7 +564,7 @@ def _realism_retries(body):
     if body.get("type") == "video":
         if body.get("seconds") not in (None, "", 5):
             raise ValueError("retrying until it looks real renders 5 s clips; leave seconds out or send 5")
-        if int(body.get("variations") or 1) != 1 or body.get("plan_only") or body.get("beats") or body.get("anchor_every"):
+        if body.get("variations") not in (None, "", 1) or body.get("plan_only") or body.get("beats") or body.get("anchor_every"):
             raise ValueError("realism_retries renders one 5 s clip per try: no variations, plan first, beats or anchoring")
         body["seconds"] = 5
     return n

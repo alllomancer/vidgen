@@ -327,7 +327,7 @@ function jobCard(j) {
     el("div", { class: "summary" }, String(j.summary || "")),
     el("div", { class: "status" }, statusPart(j)),
     realismBadge(j.realism),
-    j.realism_retry ? el("div", { class: "sub" }, `best of ${Number(j.realism_retry.tries)} tries`) : null,
+    j.realism_retry ? el("div", { class: "sub" }, `best after ${Number(j.realism_retry.tries)} tries`) : null,
     actions.length ? el("div", { class: "actions" }, actions) : null);
 }
 

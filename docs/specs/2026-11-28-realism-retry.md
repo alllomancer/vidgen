@@ -36,7 +36,8 @@ for the job. Every attempt is kept; the best one is the job's result.
   later tries don't overwrite them. The job's result is the best attempt's result with its keys pointing at its
   copies (so `photo_1` / `video` is the best attempt), plus `attempt_<n>_key` for every attempt's main file, its
   `realism` verdict, and `realism_retry = {tries, best_try, stopped, attempts: [{try, score, signs, prompt, seed}]}`.
-- **Progress**: "try 4/25 · best 3/10" before each render.
+- **Progress**: every progress line of a try starts with "try 4/25 · best 3/10 · ". Each try's check is logged.
+- **Local copy**: the watcher's `realism.json` also lists every try (score, signs, prompt, seed) under `tries`.
 - **Clients**: dashboard and phone, in the Photos and Video forms, **Retry until it looks real (up to 25 tries)**
   (turns the AI-look check on; video forms switch to 5 s); CLI `--realism-retries N` on `photos` and `video`.
   History shows "best 2/10 after 9 tries"; the attempts download with their scores in `realism.json`.
@@ -51,6 +52,9 @@ for the job. Every attempt is kept; the best one is the job's result.
   and with the job's avatar references and LoRAs unchanged.
 - If an attempt's check is skipped (sexual content) or fails, then the worker shall stop and keep the best attempt so
   far (try 1 if it is the first).
+- If a render fails on a later try (e.g. the content filter flags a rewritten Krea scene), or the job is cancelled or
+  times out after a scored try, then the worker shall stop and keep the best attempt so far, with `stopped` saying
+  why; a failure or cancel on try 1 fails or cancels the job as usual.
 - `realism_retries` on a photos job with 2+ pictures, a series, a video with variations/plan first/beats/anchoring
   or `seconds` other than 5, a job without `realism_check`, or outside 1-25 shall return 400.
 - Every attempt's main file shall be in the result as `attempt_<n>_key`, and `realism_retry.attempts` shall list each

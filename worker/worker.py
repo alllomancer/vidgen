@@ -219,9 +219,12 @@ def set_status(job_id, status, **extra):
     )
 
 
+PROGRESS_PREFIX = [""]  # "try 4/25 · best 3/10 · " while retrying until it looks real
+
+
 def progress(job_id, text):
     models.check_cancel()
-    set_status(job_id, "running", progress=text)
+    set_status(job_id, "running", progress=PROGRESS_PREFIX[0] + text)
 
 
 def upload(local_path, client, job_id, name, content_type):
@@ -1396,11 +1399,14 @@ def process(job_id, receipt):
     try:
         models.set_loras(prepare_loras(params) if job["type"] in ("video", "story") else [])
         def check_one(p, res):  # the AI-look check of one render (docs/specs/2026-11-27-realism-check.md)
-            return realism_check.check(
+            verdict = realism_check.check(
                 job["type"], p, res, tempfile.mkdtemp(dir=workdir),
                 download=lambda key, path: s3.download_file(BUCKET, key, path), judge=models.judge_realism,
                 progress=lambda msg: progress(job_id, msg),
                 screen=lambda paths: any(krea.flagged(x) for x in krea.score_images(paths)))
+            log(event="realism_check", job_id=job_id, score=verdict.get("score"), error=verdict.get("error"),
+                skipped=verdict.get("skipped"), answer=verdict.get("answer"))
+            return verdict
 
         if params.get("realism_retries") and job["type"] in realism_check.MAIN_KEY:  # retry until it looks real
             def copy(key, name):
@@ -1410,14 +1416,13 @@ def process(job_id, receipt):
             result = realism_check.retry(
                 job["type"], params, run=lambda p: RUNNERS[job["type"]](job, p, tempfile.mkdtemp(dir=workdir)),
                 check_one=check_one, copy=copy, progress=lambda msg: progress(job_id, msg),
-                seeds=lambda: int.from_bytes(os.urandom(4), "big"))
+                seeds=lambda: int.from_bytes(os.urandom(4), "big"), label=lambda s: PROGRESS_PREFIX.__setitem__(0, s))
+            models.CANCEL.clear()  # a cancel that ended the loop: the best try is the result
         else:
             result = RUNNERS[job["type"]](job, params, workdir)
         if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only") \
                 and not params.get("realism_retries"):
             result["realism"] = check_one(params, result)
-            log(event="realism_check", job_id=job_id, score=result["realism"].get("score"),
-                error=result["realism"].get("error"), answer=result["realism"].get("answer"))
         if params.get("loras"):
             result["loras"] = [{k: l.get(k) for k in ("name", "version", "step", "weight")} for l in params["loras"]]
         set_status(job_id, "done", result=json.dumps(result), finished_at=int(time.time()))
@@ -1431,6 +1436,7 @@ def process(job_id, receipt):
         traceback.print_exc()
         set_status(job_id, "failed", error=str(e)[:1000], finished_at=int(time.time()))
     finally:
+        PROGRESS_PREFIX[0] = ""
         models.set_loras([])
         watch.stopped.set()
         shutil.rmtree(workdir, ignore_errors=True)

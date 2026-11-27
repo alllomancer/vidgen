@@ -1849,6 +1849,9 @@ def save_realism(local, remote):
     verdict = (remote.get("result") or {}).get("realism")
     if not isinstance(verdict, dict):
         return None
+    tries = (remote.get("result") or {}).get("realism_retry")
+    if isinstance(tries, dict):  # retried until it looked real: which attempt_<n> is which, with scores and prompts
+        verdict = dict(verdict, tries=tries)
     out = local["out"]
     path = os.path.join(out, "realism.json") if os.path.isdir(out) else os.path.splitext(out)[0] + ".realism.json"
     with open(path, "w") as f:

@@ -410,7 +410,7 @@ It doesn't critique sexual images: when the prompt or the content filter (the on
 
 Tick **Retry until it looks real** in the Video or Photos form (dashboard or phone), or add `--realism-retries 25` to `vidgen video` / `vidgen photos`. The render box then makes **one picture** (photos) or **one 5 s clip** (video), runs the AI-look check, and renders again with a new seed and the best try's suggested prompt, keeping the same avatar, LoRAs and settings. It stops at a score of 0, after 6 tries in a row without a better score, or after the tries you gave (at most 25).
 
-- **Result**: the best try is the job's photo or video; every try comes along as `attempt_<n>` with its score, and the details list each try's score and prompt ("best of 9 tries", **(kept)** marks the winner).
+- **Result**: the best try is the job's photo or video; every try comes along as `attempt_<n>` with its score, and the details list each try's score and prompt ("best after 9 tries", **(kept)** marks the winner); `realism.json` next to the files lists every try's score, prompt and seed.
 - **Cost**: about 1-2 minutes per try on the g7e; 25 tries is up to ~40 minutes of GPU. Progress shows "try 7/25 · best 3/10".
 - A try whose check is skipped (sexual content) or fails ends the loop; the best try so far is kept.
 

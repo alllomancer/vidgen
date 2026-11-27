@@ -337,23 +337,38 @@ def _next_params(job_type, params, best, seed):
     return p
 
 
-def retry(job_type, params, run, check_one, copy, progress, seeds):
+def retry(job_type, params, run, check_one, copy, progress, seeds, label=lambda prefix: None):
     """Render, check, and render again from the best attempt's suggestion until the score is 0, PATIENCE tries bring
     nothing better, or params["realism_retries"] tries are used. run(params) -> result; check_one(params, result) ->
     verdict (score, or skipped / error); copy(key, name) -> key of a copy named name; seeds() -> a new seed.
-    Returns the job result: the best attempt's, with its files as attempt copies, every attempt's main file, and
-    realism / realism_retry."""
+    label(prefix) puts "try n/N · best x/10 · " in front of every progress line of the try. Returns the job result:
+    the best attempt's, with its files as attempt copies, every attempt's main file, and realism / realism_retry.
+    A render that fails, or a cancel / time-out, after a scored try ends the loop and keeps the best so far."""
     tries = int(params["realism_retries"])
     attempts, files, best, since, stopped = [], {}, None, 0, f"{tries} tries"
     for n in range(1, tries + 1):
-        progress(f"try {n}/{tries}" + (f" · best {best['score']}/10" if best else ""))
+        head = f"try {n}/{tries}" + (f" · best {best['score']}/10" if best and best["score"] is not None else "")
+        label(head + " · ")
+        progress(head)
         p = _next_params(job_type, params, best, seeds())
-        result = run(p)
+        try:
+            result = run(p)
+        except Exception as e:  # noqa: BLE001 - keep what earlier tries made
+            if best is None:
+                raise
+            stopped = "cancelled" if type(e).__name__ == "JobCancelled" else f"try {n} failed: {str(e)[:150]}"
+            break
         copies = {k: copy(v, f"attempt_{n}_{os.path.basename(v)}") for k, v in result.items()
                   if k.endswith("_key") and isinstance(v, str)}
         if MAIN_KEY[job_type] in copies:
             files[f"attempt_{n}_key"] = copies[MAIN_KEY[job_type]]
-        verdict = check_one(p, result)
+        try:
+            verdict = check_one(p, result)
+        except Exception as e:  # noqa: BLE001 - only a cancel / time-out gets here (check() never raises otherwise)
+            if best is None or type(e).__name__ != "JobCancelled":
+                raise
+            stopped = "cancelled"
+            break
         used = p.get("prompt") if job_type == "video" else ((p.get("scenes") or [{}])[0].get("prompt")
                                                              or (result.get("scenes") or [{}])[0].get("text", ""))
         attempt = {"try": n, "score": verdict.get("score"), "signs": verdict.get("signs") or [], "prompt": used,
@@ -375,6 +390,7 @@ def retry(job_type, params, run, check_one, copy, progress, seeds):
         if since >= PATIENCE:
             stopped = f"no better score in {PATIENCE} tries"
             break
+    label("")
     out = dict(best["result"], **files)
     out["realism"] = best["verdict"]
     out["realism_retry"] = {"tries": len(attempts), "best_try": best["try"], "stopped": stopped, "attempts": attempts}

@@ -90,6 +90,55 @@ run, check_one, copy, seeds, runs, copies = fake("video", [3, "the check failed:
 out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, run, check_one, copy, progress.append, seeds)
 assert len(runs) == 2 and out["realism_retry"]["stopped"] == "the check failed: boom" and out["realism"]["score"] == 3
 
+# ---- a render failing on a later try keeps the best so far; on try 1 it fails the job
+run, check_one, copy, seeds, runs, copies = fake("photos", [5, 3, 9])
+def failing(p, real=run):
+    if len(runs) == 2:
+        runs.append(p)
+        raise RuntimeError("the content filter flagged the photo")
+    return real(p)
+out = rc.retry("photos", params, failing, check_one, copy, progress.append, seeds)
+assert out["realism_retry"]["stopped"] == "try 3 failed: the content filter flagged the photo", out["realism_retry"]
+assert out["realism_retry"]["best_try"] == 2 and out["photo_1_key"].endswith("attempt_2_photo_1.png")
+try:
+    rc.retry("photos", params, lambda p: (_ for _ in ()).throw(RuntimeError("OOM")), check_one, copy, progress.append, seeds)
+    raise AssertionError("a first try that fails fails the job")
+except RuntimeError:
+    pass
+
+
+class JobCancelled(Exception):
+    pass
+
+
+# ---- cancel / time-out after a scored try: the best is kept; before any: the job is cancelled
+run, check_one, copy, seeds, runs, copies = fake("video", [6, 4, 5])
+def cancel_on_3(p, real=run):
+    if len(runs) == 2:
+        raise JobCancelled("cancelled")
+    return real(p)
+out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, cancel_on_3, check_one, copy, progress.append, seeds)
+assert out["realism_retry"]["stopped"] == "cancelled" and out["realism"]["score"] == 4
+run, check_one, copy, seeds, runs, copies = fake("video", [6, 4])
+def check_cancel_on_2(p, res, real=check_one):
+    if len(runs) == 2:
+        raise JobCancelled("timed out after 360 min")
+    return real(p, res)
+out = rc.retry("video", {"prompt": "p", "realism_retries": 25}, run, check_cancel_on_2, copy, progress.append, seeds)
+assert out["realism_retry"]["stopped"] == "cancelled" and out["realism_retry"]["best_try"] == 1
+try:
+    rc.retry("video", {"prompt": "p", "realism_retries": 25}, lambda p: (_ for _ in ()).throw(JobCancelled("cancelled")),
+             check_one, copy, progress.append, seeds)
+    raise AssertionError("cancelling the first try cancels the job")
+except JobCancelled:
+    pass
+
+# ---- every progress line of a try carries "try n/N · best x/10 · "; cleared at the end
+labels = []
+run, check_one, copy, seeds, runs, copies = fake("photos", [4, 2, 0])
+rc.retry("photos", params, run, check_one, copy, progress.append, seeds, label=labels.append)
+assert labels == ["try 1/25 · ", "try 2/25 · best 4/10 · ", "try 3/25 · best 2/10 · ", ""], labels
+
 # ---- API: which jobs may retry
 for body in [{"type": "video", "prompt": "a boat", "realism_check": True, "realism_retries": 26},
              {"type": "video", "prompt": "a boat", "realism_check": True, "realism_retries": 0.5},

@@ -36,6 +36,9 @@ assert vidgen.save_realism({"out": folder}, {"result": {"realism": {"error": "th
     os.path.join(folder, "realism.json")
 assert logged[-1] == "AI-look check: the check failed: x"
 assert vidgen.save_realism({"out": video}, {"result": {}}) is None
+tries = {"tries": 3, "best_try": 2, "stopped": "score 0", "attempts": [{"try": 1, "score": 4, "prompt": "p", "seed": 1}]}
+path = vidgen.save_realism({"out": video}, {"result": {"realism": verdict, "realism_retry": tries}})
+assert json.load(open(path))["tries"] == tries, "which attempt_<n> is which, with scores and prompts"
 assert vidgen.save_realism({"out": video}, {}) is None
 
 # --realism-retries on video and photos (not story); it turns the check on; photos become one picture
