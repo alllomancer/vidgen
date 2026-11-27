@@ -13,11 +13,11 @@ Jira: N/A
 - [x] Task 5: Browser SSHSIG signer with ssh-keygen parity test — `47f6301`
 - [x] Task 6: Phone pairing screen and History — `7984e5c`
 - [x] Task 7: Phone Create (video, photos, story) and photo upload with S3 CORS — `cfb7c09`
-- [ ] Task 8: Phone Job screen (results, Save) and Avatars
-- [ ] Task 9: Phone status strip and app icons
-- [ ] Task 10: Pairing API (POST /pair, approve, decline, revoke, device keys in auth)
-- [ ] Task 11: Pairing screens on the phone and the Mac dashboard (Phones panel)
-- [ ] Task 12: Docs
+- [x] Task 8: Phone Job screen (results, Save) and Avatars — `3f9a018` (review fixes in `57fd7a8`)
+- [x] Task 9: Phone status strip and app icons — `57fd7a8`
+- [x] Task 10: Pairing API (POST /pair, approve, decline, revoke, device keys in auth) — `26fe6dc`, `56f6974`, `5b8f213`
+- [x] Task 11: Pairing screens on the phone and the Mac dashboard (Phones panel) — `0853177`, `0ef0efc`
+- [x] Task 12: Docs — `25e4afc`
 - [ ] Task 13: Live check on the Android phone
 
 ## Tasks
