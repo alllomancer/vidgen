@@ -24,8 +24,9 @@ authorized_ssh_public_keys = [
 class Cloud:
     """What the fake commands answer. capacity: {(type, zone, "spot"|"on-demand")} that can launch."""
 
-    def __init__(self, capacity=(), queue=(0, 0), mirror=True, apply_fails=(), torch="2.9.0"):
+    def __init__(self, capacity=(), queue=(0, 0), mirror=True, apply_fails=(), torch="2.9.0", fresh=False):
         self.capacity, self.queue, self.mirror, self.apply_fails = set(capacity), queue, mirror, list(apply_fails)
+        self.fresh = fresh  # nothing deployed: no queue, no bucket
         self.launched, self.terminated, self.calls, self.applied = [], [], [], []
         self.root = tempfile.mkdtemp()
         os.makedirs(os.path.join(self.root, "terraform"))
@@ -63,11 +64,15 @@ class Cloud:
             return 0, "123456789012\n", ""
         if "sqs get-queue-url" in a:
             assert "ai-video-jobs" in a
+            if self.fresh:
+                return 254, "", "An error occurred (AWS.SimpleQueueService.NonExistentQueue) when calling the GetQueueUrl operation"
             return 0, "https://sqs/q\n", ""
         if "sqs get-queue-attributes" in a:
             return 0, f"{self.queue[0]}\t{self.queue[1]}\n", ""
         if "s3api list-objects-v2" in a:
             assert "ai-video-123456789012-us-east-1" in a
+            if self.fresh:
+                return 254, "", "An error occurred (NoSuchBucket) when calling the ListObjectsV2 operation"
             keys = ["models/bf16/Wan2.2-T2V-A14B-Diffusers/.mirror-manifest.json",
                     "models/bf16/Wan2.2-I2V-A14B-Diffusers/.mirror-manifest.json",
                     "models/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/.mirror-manifest.json",
@@ -130,6 +135,10 @@ assert code != 0 and "torch" in out and not c.launched, out
 c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, mirror=False)
 code, out = go(c)
 assert code == 0 and "mirror" in out and "Hugging Face" in out and c.applied == [("g7e.8xlarge", "us-east-1a", False)], out
+# nothing deployed (environment destroyed): stops before any probe and says to apply first
+c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, fresh=True)
+code, out = go(c)
+assert code != 0 and "make plan && make apply" in out and not c.launched and tfvars(c) == TFVARS, out
 # --force goes on although a job is queued
 c = Cloud(capacity={("g7e.8xlarge", "us-east-1a", "spot")}, queue=(1, 0))
 code, out = go(c, "--force")

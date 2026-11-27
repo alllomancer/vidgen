@@ -130,7 +130,14 @@ class Switch:
             problems.append(f"the worker's torch pin ({'.'.join(map(str, pin)) if pin else 'none'}) can't run on a "
                             f"g7e GPU: it needs torch >= {MIN_TORCH[0]}.{MIN_TORCH[1]} (worker/requirements.txt)")
         project = self.vars.get("project", "ai-video")
-        _, url, _ = self.aws("sqs", "get-queue-url", "--queue-name", f"{project}-jobs", "--query", "QueueUrl")
+        code, url, err = self.aws("sqs", "get-queue-url", "--queue-name", f"{project}-jobs", "--query", "QueueUrl",
+                                  check=False)
+        if code and "NonExistentQueue" not in err and "QueueDoesNotExist" not in err:
+            raise Stop(f"aws sqs get-queue-url failed: {err.strip()[:300]}")
+        if code:  # nothing deployed (or it was destroyed): probes need the project's security group from an apply
+            raise Stop("Nothing is deployed yet (no job queue). Run `make plan && make apply` first: it creates the "
+                       "stack (if the render box can't get capacity there, the rest is still created), then "
+                       "`make g7e` to put the render box on a g7e that launches.")
         _, counts, _ = self.aws("sqs", "get-queue-attributes", "--queue-url", url, "--attribute-names",
                                 "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "--query",
                                 "Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]")
@@ -139,8 +146,11 @@ class Switch:
             problems.append(f"a job is {'running' if running else 'queued'} ({queued} queued, {running} running): "
                             "replacing the box now would lose it")
         bucket = f"{project}-{account}-{self.region}"
-        _, keys, _ = self.aws("s3api", "list-objects-v2", "--bucket", bucket, "--prefix", "models/", "--query",
-                              "Contents[].Key")
+        code, keys, err = self.aws("s3api", "list-objects-v2", "--bucket", bucket, "--prefix", "models/", "--query",
+                                   "Contents[].Key", check=False)
+        if code and "NoSuchBucket" not in err:
+            raise Stop(f"aws s3api list-objects-v2 failed: {err.strip()[:300]}")
+        keys = "" if code else keys
         have = {k[len("models/"):-len("/.mirror-manifest.json")] for k in keys.split() if k.endswith("/.mirror-manifest.json")}
         need = [f"bf16/{self.vars[v].split('/')[-1]}" for v in ("video_model", "i2v_model") if v in self.vars]
         need += [f"hub/models--{self.vars[v].replace('/', '--')}" for v in ("vlm_model", "edit_model") if v in self.vars]
