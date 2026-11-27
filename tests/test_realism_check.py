@@ -13,6 +13,8 @@ import _stubs  # noqa: E402
 _stubs.install("worker")
 import realism_check as rc  # noqa: E402
 
+clean_screen = lambda paths: False  # noqa: E731 - the content filter finds nothing
+
 # ---- frame times
 assert rc.frame_times(8.0, 4) == [1.0, 3.0, 5.0, 7.0]  # 12.5 / 37.5 / 62.5 / 87.5 %
 assert rc.frame_times(12.0, 6) == [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
@@ -92,7 +94,7 @@ def judge(images, text):
 
 result = {"photo_1_key": "outputs/m/j/photo_1.png", "photo_2_key": "outputs/m/j/photo_2.png",
           "scenes": [{"photo": 1, "text": "in a cafe"}, {"photo": 2, "text": "on a beach"}]}
-out = rc.check("photos", {"look": "pro", "natural_skin": False}, result, tmp, download, judge)
+out = rc.check("photos", {"look": "pro", "natural_skin": False}, result, tmp, download, judge, screen=clean_screen)
 assert [len(i) for i, _ in asked] == [1, 1] and "in a cafe" in asked[0][1] and "on a beach" in asked[1][1]
 assert out["score"] == 6 and out["scenes"] == ["better scene 1", "better scene 2"], out
 assert out["photos"] == [{"photo": 1, "score": 4, "signs": ["sign 1"]}, {"photo": 2, "score": 6, "signs": ["sign 2"]}]
@@ -107,7 +109,7 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
     asked.clear()
     out = rc.check("video", {"prompt": "a boat", "look": "pro", "shot": "stream"}, {"video_key": "outputs/m/j/video.mp4"},
                    tempfile.mkdtemp(), download, lambda images, text: asked.append((images, text)) or
-                   '{"checks": {"background": 2, "polish": 2}, "signs": ["too clean"], "prompt": "a boat, shaky phone video"}')
+                   '{"checks": {"background": 2, "polish": 2}, "signs": ["too clean"], "prompt": "a boat, shaky phone video"}', screen=clean_screen)
     assert len(asked[0][0]) == 4 and all(os.path.getsize(p) > 0 for p in asked[0][0])
     assert '"shot": "stream"' in asked[0][1] and "a boat" in asked[0][1]
     assert out["score"] == 6 and out["signs"] == ["too clean"] and out["prompt"] == "a boat, shaky phone video", out
@@ -118,7 +120,11 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
     asked.clear()
     out = rc.check("video", {"prompt": "a boat"}, {"video_1_key": "outputs/m/j/video.mp4", "video_2_key": "outputs/m/j/video_2.mp4"},
                    tempfile.mkdtemp(), download, lambda images, text: asked.append(images) or
-                   json.dumps({"score": next(scores), "signs": ["s"], "prompt": "p"}))
+                   json.dumps({"score": next(scores), "signs": ["s"], "prompt": "p"}), screen=clean_screen)
+    seen_v = []
+    rc.check("video", {"prompt": "a boat"}, {"video_1_key": "outputs/m/j/video.mp4", "video_2_key": "outputs/m/j/video_2.mp4"},
+             tempfile.mkdtemp(), download, lambda images, text: '{"score": 1}', screen=lambda p: seen_v.append(len(p)) or False)
+    assert seen_v == [8], "4 frames of each of the 2 takes, screened together before judging"
     assert len(asked) == 2 and out["score"] == 8 and out["takes"] == [{"take": 1, "score": 3, "signs": ["s"]},
                                                                       {"take": 2, "score": 8, "signs": ["s"]}], out
     # a 2 s video with a longer audio track: frames still come from the picture
@@ -128,16 +134,16 @@ if shutil.which("ffmpeg") and shutil.which("ffprobe"):
     frames = rc.extract_frames(long_audio, 4, tempfile.mkdtemp(), "f")
     assert len(frames) == 4 and all(os.path.getsize(p) > 0 for p in frames)
     out = rc.check("story", {"look": "film"}, {"video_key": "outputs/m/j/video.mp4"}, tempfile.mkdtemp(), download,
-                   lambda images, text: asked.append((images, text)) or '{"score": 1, "prompt": "x"}')
+                   lambda images, text: asked.append((images, text)) or '{"score": 1, "prompt": "x"}', screen=clean_screen)
     assert len(asked[-1][0]) == 6 and "prompt" not in out and out["score"] == 1
 
 # ---- failures: never raised, the job keeps its result
-assert rc.check("photos", {}, {}, tmp, download, judge)["error"].startswith("the check failed")
-out = rc.check("photos", {}, result, tmp, download, lambda images, text: "I can't tell,\n  sorry")
+assert rc.check("photos", {}, {}, tmp, download, judge, screen=clean_screen)["error"].startswith("the check failed")
+out = rc.check("photos", {}, result, tmp, download, lambda images, text: "I can't tell,\n  sorry", screen=clean_screen)
 assert out == {"error": "the check couldn't read the model's answer", "checked": "photos", "note": rc.NOTE,
                "answer": "I can't tell, sorry"}, out
-assert len(rc.check("photos", {}, result, tmp, download, lambda images, text: "x" * 5000)["answer"]) == 400
-out = rc.check("video", {}, {"video_key": "outputs/m/j/nope.mp4"}, tmp, download, judge)
+assert len(rc.check("photos", {}, result, tmp, download, lambda images, text: "x" * 5000, screen=clean_screen)["answer"]) == 400
+out = rc.check("video", {}, {"video_key": "outputs/m/j/nope.mp4"}, tmp, download, judge, screen=clean_screen)
 assert out["error"].startswith("the check failed"), out
 
 
@@ -146,7 +152,8 @@ class JobCancelled(Exception):
 
 
 try:
-    rc.check("photos", {}, result, tmp, download, lambda images, text: (_ for _ in ()).throw(JobCancelled("cancelled")))
+    rc.check("photos", {}, result, tmp, download, lambda images, text: (_ for _ in ()).throw(JobCancelled("cancelled")),
+             screen=clean_screen)
     raise AssertionError("cancelling must stop the job")
 except JobCancelled:
     pass
@@ -161,5 +168,42 @@ worker = worker[:worker.index("\ndata \"aws_iam_policy_document\"", 1) if "\ndat
 reads_outputs = [b for b in re.findall(r"statement \{(.*?)\n  \}", worker, re.S)
                  if "/outputs/*" in b and '"s3:GetObject"' in b]
 assert reads_outputs, "the worker role must be allowed s3:GetObject on outputs/* (the AI-look check reads them back)"
+
+# ---- the prompt is quoted between lines, never in triple quotes (the model copied them into its JSON)
+assert '"""' not in rc.instruction("photo", "a woman in a cafe", {}) and "---\na woman in a cafe\n---" in rc.instruction(
+    "photo", "a woman in a cafe", {})
+tq = '```json { "checks": {"skin": 2, "hands": 1}, "signs": ["smooth skin"], "prompt": """A woman reads on a bed,\nwindow light from the left"""} ```'
+got = rc.clean(tq, "photo")
+assert got["score"] == 4 and got["prompt"].startswith("A woman reads on a bed") and "window light" in got["prompt"], got
+cut_tq = '{"checks": {"skin": 1}, "signs": ["x"], "prompt": """Ja is lying on the bed holding a small book'
+assert rc.clean(cut_tq, "photo")["prompt"] == "Ja is lying on the bed holding a small book"
+
+# ---- sexual content is never critiqued: screened before the model sees anything
+asked.clear()
+for params, res, screen in [({"prompt": "she is naked on the bed"}, result, clean_screen),
+                            ({}, dict(result, scenes=[{"photo": 1, "text": "topless on a beach"}]), clean_screen),
+                            ({"prompt": "a cafe"}, result, lambda paths: True)]:
+    out = rc.check("photos", params, res, tempfile.mkdtemp(), download, judge, screen=screen)
+    assert out == {"skipped": rc.SKIPPED, "checked": "photos", "note": rc.NOTE}, out
+assert not asked, "the model was never asked"
+# the filter itself failing: skipped too (fail closed)
+def broken(paths):
+    raise RuntimeError("filter missing")
+out = rc.check("photos", {}, result, tempfile.mkdtemp(), download, judge, screen=broken)
+assert out["skipped"].startswith("skipped: the content filter couldn't run") and not asked, out
+# the screen sees every picture: all photos, and every frame of every take
+seen = []
+rc.check("photos", {}, result, tempfile.mkdtemp(), download, judge, screen=lambda paths: seen.append(len(paths)) or False)
+assert seen == [2], seen
+# a rewrite that turns out sexual is dropped: skipped
+out = rc.check("photos", {}, result, tempfile.mkdtemp(), download,
+               lambda images, text: '{"checks": {"skin": 1}, "signs": ["x"], "prompt": "make him nude"}', screen=clean_screen)
+assert out["skipped"] == rc.SKIPPED, out
+# no filter given: a programming error, not a silent unscreened check
+try:
+    rc.check("photos", {}, result, tmp, download, judge)
+    raise AssertionError("screen is required")
+except ValueError:
+    pass
 
 print("test_realism_check: ok")

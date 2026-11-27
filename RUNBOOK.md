@@ -404,7 +404,7 @@ Tick **Check how AI it looks** in the Video, Photos or Story form (dashboard or 
 
 **Use suggestion** (in the badge's details on the Mac, on the job's screen on the phone) puts the suggested prompt (or scenes) into the Create form; nothing renders until you send it, and your settings stay as they are. The watcher logs the verdict and saves it as `realism.json` next to the files.
 
-It adds about 1-2 minutes (the vision model is loaded after the render). It's a critique of what's visible by a general vision model, not an AI detector: the score varies between runs, and the giveaways are the useful part. If the check fails, the job is still done and the badge says why.
+It doesn't critique sexual images: when the prompt or the content filter (the one Krea photos use) finds sexual content, the check is skipped and says so; the render is unaffected. It adds about 1-2 minutes (the vision model is loaded after the render). It's a critique of what's visible by a general vision model, not an AI detector: the score varies between runs, and the giveaways are the useful part. If the check fails, the job is still done and the badge says why.
 
 ### Phone (Android)
 

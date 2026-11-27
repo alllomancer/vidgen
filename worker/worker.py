@@ -1399,7 +1399,8 @@ def process(job_id, receipt):
         if params.get("realism_check") and job["type"] in realism_check.TYPES and not params.get("plan_only"):
             result["realism"] = realism_check.check(
                 job["type"], params, result, workdir, download=lambda key, path: s3.download_file(BUCKET, key, path),
-                judge=models.judge_realism, progress=lambda msg: progress(job_id, msg))
+                judge=models.judge_realism, progress=lambda msg: progress(job_id, msg),
+                screen=lambda paths: any(krea.flagged(x) for x in krea.score_images(paths)))
             log(event="realism_check", job_id=job_id, score=result["realism"].get("score"),
                 error=result["realism"].get("error"), answer=result["realism"].get("answer"))
         if params.get("loras"):

@@ -113,7 +113,7 @@ def instruction(kind, prompt, current):
     what = {"photo": "this photo", "video": "these frames from one video clip, in order",
             "story": "these frames from a short film, in order"}[kind]
     medium = "photo" if kind == "photo" else "video"
-    asked = f'It was generated from this prompt:\n"""{prompt}"""\n' if prompt else ""
+    asked = f"It was generated from this prompt (between the lines):\n---\n{prompt}\n---\n" if prompt else ""
     rewrite = (
         '"prompt": the prompt rewritten so the next ' + medium + " looks like real, unretouched "
         + ("photography" if kind == "photo" else "footage") + ". Keep the same subject, place, action and mood. Fix "
@@ -154,8 +154,8 @@ REPAIRS = ("", "}", "\"}", "]}", "\"]}", "}}", "\"}}", "\"]}}")
 def _json_object(text):
     """The first JSON object in the model's answer: inside ```json fences or plain, with text around it, or cut off
     at the end (closed again)."""
-    text = re.sub(r"```(?:json)?", "", text or "")
-    decoder = json.JSONDecoder()
+    text = re.sub(r"```(?:json)?", "", text or "").replace('"""', '"')
+    decoder = json.JSONDecoder(strict=False)  # a newline inside a string is fine here
     for start in [m.start() for m in re.finditer(r"\{", text)]:
         for end in REPAIRS:
             try:
@@ -210,11 +210,42 @@ def current_settings(params, kind):
     return out
 
 
-def check(job_type, params, result, workdir, download, judge, progress=lambda msg: None):
-    """result.realism for a finished job. download(key, path) fetches an output; judge(images, text) asks the VLM.
-    Never raises (except cancellation, which judge raises): a failed check is {"error": ...}."""
+# The check doesn't critique sexual images: it would be making explicit images of real people (avatars are real
+# people) look more real. A prompt with these words, or a frame the content filter flags, skips it.
+SEXUAL_WORDS = re.compile(r"\b(?:naked|nude|nudity|topless|bottomless|undress\w*|penis|cock|dick|erect\w*|vagina|vulva|"
+                          r"pussy|clit\w*|genital\w*|nipples?|breasts? (?:out|bare|exposed)|sex|sexual|porn\w*|"
+                          r"orgasm\w*|masturbat\w*|cum|semen|ejaculat\w*|blowjob|intercourse|explicit)\b", re.I)
+SKIPPED = "skipped: the AI-look check doesn't critique sexual images"
+
+
+class Skip(Exception):
+    """Not checked, on purpose."""
+
+
+def _screen(texts, paths, screen):
+    """Skip when the prompt or the pictures are sexual; when the content filter can't run, skip too (fail closed)."""
+    if any(SEXUAL_WORDS.search(t or "") for t in texts):
+        raise Skip(SKIPPED)
     try:
-        return _check(job_type, params, result, workdir, download, judge, progress)
+        explicit = screen(paths)
+    except Exception as e:  # noqa: BLE001 - no filter, no critique
+        if type(e).__name__ == "JobCancelled":
+            raise
+        raise Skip(f"skipped: the content filter couldn't run ({str(e)[:120]})")
+    if explicit:
+        raise Skip(SKIPPED)
+
+
+def check(job_type, params, result, workdir, download, judge, progress=lambda msg: None, screen=None):
+    """result.realism for a finished job. download(key, path) fetches an output; judge(images, text) asks the VLM;
+    screen(paths) -> True when any picture is sexual (the content filter). Never raises (except cancellation): a
+    failed check is {"error": ...}, a screened-out one {"skipped": ...}."""
+    if screen is None:
+        raise ValueError("check() needs the content filter (screen)")
+    try:
+        return _check(job_type, params, result, workdir, download, judge, progress, screen)
+    except Skip as e:
+        return {"skipped": str(e), "checked": job_type, "note": NOTE}
     except Exception as e:  # noqa: BLE001 - the render is done; the check is extra
         if type(e).__name__ == "JobCancelled":
             raise
@@ -226,10 +257,18 @@ def check(job_type, params, result, workdir, download, judge, progress=lambda ms
         return {"error": f"the check failed: {str(e)[:200]}", "checked": job_type, "note": NOTE}
 
 
-def _check(job_type, params, result, workdir, download, judge, progress):
+def _judge(images, text, kind, judge):
+    verdict = clean(judge(images, text), kind)
+    if SEXUAL_WORDS.search(verdict.get("prompt") or ""):  # the rewrite turned out sexual: no critique
+        raise Skip(SKIPPED)
+    return verdict
+
+
+def _check(job_type, params, result, workdir, download, judge, progress, screen):
     folder = os.path.join(workdir, "realism")
     os.makedirs(folder, exist_ok=True)
     progress("checking how AI it looks")
+    asked = [params.get(k) for k in ("prompt", "story", "style") if isinstance(params.get(k), str)]
     if job_type == "photos":
         per = []
         scenes = {s.get("photo"): s.get("text", "") for s in result.get("scenes") or []}
@@ -237,12 +276,15 @@ def _check(job_type, params, result, workdir, download, judge, progress):
                        if (m := re.fullmatch(r"photo_(\d+)_key", k))), key=lambda kv: kv[0])
         if not keys:
             raise RuntimeError("no photos to check")
+        paths = {}
         for n, key in keys:
+            paths[n] = os.path.join(folder, f"photo_{n}.png")
+            download(key, paths[n])
+        _screen(asked + list(scenes.values()), list(paths.values()), screen)  # before the model sees anything
+        for n, _ in keys:
             progress(f"checking how AI it looks: photo {n}/{len(keys)}")
-            path = os.path.join(folder, f"photo_{n}.png")
-            download(key, path)
             scene = scenes.get(n, "")
-            verdict = clean(judge([path], instruction("photo", scene, current_settings(params, "photos"))), "photo")
+            verdict = _judge([paths[n]], instruction("photo", scene, current_settings(params, "photos")), "photo", judge)
             per.append({"photo": n, "score": verdict["score"], "signs": verdict["signs"],
                         "scene": verdict.get("prompt", scene)})
         out = aggregate_photos(per)
@@ -255,15 +297,18 @@ def _check(job_type, params, result, workdir, download, judge, progress):
         if not takes:
             raise RuntimeError("no video to check")
         prompt = params.get("prompt") if job_type == "video" else None
-        verdicts = []
+        frames = {}
         for n, key in takes:
-            if len(takes) > 1:
-                progress(f"checking how AI it looks: take {n}/{len(takes)}")
             video = os.path.join(folder, f"video_{n}.mp4")
             download(key, video)
-            frames = extract_frames(video, FRAMES[job_type], folder, f"frame_{n}")
-            verdicts.append(clean(judge(frames, instruction(job_type, prompt, current_settings(params, job_type))),
-                                  job_type))
+            frames[n] = extract_frames(video, FRAMES[job_type], folder, f"frame_{n}")
+        _screen(asked, [p for fs in frames.values() for p in fs], screen)  # before the model sees anything
+        verdicts = []
+        for n, _ in takes:
+            if len(takes) > 1:
+                progress(f"checking how AI it looks: take {n}/{len(takes)}")
+            verdicts.append(_judge(frames[n], instruction(job_type, prompt, current_settings(params, job_type)),
+                                   job_type, judge))
         out = max(verdicts, key=lambda v: v["score"])  # the worst take's verdict and suggestion
         if len(takes) > 1:
             out = dict(out, takes=[{"take": n, "score": v["score"], "signs": v["signs"]} for (n, _), v in zip(takes, verdicts)])

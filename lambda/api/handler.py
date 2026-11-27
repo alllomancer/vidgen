@@ -2612,8 +2612,9 @@ def _realism_summary_of(item):
     if isinstance(realism.get("score"), int) and not isinstance(realism["score"], bool):
         signs = [str(x)[:80] for x in realism.get("signs") or [] if isinstance(x, str)][:5]
         return {"score": max(0, min(10, realism["score"])), "signs": signs}
-    if isinstance(realism.get("error"), str):
-        return {"error": realism["error"][:300]}
+    for k in ("error", "skipped"):
+        if isinstance(realism.get(k), str):
+            return {k: realism[k][:300]}
     return None
 
 

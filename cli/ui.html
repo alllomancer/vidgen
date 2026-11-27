@@ -873,6 +873,7 @@ function realismLevel(score) { return score <= 3 ? "low" : score <= 6 ? "mid" : 
 function realismBadge(j) {
   const r = j.realism;
   if (!r) return "";
+  if (r.skipped) return `<div class="sub">AI-look check ${esc(r.skipped)}</div>`;
   if (typeof r.score !== "number") return `<div class="sub">AI-look check: ${esc(r.error || "no verdict")}
     <button class="small" data-realism="${esc(j.job_id)}" aria-label="Show what the AI-look check got">Details</button></div>`;
   const words = {low: "looks real", mid: "some giveaways", high: "looks AI-made"}[realismLevel(r.score)];

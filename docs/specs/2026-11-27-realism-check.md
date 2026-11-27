@@ -122,3 +122,15 @@ After the first real runs the user found the suggestions weak and the score alwa
   face, text, light, background, colour, symmetry, physics, polish (`CHECKS`); the score is 3 per clear plus 1 per
   slight, up to 10 (`score_from_checks`), and `result.realism.checks` keeps the ratings. A holistic 0-10 answer
   from a 7B vision model sat at 7 almost every time. An answer with only a `score` still reads.
+
+## Update: sexual content is not critiqued; prompt quoting (2026-11-27)
+
+- The check never critiques sexual images: avatars are real people, and the check exists to make results look more
+  real. Before the model sees anything, the job's prompt/story/scenes are matched against `SEXUAL_WORDS` and every
+  checked picture (all photos; every extracted frame of every take) goes through the content filter
+  (`krea.score_images`, the same filter and threshold as Krea images, on the CPU). Either one, a rewrite that comes
+  back sexual, or a filter that can't run (fail closed) gives `result.realism = {"skipped": "...", "checked", "note"}`
+  with no score and no suggestion; the render itself is untouched. `GET /jobs` lists `{skipped}`; the UIs say the
+  check was skipped. Agreed with the user in conversation.
+- The original prompt is quoted between `---` lines (it was in `"""`, which the model copied into its JSON); a
+  `"""`-quoted string in an answer still reads, and raw newlines inside strings are allowed.

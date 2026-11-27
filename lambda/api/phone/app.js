@@ -236,6 +236,7 @@ function realismLevel(score) {
 
 function realismBadge(r) {
   if (!r || typeof r !== "object") return null;
+  if (r.skipped) return el("div", { class: "sub" }, `AI-look check ${String(r.skipped)}`);
   if (typeof r.score !== "number") return el("div", { class: "sub" }, `AI-look check: ${String(r.error || "no verdict")}`);
   const words = { low: "looks real", mid: "some giveaways", high: "looks AI-made" }[realismLevel(r.score)];
   return el("span", { class: `badge r-${realismLevel(r.score)}` }, `AI look ${Number(r.score)}/10 · ${words}`);
@@ -246,6 +247,7 @@ function showVerdict(job) {
   const r = job.result && job.result.realism && typeof job.result.realism === "object" ? job.result.realism : null;
   if (!r) { box.hidden = true; box.replaceChildren(); return; }
   const parts = [el("h3", {}, typeof r.score === "number" ? `AI look ${Number(r.score)}/10` : "AI-look check")];
+  if (r.skipped) parts.push(el("p", { class: "sub" }, `Not checked: ${String(r.skipped).replace(/^skipped: /, "")}`));
   if (r.error) parts.push(el("p", { class: "err" }, String(r.error)));
   if (typeof r.answer === "string" && r.answer) parts.push(el("p", { class: "sub" }, `The model said: ${r.answer}`));
   const signs = Array.isArray(r.signs) ? r.signs.filter((x) => typeof x === "string") : [];
